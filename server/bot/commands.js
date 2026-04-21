@@ -5,6 +5,12 @@ const {
 
 const commands = [
   new SlashCommandBuilder()
+    .setName("locker-overview")
+    .setDescription("Pokazuje elegancki przegląd statusu systemu SafeKeys.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
     .setName("locker-generate")
     .setDescription("Generuje nowy kod dostępu do skrytki.")
     .addIntegerOption(option =>
@@ -42,6 +48,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName("locker-codes")
     .setDescription("Pokazuje listę aktywnych kodów.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName("locker-logs")
+    .setDescription("Pokazuje ostatnie zdarzenia systemowe.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false),
 

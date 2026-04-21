@@ -1,62 +1,351 @@
 const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  ModalBuilder,
   REST,
+  TextInputBuilder,
+  TextInputStyle,
   Routes
 } = require("discord.js");
 
 const { commandPayloads } = require("./commands");
 
-function getNotificationColor(event) {
-  switch (event) {
-    case "LOCKER_OPENED":
-    case "KEY_RETURNED":
-      return 0x22c55e;
-    case "INVALID_CODE":
-      return 0xef4444;
-    case "CODE_DEACTIVATED":
-    case "KEY_REMOVED":
-      return 0xf59e0b;
-    default:
-      return 0x3b82f6;
+const CUSTOM_IDS = {
+  OVERVIEW: "safekeys:overview",
+  STATUS: "safekeys:status",
+  CODES: "safekeys:codes",
+  LOGS: "safekeys:logs",
+  DEACTIVATE: "safekeys:deactivate",
+  CLEAR_LOGS: "safekeys:clear-logs",
+  DEACTIVATE_MODAL: "safekeys:deactivate-modal",
+  DEACTIVATE_CODE_INPUT: "safekeys:deactivate-code-input"
+};
+
+const BRAND = {
+  name: "SafeKeys Control",
+  accent: 0x2563eb,
+  success: 0x16a34a,
+  danger: 0xdc2626,
+  warning: 0xea580c,
+  neutral: 0x0f172a
+};
+
+const EVENT_META = {
+  LOCKER_OPENED: {
+    color: BRAND.success,
+    label: "Skrytka otwarta",
+    emoji: "🔓"
+  },
+  INVALID_CODE: {
+    color: BRAND.danger,
+    label: "Bledny kod",
+    emoji: "🚫"
+  },
+  CODE_GENERATED: {
+    color: BRAND.accent,
+    label: "Kod wygenerowany",
+    emoji: "✨"
+  },
+  CODE_DEACTIVATED: {
+    color: BRAND.warning,
+    label: "Kod dezaktywowany",
+    emoji: "🛑"
+  },
+  KEY_REMOVED: {
+    color: BRAND.warning,
+    label: "Klucz odebrany",
+    emoji: "🗝️"
+  },
+  KEY_RETURNED: {
+    color: BRAND.success,
+    label: "Klucz zwrocony",
+    emoji: "📥"
+  },
+  LOGS_CLEARED: {
+    color: BRAND.warning,
+    label: "Logi wyczyszczone",
+    emoji: "🧹"
   }
+};
+
+function getEventMeta(event) {
+  return EVENT_META[event] || {
+    color: BRAND.accent,
+    label: "Zdarzenie systemowe",
+    emoji: "📡"
+  };
+}
+
+function formatDate(value) {
+  return new Date(value).toLocaleString("pl-PL", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+}
+
+function formatRelativeExpiry(value) {
+  const diffMs = new Date(value).getTime() - Date.now();
+  const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
+
+  if (diffMinutes < 60) {
+    return `${diffMinutes} min`;
+  }
+
+  const hours = Math.floor(diffMinutes / 60);
+  const minutes = diffMinutes % 60;
+  return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
 }
 
 function getLogText(log) {
   switch (log.event) {
     case "LOCKER_OPENED":
-      return `Skrytka S${log.locker} została otwarta kodem \`${log.code}\`.`;
+      return `Skrytka S${log.locker} zostala otwarta kodem \`${log.code}\`.`;
     case "INVALID_CODE":
-      return `Wprowadzono nieprawidłowy kod \`${log.code}\`.`;
+      return `Wprowadzono nieprawidlowy kod \`${log.code}\`.`;
     case "CODE_GENERATED":
-      return `Wygenerowano kod \`${log.code}\` dla skrytki S${log.locker}.`;
+      return `Wygenerowano nowy kod \`${log.code}\` dla skrytki S${log.locker}.`;
     case "CODE_DEACTIVATED":
-      return `Dezaktywowano kod \`${log.code}\` dla skrytki S${log.locker}.`;
+      return `Kod \`${log.code}\` dla skrytki S${log.locker} zostal dezaktywowany.`;
     case "KEY_REMOVED":
-      return `Klucz został wyjęty ze skrytki S${log.locker}.`;
+      return `Klucz zostal wyjety ze skrytki S${log.locker}.`;
     case "KEY_RETURNED":
-      return `Klucz został zwrócony do skrytki S${log.locker}.`;
+      return `Klucz zostal zwrocony do skrytki S${log.locker}.`;
     default:
-      return "Wystąpiło nowe zdarzenie w systemie.";
+      return "W systemie pojawilo sie nowe zdarzenie.";
   }
 }
 
+function buildBaseEmbed(title, color = BRAND.accent) {
+  return new EmbedBuilder()
+    .setColor(color)
+    .setAuthor({ name: BRAND.name })
+    .setTitle(title)
+    .setTimestamp(new Date());
+}
+
 function buildLogEmbed(log) {
-  const embed = new EmbedBuilder()
-    .setColor(getNotificationColor(log.event))
-    .setTitle(`LIVE: ${log.event}`)
+  const meta = getEventMeta(log.event);
+  const embed = buildBaseEmbed(`${meta.emoji} ${meta.label}`, meta.color)
     .setDescription(getLogText(log))
     .setTimestamp(new Date(log.timestamp || Date.now()));
 
-  if (log.source || log.actor) {
-    embed.addFields({
-      name: "Źródło",
-      value: `${log.source || "system"}${log.actor ? ` • ${log.actor}` : ""}`
+  const fields = [];
+
+  if (log.locker) {
+    fields.push({
+      name: "Skrytka",
+      value: `S${log.locker}`,
+      inline: true
     });
   }
 
+  if (log.code) {
+    fields.push({
+      name: "Kod",
+      value: `\`${log.code}\``,
+      inline: true
+    });
+  }
+
+  fields.push({
+    name: "Zrodlo",
+    value: `${log.source || "system"}${log.actor ? ` • ${log.actor}` : ""}`,
+    inline: false
+  });
+
+  embed.addFields(fields);
   return embed;
+}
+
+function buildSuccessEmbed(title, description) {
+  return buildBaseEmbed(title, BRAND.success).setDescription(description);
+}
+
+function buildErrorEmbed(description) {
+  return buildBaseEmbed("Problem z wykonaniem komendy", BRAND.danger)
+    .setDescription(description);
+}
+
+function formatActiveCodes(codes) {
+  if (codes.length === 0) {
+    return "Brak aktywnych kodow w tej chwili.";
+  }
+
+  return codes
+    .map(code => [
+      `\`${code.code}\` • skrytka S${code.locker}`,
+      `wygasa: ${formatDate(code.expiresAt)}`,
+      `pozostalo: ${formatRelativeExpiry(code.expiresAt)}`
+    ].join("\n"))
+    .join("\n\n");
+}
+
+function formatLockerStatus(lockers) {
+  return lockers
+    .map(locker => {
+      const state = locker.hasTag ? "klucz obecny" : "klucza brak";
+      const badge = locker.hasTag ? "🟢" : "🔴";
+      return `${badge} S${locker.locker} • ${state}`;
+    })
+    .join("\n");
+}
+
+function formatRecentLogs(logs) {
+  if (logs.length === 0) {
+    return "Brak zdarzen do wyswietlenia.";
+  }
+
+  return logs
+    .slice(0, 8)
+    .map(log => {
+      const meta = getEventMeta(log.event);
+      return `${meta.emoji} ${meta.label} • ${formatDate(log.timestamp)}${log.locker ? ` • S${log.locker}` : ""}${log.code ? ` • \`${log.code}\`` : ""}`;
+    })
+    .join("\n");
+}
+
+function buildOverviewEmbed(lockers, codes, logs) {
+  const occupiedCount = lockers.filter(locker => locker.hasTag).length;
+  const availableCount = lockers.length - occupiedCount;
+  const nearestExpiry = codes[0];
+
+  const embed = buildBaseEmbed("Centrum operacyjne SafeKeys", BRAND.accent)
+    .setDescription("Szybki podglad na status skrytek, aktywne kody i ostatnie zdarzenia.")
+    .addFields(
+      {
+        name: "Skrytki",
+        value: `W systemie: **${lockers.length}**\nKlucz obecny: **${occupiedCount}**\nBrak klucza: **${availableCount}**`,
+        inline: true
+      },
+      {
+        name: "Aktywne kody",
+        value: `Liczba kodow: **${codes.length}**${nearestExpiry ? `\nNajblizsze wygasniecie: **${formatRelativeExpiry(nearestExpiry.expiresAt)}**` : "\nBrak aktywnych kodow"}`,
+        inline: true
+      },
+      {
+        name: "Status operacyjny",
+        value: occupiedCount === lockers.length ? "Wszystkie klucze sa na miejscu." : "Czesc skrytek wymaga uwagi.",
+        inline: false
+      },
+      {
+        name: "Mapa skrytek",
+        value: formatLockerStatus(lockers),
+        inline: false
+      },
+      {
+        name: "Ostatnie zdarzenia",
+        value: formatRecentLogs(logs),
+        inline: false
+      }
+    );
+
+  return embed;
+}
+
+function buildCodesEmbed(codes) {
+  return buildBaseEmbed("Aktywne kody dostepu", BRAND.accent)
+    .setDescription(formatActiveCodes(codes))
+    .setFooter({ text: `Aktywnych kodow: ${codes.length}` });
+}
+
+function buildStatusEmbed(lockers) {
+  const ready = lockers.every(locker => locker.hasTag);
+
+  return buildBaseEmbed("Status skrytek", ready ? BRAND.success : BRAND.warning)
+    .setDescription(formatLockerStatus(lockers))
+    .setFooter({
+      text: ready ? "Wszystkie klucze sa obecne." : "Wykryto skrytki bez klucza."
+    });
+}
+
+function buildLogsEmbed(logs) {
+  return buildBaseEmbed("Ostatnie zdarzenia SafeKeys", BRAND.neutral)
+    .setDescription(formatRecentLogs(logs))
+    .setFooter({ text: `Pokazano ${Math.min(logs.length, 8)} z ${logs.length} zdarzen` });
+}
+
+function buildDashboardComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.OVERVIEW)
+        .setLabel("Overview")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.STATUS)
+        .setLabel("Skrytki")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.CODES)
+        .setLabel("Kody")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.LOGS)
+        .setLabel("Logi")
+        .setStyle(ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.DEACTIVATE)
+        .setLabel("Dezaktywuj kod")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.CLEAR_LOGS)
+        .setLabel("Wyczysc logi")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  ];
+}
+
+function buildDeactivateModal() {
+  return new ModalBuilder()
+    .setCustomId(CUSTOM_IDS.DEACTIVATE_MODAL)
+    .setTitle("Dezaktywacja kodu")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(CUSTOM_IDS.DEACTIVATE_CODE_INPUT)
+          .setLabel("4-cyfrowy kod")
+          .setPlaceholder("np. 4821")
+          .setMinLength(4)
+          .setMaxLength(4)
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short)
+      )
+    );
+}
+
+async function fetchDashboardData(lockerService) {
+  const [lockers, codes, logs] = await Promise.all([
+    lockerService.getLockers(),
+    lockerService.getActiveCodes(),
+    lockerService.getLogs()
+  ]);
+
+  return { lockers, codes, logs };
+}
+
+function getActor(interaction) {
+  return `${interaction.user.tag} (${interaction.user.id})`;
+}
+
+async function buildDashboardResponse(lockerService, view) {
+  const { lockers, codes, logs } = await fetchDashboardData(lockerService);
+
+  switch (view) {
+    case CUSTOM_IDS.STATUS:
+      return buildStatusEmbed(lockers);
+    case CUSTOM_IDS.CODES:
+      return buildCodesEmbed(codes);
+    case CUSTOM_IDS.LOGS:
+      return buildLogsEmbed(logs);
+    default:
+      return buildOverviewEmbed(lockers, codes, logs);
+  }
 }
 
 async function registerCommands(config) {
@@ -77,20 +366,20 @@ async function registerCommands(config) {
   return "global";
 }
 
-function formatActiveCodes(codes) {
-  if (codes.length === 0) {
-    return "Brak aktywnych kodów.";
+async function resolveNotificationsChannel(client, channelId) {
+  if (!channelId) {
+    return null;
   }
 
-  return codes
-    .map(code => `• \`${code.code}\` • S${code.locker} • do ${new Date(code.expiresAt).toLocaleString("pl-PL")}`)
-    .join("\n");
+  return client.channels.fetch(channelId).catch(() => null);
 }
 
-function formatLockers(lockers) {
-  return lockers
-    .map(locker => `• S${locker.locker}: ${locker.hasTag ? "tag obecny" : "brak tagu"}`)
-    .join("\n");
+async function replyWithEmbed(interaction, embed, options = {}) {
+  await interaction.reply({
+    embeds: [embed],
+    ephemeral: true,
+    ...options
+  });
 }
 
 async function createDiscordBot(config, lockerService) {
@@ -104,24 +393,96 @@ async function createDiscordBot(config, lockerService) {
 
   let notificationsChannel = null;
 
-  client.once("ready", async readyClient => {
+  client.once("clientReady", async readyClient => {
     const scope = await registerCommands(config);
-    if (config.notificationsChannelId) {
-      notificationsChannel = await readyClient.channels.fetch(config.notificationsChannelId).catch(() => null);
-    }
-
+    notificationsChannel = await resolveNotificationsChannel(readyClient, config.notificationsChannelId);
     console.log(`Discord bot zalogowany jako ${readyClient.user.tag} (${scope} commands).`);
   });
 
   client.on("interactionCreate", async interaction => {
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
-
-    const actor = `${interaction.user.tag} (${interaction.user.id})`;
-
     try {
+      if (interaction.isButton()) {
+        switch (interaction.customId) {
+          case CUSTOM_IDS.OVERVIEW:
+          case CUSTOM_IDS.STATUS:
+          case CUSTOM_IDS.CODES:
+          case CUSTOM_IDS.LOGS: {
+            const embed = await buildDashboardResponse(lockerService, interaction.customId);
+            await interaction.update({
+              embeds: [embed],
+              components: buildDashboardComponents()
+            });
+            return;
+          }
+
+          case CUSTOM_IDS.DEACTIVATE: {
+            await interaction.showModal(buildDeactivateModal());
+            return;
+          }
+
+          case CUSTOM_IDS.CLEAR_LOGS: {
+            await lockerService.clearLogs({
+              source: "discord",
+              actor: getActor(interaction)
+            });
+
+            await interaction.update({
+              embeds: [
+                buildSuccessEmbed(
+                  "Logi wyczyszczone",
+                  "Historia zdarzen zostala usunieta z panelu operacyjnego."
+                )
+              ],
+              components: buildDashboardComponents()
+            });
+            return;
+          }
+
+          default:
+            return;
+        }
+      }
+
+      if (interaction.isModalSubmit()) {
+        if (interaction.customId !== CUSTOM_IDS.DEACTIVATE_MODAL) {
+          return;
+        }
+
+        const code = interaction.fields.getTextInputValue(CUSTOM_IDS.DEACTIVATE_CODE_INPUT).trim();
+
+        await lockerService.deactivateCode(code, {
+          source: "discord",
+          actor: getActor(interaction)
+        });
+
+        await interaction.reply({
+          embeds: [
+            buildSuccessEmbed(
+              "Kod dezaktywowany",
+              `Kod \`${code}\` zostal bezpiecznie dezaktywowany.`
+            )
+          ],
+          components: buildDashboardComponents(),
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (!interaction.isChatInputCommand()) {
+        return;
+      }
+
+      const actor = getActor(interaction);
+
       switch (interaction.commandName) {
+        case "locker-overview": {
+          const embed = await buildDashboardResponse(lockerService, CUSTOM_IDS.OVERVIEW);
+          await replyWithEmbed(interaction, embed, {
+            components: buildDashboardComponents()
+          });
+          break;
+        }
+
         case "locker-generate": {
           const locker = interaction.options.getInteger("skrytka", true);
           const hours = interaction.options.getInteger("godziny", true);
@@ -130,37 +491,51 @@ async function createDiscordBot(config, lockerService) {
             actor
           });
 
-          await interaction.reply({
-            content: `Wygenerowano kod \`${result.code}\` dla skrytki S${locker}. Ważny do ${new Date(result.expiresAt).toLocaleString("pl-PL")}.`,
-            ephemeral: true
-          });
+          const embed = buildSuccessEmbed(
+            "Kod dostepu gotowy",
+            `Wygenerowano kod \`${result.code}\` dla skrytki **S${locker}**.`
+          ).addFields(
+            {
+              name: "Waznosc",
+              value: `${hours} h`,
+              inline: true
+            },
+            {
+              name: "Wygasa",
+              value: formatDate(result.expiresAt),
+              inline: true
+            },
+            {
+              name: "Pozostalo",
+              value: formatRelativeExpiry(result.expiresAt),
+              inline: true
+            }
+          );
+
+          await replyWithEmbed(interaction, embed);
           break;
         }
 
         case "locker-status": {
           const lockers = await lockerService.getLockers();
-          await interaction.reply({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x3b82f6)
-                .setTitle("Status skrytek")
-                .setDescription(formatLockers(lockers))
-            ],
-            ephemeral: true
+          await replyWithEmbed(interaction, buildStatusEmbed(lockers), {
+            components: buildDashboardComponents()
           });
           break;
         }
 
         case "locker-codes": {
           const codes = await lockerService.getActiveCodes();
-          await interaction.reply({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x3b82f6)
-                .setTitle("Aktywne kody")
-                .setDescription(formatActiveCodes(codes))
-            ],
-            ephemeral: true
+          await replyWithEmbed(interaction, buildCodesEmbed(codes), {
+            components: buildDashboardComponents()
+          });
+          break;
+        }
+
+        case "locker-logs": {
+          const logs = await lockerService.getLogs();
+          await replyWithEmbed(interaction, buildLogsEmbed(logs), {
+            components: buildDashboardComponents()
           });
           break;
         }
@@ -172,10 +547,13 @@ async function createDiscordBot(config, lockerService) {
             actor
           });
 
-          await interaction.reply({
-            content: `Kod \`${code}\` został dezaktywowany.`,
-            ephemeral: true
-          });
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Kod dezaktywowany",
+              `Kod \`${code}\` zostal bezpiecznie dezaktywowany.`
+            )
+          );
           break;
         }
 
@@ -185,22 +563,26 @@ async function createDiscordBot(config, lockerService) {
             actor
           });
 
-          await interaction.reply({
-            content: "Logi zostały wyczyszczone.",
-            ephemeral: true
-          });
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Logi wyczyszczone",
+              "Historia zdarzen zostala usunieta z panelu operacyjnego."
+            )
+          );
           break;
         }
       }
     } catch (error) {
       const message = error.status && error.status < 500
         ? error.message
-        : "Nie udało się wykonać komendy.";
+        : "Nie udalo sie wykonac komendy. Sprobuj ponownie za chwile.";
+      const embed = buildErrorEmbed(message);
 
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: message, ephemeral: true }).catch(() => {});
+        await interaction.followUp({ embeds: [embed], ephemeral: true }).catch(() => {});
       } else {
-        await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+        await interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
       }
     }
   });
@@ -211,7 +593,7 @@ async function createDiscordBot(config, lockerService) {
     }
 
     notificationsChannel.send({ embeds: [buildLogEmbed(log)] }).catch(error => {
-      console.error("Nie udało się wysłać powiadomienia Discord.", error);
+      console.error("Nie udalo sie wyslac powiadomienia Discord.", error);
     });
   });
 
@@ -222,18 +604,15 @@ async function createDiscordBot(config, lockerService) {
 
     notificationsChannel.send({
       embeds: [
-        new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setTitle("LIVE: LOGS_CLEARED")
-          .setDescription("Logi systemowe zostały wyczyszczone.")
+        buildBaseEmbed("🧹 Logi wyczyszczone", BRAND.warning)
+          .setDescription("Historia zdarzen systemowych zostala wyczyszczona.")
           .addFields({
-            name: "Źródło",
+            name: "Zrodlo",
             value: `${payload.source || "system"}${payload.actor ? ` • ${payload.actor}` : ""}`
           })
-          .setTimestamp(new Date())
       ]
     }).catch(error => {
-      console.error("Nie udało się wysłać powiadomienia o czyszczeniu logów.", error);
+      console.error("Nie udalo sie wyslac powiadomienia o czyszczeniu logow.", error);
     });
   });
 
