@@ -19,6 +19,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 const MONGODB_URI = process.env.MONGODB_URI;
 const SESSION_SECRET = process.env.SESSION_SECRET;
+const DEVICE_API_KEY = process.env.DEVICE_API_KEY;
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
@@ -93,6 +94,20 @@ function asyncHandler(handler) {
   };
 }
 
+function requireDeviceKey(req, res, next) {
+  if (!DEVICE_API_KEY) {
+    return next();
+  }
+
+  const providedKey = req.get("x-device-key");
+
+  if (providedKey === DEVICE_API_KEY) {
+    return next();
+  }
+
+  return res.status(401).json({ error: "Brak autoryzacji urządzenia." });
+}
+
 function getSessionActor(req, fallback = "panel") {
   return req.session?.displayName || req.session?.username || fallback;
 }
@@ -107,6 +122,10 @@ lockerService.on("log", log => {
 
 lockerService.on("logs-cleared", () => {
   io.emit("logs-cleared");
+});
+
+lockerService.on("remote-action-queued", action => {
+  io.emit("remote-action-queued", action);
 });
 
 app.use(express.static(PUBLIC_DIR));
@@ -158,13 +177,15 @@ app.post("/auth/logout", (req, res) => {
 app.use([
   "/generate-code",
   "/deactivate-code",
+  "/open-locker",
+  "/release-all-lockers",
   "/lockers",
   "/active-codes",
   "/logs",
   "/logs/clear"
 ], requireAuth);
 
-app.post("/verify-code", asyncHandler(async (req, res) => {
+app.post("/verify-code", requireDeviceKey, asyncHandler(async (req, res) => {
   const { code } = req.body;
   const result = await lockerService.verifyCode(code, { source: "device" });
   res.json(result);
@@ -193,12 +214,32 @@ app.post("/deactivate-code", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
+app.post("/open-locker", asyncHandler(async (req, res) => {
+  const locker = Number(req.body.locker);
+
+  const result = await lockerService.openLocker(locker, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.json(result);
+}));
+
+app.post("/release-all-lockers", asyncHandler(async (req, res) => {
+  const result = await lockerService.releaseAllLockers({
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.json(result);
+}));
+
 app.get("/lockers", asyncHandler(async (req, res) => {
   const result = await lockerService.getLockers();
   res.json(result);
 }));
 
-app.post("/locker-status", asyncHandler(async (req, res) => {
+app.post("/locker-status", requireDeviceKey, asyncHandler(async (req, res) => {
   const locker = Number(req.body.locker);
   const { hasTag } = req.body;
 
@@ -207,6 +248,22 @@ app.post("/locker-status", asyncHandler(async (req, res) => {
   });
 
   res.json(result);
+}));
+
+app.post("/locker-door-status", requireDeviceKey, asyncHandler(async (req, res) => {
+  const locker = Number(req.body.locker);
+  const { isDoorClosed } = req.body;
+
+  const result = await lockerService.updateLockerDoorStatus(locker, isDoorClosed, {
+    source: "contactron"
+  });
+
+  res.json(result);
+}));
+
+app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
+  const actions = await lockerService.consumeRemoteActions();
+  res.json({ actions });
 }));
 
 app.get("/active-codes", asyncHandler(async (req, res) => {

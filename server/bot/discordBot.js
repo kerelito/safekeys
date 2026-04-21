@@ -19,8 +19,12 @@ const CUSTOM_IDS = {
   STATUS: "safekeys:status",
   CODES: "safekeys:codes",
   LOGS: "safekeys:logs",
+  OPEN_LOCKER_1: "safekeys:open-locker:1",
+  OPEN_LOCKER_2: "safekeys:open-locker:2",
+  OPEN_LOCKER_3: "safekeys:open-locker:3",
   DEACTIVATE: "safekeys:deactivate",
   CLEAR_LOGS: "safekeys:clear-logs",
+  RELEASE_ALL: "safekeys:release-all",
   DEACTIVATE_MODAL: "safekeys:deactivate-modal",
   DEACTIVATE_CODE_INPUT: "safekeys:deactivate-code-input"
 };
@@ -69,6 +73,26 @@ const EVENT_META = {
     color: BRAND.warning,
     label: "Logi wyczyszczone",
     emoji: "🧹"
+  },
+  LOCKER_DOOR_OPENED: {
+    color: BRAND.warning,
+    label: "Drzwiczki otwarte",
+    emoji: "🚪"
+  },
+  LOCKER_DOOR_CLOSED: {
+    color: BRAND.success,
+    label: "Drzwiczki zamkniete",
+    emoji: "✅"
+  },
+  REMOTE_UNLOCK_REQUESTED: {
+    color: BRAND.accent,
+    label: "Zdalne otwarcie",
+    emoji: "🛰️"
+  },
+  REMOTE_RELEASE_ALL_REQUESTED: {
+    color: BRAND.warning,
+    label: "Zwolnienie wszystkich blokad",
+    emoji: "⚠️"
   }
 };
 
@@ -114,6 +138,14 @@ function getLogText(log) {
       return `Klucz zostal wyjety ze skrytki S${log.locker}.`;
     case "KEY_RETURNED":
       return `Klucz zostal zwrocony do skrytki S${log.locker}.`;
+    case "LOCKER_DOOR_OPENED":
+      return `Drzwiczki skrytki S${log.locker} sa otwarte.`;
+    case "LOCKER_DOOR_CLOSED":
+      return `Drzwiczki skrytki S${log.locker} zostaly domkniete.`;
+    case "REMOTE_UNLOCK_REQUESTED":
+      return `Wyslano zdalne polecenie otwarcia skrytki S${log.locker}.`;
+    case "REMOTE_RELEASE_ALL_REQUESTED":
+      return "Wyslano polecenie zwolnienia blokady wszystkich skrytek.";
     default:
       return "W systemie pojawilo sie nowe zdarzenie.";
   }
@@ -189,7 +221,9 @@ function formatLockerStatus(lockers) {
     .map(locker => {
       const state = locker.hasTag ? "klucz obecny" : "klucza brak";
       const badge = locker.hasTag ? "🟢" : "🔴";
-      return `${badge} S${locker.locker} • ${state}`;
+      const door = locker.isDoorClosed ? "drzwiczki domkniete" : "drzwiczki otwarte";
+      const doorBadge = locker.isDoorClosed ? "🧲" : "🚪";
+      return `${badge} S${locker.locker} • ${state}\n${doorBadge} ${door}`;
     })
     .join("\n");
 }
@@ -211,6 +245,7 @@ function formatRecentLogs(logs) {
 function buildOverviewEmbed(lockers, codes, logs) {
   const occupiedCount = lockers.filter(locker => locker.hasTag).length;
   const availableCount = lockers.length - occupiedCount;
+  const openDoorsCount = lockers.filter(locker => !locker.isDoorClosed).length;
   const nearestExpiry = codes[0];
 
   const embed = buildBaseEmbed("Centrum operacyjne SafeKeys", BRAND.accent)
@@ -227,8 +262,13 @@ function buildOverviewEmbed(lockers, codes, logs) {
         inline: true
       },
       {
+        name: "Drzwiczki",
+        value: openDoorsCount === 0 ? "Wszystkie domkniete." : `Otwarte: **${openDoorsCount}**`,
+        inline: true
+      },
+      {
         name: "Status operacyjny",
-        value: occupiedCount === lockers.length ? "Wszystkie klucze sa na miejscu." : "Czesc skrytek wymaga uwagi.",
+        value: occupiedCount === lockers.length && openDoorsCount === 0 ? "Wszystkie klucze sa na miejscu." : "Czesc skrytek wymaga uwagi.",
         inline: false
       },
       {
@@ -290,8 +330,26 @@ function buildDashboardComponents() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.OPEN_LOCKER_1)
+        .setLabel("Otworz S1")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.OPEN_LOCKER_2)
+        .setLabel("Otworz S2")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.OPEN_LOCKER_3)
+        .setLabel("Otworz S3")
+        .setStyle(ButtonStyle.Primary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
         .setCustomId(CUSTOM_IDS.DEACTIVATE)
         .setLabel("Dezaktywuj kod")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(CUSTOM_IDS.RELEASE_ALL)
+        .setLabel("Zwolnij wszystkie")
         .setStyle(ButtonStyle.Danger),
       new ButtonBuilder()
         .setCustomId(CUSTOM_IDS.CLEAR_LOGS)
@@ -346,6 +404,13 @@ async function buildDashboardResponse(lockerService, view) {
     default:
       return buildOverviewEmbed(lockers, codes, logs);
   }
+}
+
+async function executeRemoteOpen(lockerService, locker, actor, source = "discord") {
+  return lockerService.openLocker(locker, {
+    source,
+    actor
+  });
 }
 
 async function registerCommands(config) {
@@ -420,6 +485,24 @@ async function createDiscordBot(config, lockerService) {
             return;
           }
 
+          case CUSTOM_IDS.OPEN_LOCKER_1:
+          case CUSTOM_IDS.OPEN_LOCKER_2:
+          case CUSTOM_IDS.OPEN_LOCKER_3: {
+            const locker = Number(interaction.customId.split(":").pop());
+            await executeRemoteOpen(lockerService, locker, getActor(interaction));
+
+            await interaction.update({
+              embeds: [
+                buildSuccessEmbed(
+                  "Wyslano polecenie otwarcia",
+                  `Skrytka **S${locker}** otrzymala zdalne polecenie otwarcia.`
+                )
+              ],
+              components: buildDashboardComponents()
+            });
+            return;
+          }
+
           case CUSTOM_IDS.CLEAR_LOGS: {
             await lockerService.clearLogs({
               source: "discord",
@@ -431,6 +514,24 @@ async function createDiscordBot(config, lockerService) {
                 buildSuccessEmbed(
                   "Logi wyczyszczone",
                   "Historia zdarzen zostala usunieta z panelu operacyjnego."
+                )
+              ],
+              components: buildDashboardComponents()
+            });
+            return;
+          }
+
+          case CUSTOM_IDS.RELEASE_ALL: {
+            await lockerService.releaseAllLockers({
+              source: "discord",
+              actor: getActor(interaction)
+            });
+
+            await interaction.update({
+              embeds: [
+                buildSuccessEmbed(
+                  "Wyslano polecenie globalne",
+                  "Zwolnienie blokady wszystkich skrytek zostalo zakolejkowane."
                 )
               ],
               components: buildDashboardComponents()
@@ -521,6 +622,42 @@ async function createDiscordBot(config, lockerService) {
           await replyWithEmbed(interaction, buildStatusEmbed(lockers), {
             components: buildDashboardComponents()
           });
+          break;
+        }
+
+        case "locker-open": {
+          const locker = interaction.options.getInteger("skrytka", true);
+          await executeRemoteOpen(lockerService, locker, actor);
+
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Polecenie wyslane",
+              `Skrytka **S${locker}** otrzymala zdalne polecenie otwarcia.`
+            ),
+            {
+              components: buildDashboardComponents()
+            }
+          );
+          break;
+        }
+
+        case "locker-release-all": {
+          await lockerService.releaseAllLockers({
+            source: "discord",
+            actor
+          });
+
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Polecenie globalne wyslane",
+              "Zwolnienie blokady wszystkich skrytek zostalo zakolejkowane."
+            ),
+            {
+              components: buildDashboardComponents()
+            }
+          );
           break;
         }
 

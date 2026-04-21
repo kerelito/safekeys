@@ -46,6 +46,28 @@ const commands = [
     .setDMPermission(false),
 
   new SlashCommandBuilder()
+    .setName("locker-open")
+    .setDescription("Zdalnie otwiera wybraną skrytkę.")
+    .addIntegerOption(option =>
+      option
+        .setName("skrytka")
+        .setDescription("Numer skrytki do otwarcia")
+        .setRequired(true)
+        .addChoices(
+          { name: "Skrytka 1", value: 1 },
+          { name: "Skrytka 2", value: 2 },
+          { name: "Skrytka 3", value: 3 }
+        ))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName("locker-release-all")
+    .setDescription("Zwalnia blokadę wszystkich skrytek jednocześnie.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
     .setName("locker-codes")
     .setDescription("Pokazuje listę aktywnych kodów.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

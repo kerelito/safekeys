@@ -502,7 +502,7 @@ ul {
 }
 
 .locker {
-  min-height: 132px;
+  min-height: 200px;
   padding: 18px;
   border-radius: 24px;
   border: 1px solid rgba(255,255,255,0.08);
@@ -510,7 +510,7 @@ ul {
   flex-direction: column;
   justify-content: space-between;
   text-align: left;
-  white-space: pre-line;
+  gap: 14px;
   transition: transform 180ms ease, border-color 180ms ease;
 }
 
@@ -526,6 +526,82 @@ ul {
 .bad {
   background: linear-gradient(180deg, rgba(255, 107, 107, 0.16), rgba(255, 107, 107, 0.06));
   border-color: rgba(255, 107, 107, 0.18);
+}
+
+.locker-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locker-name {
+  margin: 0;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 20px;
+}
+
+.locker-state {
+  display: grid;
+  gap: 8px;
+}
+
+.locker-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.05);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.locker-badge.warn {
+  color: #ffe08a;
+}
+
+.locker-badge.alert {
+  color: #ffb1b1;
+}
+
+.locker-badge.good {
+  color: #88f0be;
+}
+
+.locker-copy {
+  color: var(--muted);
+  line-height: 1.5;
+  font-size: 14px;
+}
+
+.locker-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.locker-actions button,
+.locker-toolbar button {
+  flex: 1;
+}
+
+.secondary-button {
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+.secondary-button:hover {
+  box-shadow: 0 18px 38px rgba(32, 56, 95, 0.14);
+}
+
+.locker-toolbar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 li {
@@ -722,6 +798,17 @@ select:focus {
   .section-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .locker-top,
+  .locker-actions,
+  .locker-toolbar {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .locker-state {
+    width: 100%;
   }
 
   .hero-title {
@@ -939,9 +1026,15 @@ select:focus {
 </div>
 
 <div class="card">
+<div class="section-header">
 <div class="section-copy">
 <h2 class="card-title">Status skrytek</h2>
-<p>Natychmiastowy podgląd obecności tagów RFID i gotowości każdej komory.</p>
+<p>Natychmiastowy podgląd obecności tagów RFID, kontraktonów i zdalnych akcji dla każdej komory.</p>
+</div>
+<div class="locker-toolbar">
+<button class="secondary-button" onclick="loadLockers()">Odśwież status</button>
+<button class="danger" onclick="releaseAllLockers()">Zwolnij wszystkie</button>
+</div>
 </div>
 <div id="lockers" class="lockers"></div>
 </div>
@@ -1026,7 +1119,20 @@ function connectSocket() {
 
   socket = io(API, { withCredentials: true });
 
-  socket.on("new-log", addLog);
+  socket.on("new-log", async log => {
+    addLog(log);
+
+    if ([
+      "KEY_REMOVED",
+      "KEY_RETURNED",
+      "LOCKER_DOOR_OPENED",
+      "LOCKER_DOOR_CLOSED",
+      "REMOTE_UNLOCK_REQUESTED",
+      "REMOTE_RELEASE_ALL_REQUESTED"
+    ].includes(log.event)) {
+      await loadLockers();
+    }
+  });
   socket.on("logs-cleared", () => {
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
   });
@@ -1229,10 +1335,90 @@ async function loadLockers() {
 
     data.forEach(l => {
       const div = document.createElement("div");
-      div.className = "locker " + (l.hasTag ? "ok" : "bad");
-      div.innerText = `Skrytka ${l.locker}\n${l.hasTag ? "Tag obecny" : "Brak tagu"}\n${l.hasTag ? "Gotowa do odbioru" : "Wymaga uwagi"}`;
+      div.className = "locker " + (l.hasTag && l.isDoorClosed ? "ok" : "bad");
+
+      const top = document.createElement("div");
+      top.className = "locker-top";
+
+      const title = document.createElement("h3");
+      title.className = "locker-name";
+      title.textContent = `Skrytka ${l.locker}`;
+
+      const state = document.createElement("div");
+      state.className = "locker-state";
+
+      const tagBadge = document.createElement("span");
+      tagBadge.className = `locker-badge ${l.hasTag ? "good" : "alert"}`;
+      tagBadge.textContent = l.hasTag ? "RFID: klucz obecny" : "RFID: brak klucza";
+
+      const doorBadge = document.createElement("span");
+      doorBadge.className = `locker-badge ${l.isDoorClosed ? "good" : "warn"}`;
+      doorBadge.textContent = l.isDoorClosed ? "Drzwiczki: domkniete" : "Drzwiczki: otwarte";
+
+      state.appendChild(tagBadge);
+      state.appendChild(doorBadge);
+      top.appendChild(title);
+      top.appendChild(state);
+
+      const copy = document.createElement("div");
+      copy.className = "locker-copy";
+      copy.textContent = l.hasTag && l.isDoorClosed
+        ? "Skrytka jest gotowa operacyjnie. Klucz znajduje sie na miejscu, a kontrakton potwierdza zamkniecie."
+        : "Skrytka wymaga uwagi operatora. Sprawdz status RFID oraz domkniecie drzwiczek.";
+
+      const actions = document.createElement("div");
+      actions.className = "locker-actions";
+
+      const openButton = document.createElement("button");
+      openButton.textContent = `Otworz S${l.locker}`;
+      openButton.addEventListener("click", () => openLocker(l.locker));
+
+      const refreshButton = document.createElement("button");
+      refreshButton.className = "secondary-button";
+      refreshButton.textContent = "Odswiez";
+      refreshButton.addEventListener("click", loadLockers);
+
+      actions.appendChild(openButton);
+      actions.appendChild(refreshButton);
+      div.appendChild(top);
+      div.appendChild(copy);
+      div.appendChild(actions);
       container.appendChild(div);
     });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function openLocker(locker) {
+  try {
+    await apiFetch("/open-locker", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ locker })
+    });
+
+    showToast(`Wyslano polecenie otwarcia S${locker}`);
+    await loadLockers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function releaseAllLockers() {
+  const confirmed = window.confirm("Czy na pewno chcesz zwolnic blokade wszystkich skrytek?");
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiFetch("/release-all-lockers", {
+      method: "POST"
+    });
+
+    showToast("Wyslano polecenie zwolnienia wszystkich skrytek.");
+    await loadLockers();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1364,6 +1550,21 @@ function addLog(log) {
     case "KEY_RETURNED":
       text = `📥 zwrócony S${log.locker}`;
       cls = "log-success";
+      break;
+    case "LOCKER_DOOR_OPENED":
+      text = `🚪 otwarte drzwiczki S${log.locker}`;
+      cls = "log-warning";
+      break;
+    case "LOCKER_DOOR_CLOSED":
+      text = `✅ domkniete drzwiczki S${log.locker}`;
+      cls = "log-success";
+      break;
+    case "REMOTE_UNLOCK_REQUESTED":
+      text = `🛰️ zdalne otwarcie S${log.locker}`;
+      break;
+    case "REMOTE_RELEASE_ALL_REQUESTED":
+      text = "⚠️ zwolniono blokade wszystkich skrytek";
+      cls = "log-warning";
       break;
   }
 

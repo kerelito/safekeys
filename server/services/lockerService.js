@@ -53,6 +53,10 @@ const LockerSchema = new mongoose.Schema({
   hasTag: {
     type: Boolean,
     required: true
+  },
+  isDoorClosed: {
+    type: Boolean,
+    default: true
   }
 });
 
@@ -93,7 +97,18 @@ function assertValidHasTag(hasTag) {
   }
 }
 
+function assertValidDoorClosed(isDoorClosed) {
+  if (typeof isDoorClosed !== "boolean") {
+    throw createHttpError(400, "Pole isDoorClosed musi być typu boolean.");
+  }
+}
+
 class LockerService extends EventEmitter {
+  constructor() {
+    super();
+    this.pendingRemoteActions = [];
+  }
+
   async createLog(payload) {
     const log = await Log.create({
       source: payload.source || "system",
@@ -204,7 +219,8 @@ class LockerService extends EventEmitter {
       const found = data.find(item => item.locker === num);
       return {
         locker: num,
-        hasTag: found ? found.hasTag : false
+        hasTag: found ? found.hasTag : false,
+        isDoorClosed: found ? found.isDoorClosed !== false : true
       };
     });
   }
@@ -242,6 +258,85 @@ class LockerService extends EventEmitter {
     }
 
     return { success: true };
+  }
+
+  async updateLockerDoorStatus(locker, isDoorClosed, context = {}) {
+    assertValidLocker(locker);
+    assertValidDoorClosed(isDoorClosed);
+
+    let found = await Locker.findOne({ locker });
+    const prev = found ? found.isDoorClosed !== false : null;
+
+    if (!found) {
+      found = await Locker.create({ locker, hasTag: false, isDoorClosed });
+    } else {
+      found.isDoorClosed = isDoorClosed;
+      await found.save();
+    }
+
+    if (prev !== null && prev !== isDoorClosed) {
+      await this.createLog({
+        event: isDoorClosed ? "LOCKER_DOOR_CLOSED" : "LOCKER_DOOR_OPENED",
+        locker,
+        source: context.source || "contactron",
+        actor: context.actor || null
+      });
+    }
+
+    return { success: true };
+  }
+
+  createRemoteAction(type, locker, context = {}) {
+    const action = {
+      id: new mongoose.Types.ObjectId().toString(),
+      type,
+      locker: locker ?? null,
+      createdAt: new Date(),
+      source: context.source || "web",
+      actor: context.actor || null
+    };
+
+    this.pendingRemoteActions.push(action);
+    this.emit("remote-action-queued", action);
+    return action;
+  }
+
+  async openLocker(locker, context = {}) {
+    assertValidLocker(locker);
+
+    const action = this.createRemoteAction("OPEN_LOCKER", locker, context);
+    await this.createLog({
+      event: "REMOTE_UNLOCK_REQUESTED",
+      locker,
+      source: context.source || "web",
+      actor: context.actor || null
+    });
+
+    return {
+      success: true,
+      actionId: action.id,
+      locker
+    };
+  }
+
+  async releaseAllLockers(context = {}) {
+    const action = this.createRemoteAction("RELEASE_ALL_LOCKERS", null, context);
+    await this.createLog({
+      event: "REMOTE_RELEASE_ALL_REQUESTED",
+      source: context.source || "web",
+      actor: context.actor || null
+    });
+
+    return {
+      success: true,
+      actionId: action.id
+    };
+  }
+
+  async consumeRemoteActions() {
+    const actions = [...this.pendingRemoteActions];
+    this.pendingRemoteActions = [];
+    return actions;
   }
 
   async getActiveCodes() {
