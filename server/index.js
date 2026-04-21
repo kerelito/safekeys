@@ -16,12 +16,14 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 const MONGODB_URI = process.env.MONGODB_URI;
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_NOTIFICATIONS_CHANNEL_ID = process.env.DISCORD_NOTIFICATIONS_CHANNEL_ID;
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 
@@ -43,6 +45,10 @@ if (PANEL_USERS.length !== 3) {
   throw new Error("Brakuje pełnej konfiguracji trzech użytkowników panelu w zmiennych ADMIN_1_*, ADMIN_2_* i ADMIN_3_*.");
 }
 
+if (IS_PRODUCTION) {
+  app.set("trust proxy", 1);
+}
+
 const sessionMiddleware = session({
   secret: SESSION_SECRET,
   resave: false,
@@ -50,7 +56,7 @@ const sessionMiddleware = session({
   cookie: {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
+    secure: IS_PRODUCTION,
     maxAge: 1000 * 60 * 60 * 12
   }
 });
@@ -233,8 +239,8 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: message });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server działa na http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Server działa na ${HOST}:${PORT}`);
 });
 
 if (DISCORD_BOT_TOKEN && DISCORD_CLIENT_ID) {
