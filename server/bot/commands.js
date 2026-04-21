@@ -36,6 +36,16 @@ const commands = [
           { name: "12h", value: 12 },
           { name: "24h", value: 24 }
         ))
+    .addStringOption(option =>
+      option
+        .setName("osoba")
+        .setDescription("Imie i nazwisko osoby, dla ktorej generowany jest kod")
+        .setRequired(true))
+    .addStringOption(option =>
+      option
+        .setName("email")
+        .setDescription("Adres email odbiorcy kodu")
+        .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false),
 

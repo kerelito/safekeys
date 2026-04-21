@@ -638,7 +638,8 @@ button:hover {
   box-shadow: 0 14px 30px rgba(255, 79, 111, 0.2);
 }
 
-select {
+select,
+.field-grid input {
   width: 100%;
   min-height: 52px;
   padding: 0 16px;
@@ -651,11 +652,13 @@ select {
   outline: none;
 }
 
-:root[data-theme="light"] select {
+:root[data-theme="light"] select,
+:root[data-theme="light"] .field-grid input {
   background: rgba(245, 249, 255, 0.95);
 }
 
-select:focus {
+select:focus,
+.field-grid input:focus {
   border-color: rgba(107, 197, 255, 0.55);
   box-shadow: 0 0 0 4px rgba(107, 197, 255, 0.12);
 }
@@ -1014,6 +1017,16 @@ select:focus {
 </label>
 
 <label class="field">
+<span class="field-label">Imie i nazwisko</span>
+<input id="recipientName" type="text" placeholder="np. Jan Kowalski" autocomplete="name" required>
+</label>
+
+<label class="field">
+<span class="field-label">Email odbiorcy</span>
+<input id="recipientEmail" type="email" placeholder="np. jan@firma.pl" autocomplete="email" required>
+</label>
+
+<label class="field">
 <span class="field-label">Akcja</span>
 <button onclick="generateCode()">Generuj</button>
 </label>
@@ -1311,16 +1324,23 @@ async function initializeDashboard() {
 async function generateCode() {
   const locker = document.getElementById("locker").value;
   const hours = document.getElementById("hours").value;
+  const recipientName = document.getElementById("recipientName").value.trim();
+  const recipientEmail = document.getElementById("recipientEmail").value.trim();
 
   try {
     const data = await apiFetch("/generate-code", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ locker: Number(locker), hours: Number(hours) })
+      body: JSON.stringify({
+        locker: Number(locker),
+        hours: Number(hours),
+        recipientName,
+        recipientEmail
+      })
     });
 
     document.getElementById("generatedCode").innerText = data.code;
-    showToast("Kod wygenerowany 🚀");
+    showToast(`Kod wygenerowany i wyslany do ${data.recipientEmail}`);
     await loadActiveCodes();
   } catch (error) {
     showToast(error.message, true);
@@ -1450,6 +1470,10 @@ async function loadActiveCodes() {
       label.className = "code-chip";
       label.textContent = `${c.code} · S${c.locker}`;
 
+      const recipient = document.createElement("span");
+      recipient.className = "timer";
+      recipient.textContent = `📧 ${(c.recipientName || "Brak odbiorcy")} · ${(c.recipientEmail || "brak@email")}`;
+
       const timer = document.createElement("span");
       timer.className = "timer";
 
@@ -1459,6 +1483,7 @@ async function loadActiveCodes() {
       button.addEventListener("click", () => deactivate(c.code));
 
       meta.appendChild(label);
+      meta.appendChild(recipient);
       meta.appendChild(timer);
       row.appendChild(meta);
       row.appendChild(button);
@@ -1538,6 +1563,14 @@ function addLog(log) {
       break;
     case "CODE_GENERATED":
       text = `➕ kod ${log.code}`;
+      break;
+    case "CODE_EMAIL_SENT":
+      text = `📧 email wyslany dla kodu ${log.code}`;
+      cls = "log-success";
+      break;
+    case "CODE_EMAIL_FAILED":
+      text = `⚠️ blad wysylki email dla kodu ${log.code}`;
+      cls = "log-error";
       break;
     case "CODE_DEACTIVATED":
       text = `🚫 kod ${log.code}`;

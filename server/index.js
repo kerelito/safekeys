@@ -194,8 +194,13 @@ app.post("/verify-code", requireDeviceKey, asyncHandler(async (req, res) => {
 app.post("/generate-code", asyncHandler(async (req, res) => {
   const locker = Number(req.body.locker);
   const hours = Number(req.body.hours);
+  const recipientName = typeof req.body.recipientName === "string" ? req.body.recipientName : "";
+  const recipientEmail = typeof req.body.recipientEmail === "string" ? req.body.recipientEmail : "";
 
   const result = await lockerService.generateCode(locker, hours, {
+    name: recipientName,
+    email: recipientEmail
+  }, {
     source: "web",
     actor: getSessionActor(req)
   });
