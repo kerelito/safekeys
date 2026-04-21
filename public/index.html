@@ -1322,12 +1322,18 @@ async function initializeDashboard() {
 }
 
 async function generateCode() {
+  const button = event?.currentTarget || document.querySelector('.hero-card button[onclick="generateCode()"]');
   const locker = document.getElementById("locker").value;
   const hours = document.getElementById("hours").value;
   const recipientName = document.getElementById("recipientName").value.trim();
   const recipientEmail = document.getElementById("recipientEmail").value.trim();
 
   try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Wysylanie...";
+    }
+
     const data = await apiFetch("/generate-code", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -1344,6 +1350,11 @@ async function generateCode() {
     await loadActiveCodes();
   } catch (error) {
     showToast(error.message, true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Generuj";
+    }
   }
 }
 

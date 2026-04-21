@@ -237,6 +237,7 @@ class LockerService extends EventEmitter {
         actor: `${context.actor || "system"} • ${recipientEmail}`
       });
     } catch (error) {
+      console.error("Nie udalo sie wyslac emaila z kodem.", error);
       await createdCode.deleteOne().catch(() => {});
       await this.createLog({
         event: "CODE_EMAIL_FAILED",
