@@ -1017,16 +1017,6 @@ select:focus,
 </label>
 
 <label class="field">
-<span class="field-label">Imie i nazwisko</span>
-<input id="recipientName" type="text" placeholder="np. Jan Kowalski" autocomplete="name" required>
-</label>
-
-<label class="field">
-<span class="field-label">Email odbiorcy</span>
-<input id="recipientEmail" type="email" placeholder="np. jan@firma.pl" autocomplete="email" required>
-</label>
-
-<label class="field">
 <span class="field-label">Akcja</span>
 <button onclick="generateCode()">Generuj</button>
 </label>
@@ -1322,39 +1312,24 @@ async function initializeDashboard() {
 }
 
 async function generateCode() {
-  const button = event?.currentTarget || document.querySelector('.hero-card button[onclick="generateCode()"]');
   const locker = document.getElementById("locker").value;
   const hours = document.getElementById("hours").value;
-  const recipientName = document.getElementById("recipientName").value.trim();
-  const recipientEmail = document.getElementById("recipientEmail").value.trim();
 
   try {
-    if (button) {
-      button.disabled = true;
-      button.textContent = "Wysylanie...";
-    }
-
     const data = await apiFetch("/generate-code", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         locker: Number(locker),
-        hours: Number(hours),
-        recipientName,
-        recipientEmail
+        hours: Number(hours)
       })
     });
 
     document.getElementById("generatedCode").innerText = data.code;
-    showToast(`Kod wygenerowany i wyslany do ${data.recipientEmail}`);
+    showToast("Kod wygenerowany 🚀");
     await loadActiveCodes();
   } catch (error) {
     showToast(error.message, true);
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = "Generuj";
-    }
   }
 }
 
@@ -1481,10 +1456,6 @@ async function loadActiveCodes() {
       label.className = "code-chip";
       label.textContent = `${c.code} · S${c.locker}`;
 
-      const recipient = document.createElement("span");
-      recipient.className = "timer";
-      recipient.textContent = `📧 ${(c.recipientName || "Brak odbiorcy")} · ${(c.recipientEmail || "brak@email")}`;
-
       const timer = document.createElement("span");
       timer.className = "timer";
 
@@ -1494,7 +1465,6 @@ async function loadActiveCodes() {
       button.addEventListener("click", () => deactivate(c.code));
 
       meta.appendChild(label);
-      meta.appendChild(recipient);
       meta.appendChild(timer);
       row.appendChild(meta);
       row.appendChild(button);
@@ -1574,14 +1544,6 @@ function addLog(log) {
       break;
     case "CODE_GENERATED":
       text = `➕ kod ${log.code}`;
-      break;
-    case "CODE_EMAIL_SENT":
-      text = `📧 email wyslany dla kodu ${log.code}`;
-      cls = "log-success";
-      break;
-    case "CODE_EMAIL_FAILED":
-      text = `⚠️ blad wysylki email dla kodu ${log.code}`;
-      cls = "log-error";
       break;
     case "CODE_DEACTIVATED":
       text = `🚫 kod ${log.code}`;

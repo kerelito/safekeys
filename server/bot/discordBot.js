@@ -54,16 +54,6 @@ const EVENT_META = {
     label: "Kod wygenerowany",
     emoji: "✨"
   },
-  CODE_EMAIL_SENT: {
-    color: BRAND.success,
-    label: "Email wyslany",
-    emoji: "📧"
-  },
-  CODE_EMAIL_FAILED: {
-    color: BRAND.danger,
-    label: "Email niewyslany",
-    emoji: "⚠️"
-  },
   CODE_DEACTIVATED: {
     color: BRAND.warning,
     label: "Kod dezaktywowany",
@@ -142,10 +132,6 @@ function getLogText(log) {
       return `Wprowadzono nieprawidlowy kod \`${log.code}\`.`;
     case "CODE_GENERATED":
       return `Wygenerowano nowy kod \`${log.code}\` dla skrytki S${log.locker}.`;
-    case "CODE_EMAIL_SENT":
-      return `Kod \`${log.code}\` zostal wyslany emailem do odbiorcy.`;
-    case "CODE_EMAIL_FAILED":
-      return `Nie udalo sie wyslac emaila z kodem \`${log.code}\`.`;
     case "CODE_DEACTIVATED":
       return `Kod \`${log.code}\` dla skrytki S${log.locker} zostal dezaktywowany.`;
     case "KEY_REMOVED":
@@ -601,30 +587,15 @@ async function createDiscordBot(config, lockerService) {
         case "locker-generate": {
           const locker = interaction.options.getInteger("skrytka", true);
           const hours = interaction.options.getInteger("godziny", true);
-          const recipientName = interaction.options.getString("osoba", true);
-          const recipientEmail = interaction.options.getString("email", true);
           const result = await lockerService.generateCode(locker, hours, {
-            name: recipientName,
-            email: recipientEmail
-          }, {
             source: "discord",
             actor
           });
 
           const embed = buildSuccessEmbed(
             "Kod dostepu gotowy",
-            `Wygenerowano kod \`${result.code}\` dla skrytki **S${locker}** i wyslano go emailem.`
+            `Wygenerowano kod \`${result.code}\` dla skrytki **S${locker}**.`
           ).addFields(
-            {
-              name: "Odbiorca",
-              value: recipientName,
-              inline: false
-            },
-            {
-              name: "Email",
-              value: recipientEmail,
-              inline: false
-            },
             {
               name: "Waznosc",
               value: `${hours} h`,

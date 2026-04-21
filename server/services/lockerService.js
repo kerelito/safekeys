@@ -1,6 +1,5 @@
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-const { sendGeneratedCodeEmail } = require("./emailService");
 
 const CodeSchema = new mongoose.Schema({
   code: {
@@ -25,17 +24,6 @@ const CodeSchema = new mongoose.Schema({
   expiresAt: {
     type: Date,
     required: true
-  },
-  recipientName: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  recipientEmail: {
-    type: String,
-    required: true,
-    trim: true,
-    lowercase: true
   }
 });
 
@@ -115,22 +103,6 @@ function assertValidDoorClosed(isDoorClosed) {
   }
 }
 
-function assertValidRecipientName(name) {
-  if (typeof name !== "string" || name.trim().length < 3) {
-    throw createHttpError(400, "Podaj imie i nazwisko odbiorcy kodu.");
-  }
-}
-
-function assertValidRecipientEmail(email) {
-  const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    throw createHttpError(400, "Podaj prawidlowy adres email.");
-  }
-
-  return normalizedEmail;
-}
-
 class LockerService extends EventEmitter {
   constructor() {
     super();
@@ -193,63 +165,29 @@ class LockerService extends EventEmitter {
     };
   }
 
-  async generateCode(locker, hours, recipient = {}, context = {}) {
+  async generateCode(locker, hours, context = {}) {
     assertValidLocker(locker);
     assertValidHours(hours);
-    assertValidRecipientName(recipient.name);
-    const recipientEmail = assertValidRecipientEmail(recipient.email);
-    const recipientName = recipient.name.trim();
 
     const code = await this.generateUniqueCode();
     const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-    const createdCode = await Code.create({
+    await Code.create({
       code,
       locker,
       active: true,
-      expiresAt,
-      recipientName,
-      recipientEmail
+      expiresAt
     });
 
-    try {
-      await sendGeneratedCodeEmail({
-        recipientName,
-        recipientEmail,
-        code,
-        locker,
-        expiresAt
-      });
+    await this.createLog({
+      event: "CODE_GENERATED",
+      code,
+      locker,
+      source: context.source || "web",
+      actor: context.actor || null
+    });
 
-      await this.createLog({
-        event: "CODE_GENERATED",
-        code,
-        locker,
-        source: context.source || "web",
-        actor: context.actor || null
-      });
-
-      await this.createLog({
-        event: "CODE_EMAIL_SENT",
-        code,
-        locker,
-        source: context.source || "web",
-        actor: `${context.actor || "system"} • ${recipientEmail}`
-      });
-    } catch (error) {
-      console.error("Nie udalo sie wyslac emaila z kodem.", error);
-      await createdCode.deleteOne().catch(() => {});
-      await this.createLog({
-        event: "CODE_EMAIL_FAILED",
-        code,
-        locker,
-        source: context.source || "web",
-        actor: `${context.actor || "system"} • ${recipientEmail}`
-      });
-      throw createHttpError(502, "Nie udalo sie wyslac wiadomosci email. Kod nie zostal zapisany.");
-    }
-
-    return { code, expiresAt, recipientName, recipientEmail };
+    return { code, expiresAt };
   }
 
   async deactivateCode(code, context = {}) {
