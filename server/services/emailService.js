@@ -1,4 +1,5 @@
 const nodemailer = require("nodemailer");
+const dns = require("dns");
 
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -27,6 +28,10 @@ function getTransporter() {
       connectionTimeout: 10000,
       greetingTimeout: 10000,
       socketTimeout: 15000,
+      family: 4,
+      lookup(hostname, options, callback) {
+        return dns.lookup(hostname, { ...options, family: 4 }, callback);
+      },
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS
