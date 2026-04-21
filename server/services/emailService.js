@@ -1,5 +1,6 @@
 const nodemailer = require("nodemailer");
 const dns = require("dns");
+const { promisify } = require("util");
 
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -10,6 +11,7 @@ const SMTP_FROM_EMAIL = process.env.SMTP_FROM_EMAIL;
 const SMTP_FROM_NAME = process.env.SMTP_FROM_NAME || "SafeKeys";
 
 let transporter = null;
+const resolve4 = promisify(dns.resolve4);
 
 function isEmailConfigured() {
   return Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS && SMTP_FROM_EMAIL);
@@ -20,30 +22,34 @@ function getTransporter() {
     throw new Error("Brakuje konfiguracji SMTP dla wysylki email.");
   }
 
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_SECURE,
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-      family: 4,
-      lookup(hostname, options, callback) {
-        return dns.lookup(hostname, { ...options, family: 4 }, callback);
-      },
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS
-      }
-    });
-  }
-
   return transporter;
 }
 
 async function sendGeneratedCodeEmail({ recipientName, recipientEmail, code, locker, expiresAt }) {
-  const mailer = getTransporter();
+  getTransporter();
+  const [smtpIpv4Address] = await resolve4(SMTP_HOST);
+
+  if (!smtpIpv4Address) {
+    throw new Error("Nie udalo sie rozwiazac adresu IPv4 dla serwera SMTP.");
+  }
+
+  transporter = nodemailer.createTransport({
+    host: smtpIpv4Address,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS
+    },
+    tls: {
+      servername: SMTP_HOST
+    }
+  });
+
+  const mailer = transporter;
   const expiresAtText = new Date(expiresAt).toLocaleString("pl-PL", {
     dateStyle: "medium",
     timeStyle: "short"
