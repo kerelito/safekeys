@@ -1,174 +1,18 @@
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-
-const CodeSchema = new mongoose.Schema({
-  code: {
-    type: String,
-    required: true,
-    unique: true,
-    match: /^\d{4}$/
-  },
-  locker: {
-    type: Number,
-    required: true,
-    min: 1
-  },
-  active: {
-    type: Boolean,
-    default: true
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  expiresAt: {
-    type: Date,
-    required: true
-  }
-});
-
-const LogSchema = new mongoose.Schema({
-  event: {
-    type: String,
-    required: true
-  },
-  code: String,
-  locker: Number,
-  success: Boolean,
-  source: String,
-  actor: String,
-  timestamp: {
-    type: Date,
-    default: Date.now
-  }
-});
-
-const LockerSchema = new mongoose.Schema({
-  locker: {
-    type: Number,
-    required: true,
-    unique: true,
-    min: 1
-  },
-  hasTag: {
-    type: Boolean,
-    required: true
-  },
-  isDoorClosed: {
-    type: Boolean,
-    default: true
-  }
-});
-
-const RfidUserSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  tagId: {
-    type: String,
-    required: true,
-    unique: true,
-    uppercase: true,
-    trim: true
-  },
-  allowedLockers: [{
-    type: Number,
-    required: true
-  }],
-  active: {
-    type: Boolean,
-    default: true
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now
-  }
-});
-
-const Code = mongoose.models.Code || mongoose.model("Code", CodeSchema);
-const Log = mongoose.models.Log || mongoose.model("Log", LogSchema);
-const Locker = mongoose.models.Locker || mongoose.model("Locker", LockerSchema);
-const RfidUser = mongoose.models.RfidUser || mongoose.model("RfidUser", RfidUserSchema);
-
-const ALLOWED_LOCKERS = [1, 2, 3];
-const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
-
-function createHttpError(status, message) {
-  const error = new Error(message);
-  error.status = status;
-  return error;
-}
-
-function assertValidCode(code) {
-  if (typeof code !== "string" || !/^\d{4}$/.test(code)) {
-    throw createHttpError(400, "Kod musi mieć dokładnie 4 cyfry.");
-  }
-}
-
-function assertValidLocker(locker) {
-  if (!Number.isInteger(locker) || !ALLOWED_LOCKERS.includes(locker)) {
-    throw createHttpError(400, "Nieprawidłowy numer skrytki.");
-  }
-}
-
-function assertValidHours(hours) {
-  if (!Number.isInteger(hours) || !ALLOWED_HOURS.includes(hours)) {
-    throw createHttpError(400, "Nieprawidłowy czas ważności kodu.");
-  }
-}
-
-function assertValidHasTag(hasTag) {
-  if (typeof hasTag !== "boolean") {
-    throw createHttpError(400, "Pole hasTag musi być typu boolean.");
-  }
-}
-
-function assertValidDoorClosed(isDoorClosed) {
-  if (typeof isDoorClosed !== "boolean") {
-    throw createHttpError(400, "Pole isDoorClosed musi być typu boolean.");
-  }
-}
-
-function normalizeTagId(tagId) {
-  return typeof tagId === "string"
-    ? tagId.trim().replace(/\s+/g, "").toUpperCase()
-    : "";
-}
-
-function assertValidTagId(tagId) {
-  const normalizedTagId = normalizeTagId(tagId);
-
-  if (!normalizedTagId || normalizedTagId.length < 4) {
-    throw createHttpError(400, "Podaj prawidlowe ID taga RFID.");
-  }
-
-  return normalizedTagId;
-}
-
-function assertValidUserName(name) {
-  if (typeof name !== "string" || name.trim().length < 2) {
-    throw createHttpError(400, "Podaj nazwe uzytkownika.");
-  }
-
-  return name.trim();
-}
-
-function assertValidAllowedLockers(allowedLockers) {
-  if (!Array.isArray(allowedLockers) || allowedLockers.length === 0) {
-    throw createHttpError(400, "Wybierz co najmniej jedna skrytke.");
-  }
-
-  const normalized = [...new Set(allowedLockers.map(value => Number(value)))];
-
-  normalized.forEach(locker => assertValidLocker(locker));
-  return normalized.sort((a, b) => a - b);
-}
+const { Code, Log, Locker, RfidUser } = require("../models");
+const {
+  ALLOWED_LOCKERS,
+  assertValidAllowedLockers,
+  assertValidCode,
+  assertValidDoorClosed,
+  assertValidHasTag,
+  assertValidHours,
+  assertValidLocker,
+  assertValidTagId,
+  assertValidUserName,
+  createHttpError
+} = require("./lockerValidation");
 
 class LockerService extends EventEmitter {
   constructor() {
