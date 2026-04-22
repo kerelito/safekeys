@@ -373,9 +373,12 @@ ul {
 }
 
 :root[data-theme="light"] .theme-toggle,
+:root[data-theme="light"] .menu-button,
+:root[data-theme="light"] .logout-button,
 :root[data-theme="light"] .server-status,
 :root[data-theme="light"] .user-chip {
   background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
 }
 
 .server-status-dot {
@@ -1161,7 +1164,7 @@ select:focus,
 </div>
 
 <div class="topbar-actions">
-<button id="menuButton" class="menu-button" type="button" aria-label="Otworz menu">
+<button id="menuButton" class="menu-button" type="button" aria-label="Otwórz menu">
 <span></span>
 </button>
 <button id="themeToggle" class="theme-toggle" type="button">Motyw: system</button>
@@ -1180,7 +1183,7 @@ select:focus,
 <div id="menuDrawer" class="menu-drawer hidden">
 <nav>
 <button class="menu-link active" type="button" data-page="dashboard">Dashboard</button>
-<button class="menu-link" type="button" data-page="users">Uzytkownicy RFID</button>
+<button class="menu-link" type="button" data-page="users">Użytkownicy RFID</button>
 </nav>
 </div>
 
@@ -1279,15 +1282,15 @@ select:focus,
 <div class="users-sidebar">
 <div class="card">
 <div class="section-copy">
-<h2 class="card-title">Uzytkownicy RFID</h2>
-<p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, ktore skrytki moga otwierac po przylozeniu karty.</p>
+<h2 class="card-title">Użytkownicy RFID</h2>
+<p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, które skrytki mogą otwierać po przyłożeniu karty.</p>
 </div>
 
 <form id="rfidUserForm" class="auth-form">
 <input id="rfidUserId" type="hidden">
 
 <label class="field">
-<span class="field-label">Nazwa uzytkownika</span>
+<span class="field-label">Nazwa użytkownika</span>
 <input id="rfidUserName" type="text" placeholder="np. Jan Kowalski" required>
 </label>
 
@@ -1297,7 +1300,7 @@ select:focus,
 </label>
 
 <div class="field">
-<span class="field-label">Skrytki z dostepem</span>
+<span class="field-label">Skrytki z dostępem</span>
 <div class="checkbox-grid">
 <label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="1"> <span>Skrytka 1</span></label>
 <label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="2"> <span>Skrytka 2</span></label>
@@ -1305,8 +1308,8 @@ select:focus,
 </div>
 </div>
 
-<button id="rfidUserSubmit" type="submit">Dodaj uzytkownika</button>
-<button id="rfidUserReset" class="secondary-button" type="button">Wyczysc formularz</button>
+<button id="rfidUserSubmit" type="submit">Dodaj użytkownika</button>
+<button id="rfidUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
 </form>
 </div>
 </div>
@@ -1315,10 +1318,10 @@ select:focus,
 <div class="card">
 <div class="section-header">
 <div class="section-copy">
-<h2>Lista uzytkownikow</h2>
-<p>Przegladaj i edytuj przypisania kart RFID do skrytek oraz przygotuj konfiguracje pod czytnik uzytkownika.</p>
+<h2>Lista użytkowników</h2>
+<p>Przeglądaj i edytuj przypisania kart RFID do skrytek oraz przygotuj konfigurację pod czytnik użytkownika.</p>
 </div>
-<button class="secondary-button" type="button" onclick="loadRfidUsers()">Odswiez liste</button>
+<button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież listę</button>
 </div>
 <div id="rfidUsersList" class="users-list"></div>
 </div>
@@ -1611,7 +1614,7 @@ function resetRfidUserForm() {
   document.querySelectorAll('input[name="allowedLocker"]').forEach(input => {
     input.checked = false;
   });
-  document.getElementById("rfidUserSubmit").textContent = "Dodaj uzytkownika";
+  document.getElementById("rfidUserSubmit").textContent = "Dodaj użytkownika";
 }
 
 function getSelectedAllowedLockers() {
@@ -1637,7 +1640,7 @@ function renderRfidUsers() {
   if (rfidUsersData.length === 0) {
     const empty = document.createElement("div");
     empty.className = "muted-empty";
-    empty.textContent = "Brak zarejestrowanych uzytkownikow RFID.";
+    empty.textContent = "Brak zarejestrowanych użytkowników RFID.";
     container.appendChild(empty);
     return;
   }
@@ -1671,7 +1674,7 @@ function renderRfidUsers() {
 
     const deleteButton = document.createElement("button");
     deleteButton.className = "danger";
-    deleteButton.textContent = "Usun";
+    deleteButton.textContent = "Usuń";
     deleteButton.addEventListener("click", () => deleteRfidUser(user._id, user.name));
 
     actions.appendChild(editButton);
@@ -1720,14 +1723,14 @@ async function submitRfidUserForm(event) {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      showToast("Uzytkownik RFID zaktualizowany.");
+      showToast("Użytkownik RFID zaktualizowany.");
     } else {
       await apiFetch("/users", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      showToast("Uzytkownik RFID dodany.");
+      showToast("Użytkownik RFID dodany.");
     }
 
     resetRfidUserForm();
@@ -1738,7 +1741,7 @@ async function submitRfidUserForm(event) {
 }
 
 async function deleteRfidUser(userId, name) {
-  const confirmed = window.confirm(`Czy na pewno chcesz usunac uzytkownika ${name}?`);
+  const confirmed = window.confirm(`Czy na pewno chcesz usunąć użytkownika ${name}?`);
 
   if (!confirmed) {
     return;
@@ -1748,7 +1751,7 @@ async function deleteRfidUser(userId, name) {
     await apiFetch(`/users/${userId}`, {
       method: "DELETE"
     });
-    showToast("Uzytkownik RFID usuniety.");
+    showToast("Użytkownik RFID usunięty.");
     resetRfidUserForm();
     await loadRfidUsers();
   } catch (error) {
@@ -1804,7 +1807,7 @@ async function loadLockers() {
 
       const doorBadge = document.createElement("span");
       doorBadge.className = `locker-badge ${l.isDoorClosed ? "good" : "warn"}`;
-      doorBadge.textContent = l.isDoorClosed ? "Drzwiczki: domkniete" : "Drzwiczki: otwarte";
+      doorBadge.textContent = l.isDoorClosed ? "Drzwiczki: domknięte" : "Drzwiczki: otwarte";
 
       state.appendChild(tagBadge);
       state.appendChild(doorBadge);
@@ -1814,19 +1817,19 @@ async function loadLockers() {
       const copy = document.createElement("div");
       copy.className = "locker-copy";
       copy.textContent = l.hasTag && l.isDoorClosed
-        ? "Skrytka jest gotowa operacyjnie. Klucz znajduje sie na miejscu, a kontrakton potwierdza zamkniecie."
-        : "Skrytka wymaga uwagi operatora. Sprawdz status RFID oraz domkniecie drzwiczek.";
+        ? "Skrytka jest gotowa operacyjnie. Klucz znajduje się na miejscu, a kontrakton potwierdza zamknięcie."
+        : "Skrytka wymaga uwagi operatora. Sprawdź status RFID oraz domknięcie drzwiczek.";
 
       const actions = document.createElement("div");
       actions.className = "locker-actions";
 
       const openButton = document.createElement("button");
-      openButton.textContent = `Otworz S${l.locker}`;
+      openButton.textContent = `Otwórz S${l.locker}`;
       openButton.addEventListener("click", () => openLocker(l.locker));
 
       const refreshButton = document.createElement("button");
       refreshButton.className = "secondary-button";
-      refreshButton.textContent = "Odswiez";
+      refreshButton.textContent = "Odśwież";
       refreshButton.addEventListener("click", loadLockers);
 
       actions.appendChild(openButton);
@@ -1849,7 +1852,7 @@ async function openLocker(locker) {
       body: JSON.stringify({ locker })
     });
 
-    showToast(`Wyslano polecenie otwarcia S${locker}`);
+    showToast(`Wysłano polecenie otwarcia S${locker}`);
     await loadLockers();
   } catch (error) {
     showToast(error.message, true);
@@ -1857,7 +1860,7 @@ async function openLocker(locker) {
 }
 
 async function releaseAllLockers() {
-  const confirmed = window.confirm("Czy na pewno chcesz zwolnic blokade wszystkich skrytek?");
+  const confirmed = window.confirm("Czy na pewno chcesz zwolnić blokadę wszystkich skrytek?");
 
   if (!confirmed) {
     return;
@@ -1868,7 +1871,7 @@ async function releaseAllLockers() {
       method: "POST"
     });
 
-    showToast("Wyslano polecenie zwolnienia wszystkich skrytek.");
+    showToast("Wysłano polecenie zwolnienia wszystkich skrytek.");
     await loadLockers();
   } catch (error) {
     showToast(error.message, true);
@@ -2007,7 +2010,7 @@ function addLog(log) {
       cls = "log-warning";
       break;
     case "LOCKER_DOOR_CLOSED":
-      text = `✅ domkniete drzwiczki S${log.locker}`;
+      text = `✅ domknięte drzwiczki S${log.locker}`;
       cls = "log-success";
       break;
     case "REMOTE_UNLOCK_REQUESTED":
@@ -2026,13 +2029,13 @@ function addLog(log) {
       cls = "log-error";
       break;
     case "RFID_USER_CREATED":
-      text = "👤 dodano uzytkownika RFID";
+      text = "👤 dodano użytkownika RFID";
       break;
     case "RFID_USER_UPDATED":
-      text = "🛠️ zaktualizowano uzytkownika RFID";
+      text = "🛠️ zaktualizowano użytkownika RFID";
       break;
     case "RFID_USER_DELETED":
-      text = "🗑️ usunieto uzytkownika RFID";
+      text = "🗑️ usunięto użytkownika RFID";
       cls = "log-warning";
       break;
   }
