@@ -826,10 +826,24 @@ select:focus,
   border-radius: 16px;
   border: 1px solid var(--line);
   background: rgba(255,255,255,0.05);
+  min-height: 64px;
+  cursor: pointer;
 }
 
 .checkbox-card input {
   accent-color: var(--accent-2);
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.checkbox-card span {
+  display: block;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .users-list {
