@@ -10,7 +10,11 @@
   Assumptions:
   - 3 lockers
   - 3 relay outputs controlling electric locks
-  - 3 digital inputs for key/tag presence detection
+  - final hardware variant may use 4 SPI RFID readers:
+    - 3 readers for locker key presence
+    - 1 reader for user authentication
+  - current sketch keeps simple digital placeholders for locker key presence
+    and exposes backend support for user RFID verification through /verify-tag
   - 3 digital inputs for door-closed contact sensors
   - 4x4 keypad for entering 4-digit access codes
 
@@ -87,6 +91,7 @@ bool isWifiReady();
 void handleKeypad();
 void processEnteredCode(const String& code);
 bool verifyCodeRemotely(const String& code, int& lockerNumber);
+bool verifyUserTagRemotely(const String& tagId, String& responseBody);
 void unlockLocker(uint8_t lockerNumber);
 void unlockAllLockers();
 void updateRelayPulses();
@@ -245,6 +250,12 @@ bool verifyCodeRemotely(const String& code, int& lockerNumber) {
 
   lockerNumber = responseDoc["locker"] | 0;
   return lockerNumber >= 1 && lockerNumber <= LOCKER_COUNT;
+}
+
+bool verifyUserTagRemotely(const String& tagId, String& responseBody) {
+  StaticJsonDocument<96> payload;
+  payload["tagId"] = tagId;
+  return postJson("/verify-tag", payload, &responseBody);
 }
 
 void unlockLocker(uint8_t lockerNumber) {

@@ -1,5 +1,6 @@
 const {
   ActionRowBuilder,
+  MessageFlags,
   ButtonBuilder,
   ButtonStyle,
   Client,
@@ -93,6 +94,31 @@ const EVENT_META = {
     color: BRAND.warning,
     label: "Zwolnienie wszystkich blokad",
     emoji: "⚠️"
+  },
+  RFID_ACCESS_GRANTED: {
+    color: BRAND.success,
+    label: "Dostep RFID przyznany",
+    emoji: "🪪"
+  },
+  RFID_ACCESS_DENIED: {
+    color: BRAND.danger,
+    label: "Dostep RFID odrzucony",
+    emoji: "⛔"
+  },
+  RFID_USER_CREATED: {
+    color: BRAND.accent,
+    label: "Uzytkownik RFID dodany",
+    emoji: "👤"
+  },
+  RFID_USER_UPDATED: {
+    color: BRAND.accent,
+    label: "Uzytkownik RFID zaktualizowany",
+    emoji: "🛠️"
+  },
+  RFID_USER_DELETED: {
+    color: BRAND.warning,
+    label: "Uzytkownik RFID usuniety",
+    emoji: "🗑️"
   }
 };
 
@@ -146,6 +172,16 @@ function getLogText(log) {
       return `Wyslano zdalne polecenie otwarcia skrytki S${log.locker}.`;
     case "REMOTE_RELEASE_ALL_REQUESTED":
       return "Wyslano polecenie zwolnienia blokady wszystkich skrytek.";
+    case "RFID_ACCESS_GRANTED":
+      return "Przylozono autoryzowana karte RFID i odblokowano przypisane skrytki.";
+    case "RFID_ACCESS_DENIED":
+      return "Wykryto nieautoryzowany tag RFID na czytniku uzytkownika.";
+    case "RFID_USER_CREATED":
+      return "Dodano nowego uzytkownika RFID do systemu.";
+    case "RFID_USER_UPDATED":
+      return "Zaktualizowano konfiguracje uzytkownika RFID.";
+    case "RFID_USER_DELETED":
+      return "Usunieto uzytkownika RFID z systemu.";
     default:
       return "W systemie pojawilo sie nowe zdarzenie.";
   }
@@ -308,6 +344,30 @@ function buildLogsEmbed(logs) {
     .setFooter({ text: `Pokazano ${Math.min(logs.length, 8)} z ${logs.length} zdarzen` });
 }
 
+function formatRfidUsers(users) {
+  if (users.length === 0) {
+    return "Brak zarejestrowanych uzytkownikow RFID.";
+  }
+
+  return users
+    .slice(0, 12)
+    .map(user => `• **${user.name}**\nTag: \`${user.tagId}\`\nSkrytki: ${user.allowedLockers.map(locker => `S${locker}`).join(", ")}`)
+    .join("\n\n");
+}
+
+function buildUsersEmbed(users) {
+  return buildBaseEmbed("Uzytkownicy RFID", BRAND.accent)
+    .setDescription(formatRfidUsers(users))
+    .setFooter({ text: `Uzytkownikow: ${users.length}` });
+}
+
+function parseLockerList(input) {
+  return [...new Set(String(input)
+    .split(",")
+    .map(value => Number(value.trim()))
+    .filter(value => Number.isInteger(value)))];
+}
+
 function buildDashboardComponents() {
   return [
     new ActionRowBuilder().addComponents(
@@ -442,7 +502,7 @@ async function resolveNotificationsChannel(client, channelId) {
 async function replyWithEmbed(interaction, embed, options = {}) {
   await interaction.reply({
     embeds: [embed],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     ...options
   });
 }
@@ -564,7 +624,7 @@ async function createDiscordBot(config, lockerService) {
             )
           ],
           components: buildDashboardComponents(),
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -669,6 +729,70 @@ async function createDiscordBot(config, lockerService) {
           break;
         }
 
+        case "locker-users": {
+          const users = await lockerService.getRfidUsers();
+          await replyWithEmbed(interaction, buildUsersEmbed(users), {
+            components: buildDashboardComponents()
+          });
+          break;
+        }
+
+        case "locker-user-add": {
+          const name = interaction.options.getString("nazwa", true);
+          const tagId = interaction.options.getString("tag", true);
+          const allowedLockers = parseLockerList(interaction.options.getString("skrytki", true));
+          const user = await lockerService.createRfidUser({
+            name,
+            tagId,
+            allowedLockers
+          }, {
+            source: "discord",
+            actor
+          });
+
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Uzytkownik RFID dodany",
+              `Dodano **${user.name}** z tagiem \`${user.tagId}\`.`
+            ).addFields({
+              name: "Skrytki",
+              value: user.allowedLockers.map(locker => `S${locker}`).join(", ")
+            }),
+            {
+              components: buildDashboardComponents()
+            }
+          );
+          break;
+        }
+
+        case "locker-user-remove": {
+          const tagId = interaction.options.getString("tag", true).trim().replace(/\s+/g, "").toUpperCase();
+          const users = await lockerService.getRfidUsers();
+          const found = users.find(user => user.tagId === tagId);
+
+          if (!found) {
+            throw Object.assign(new Error("Nie znaleziono uzytkownika z tym tagiem RFID."), { status: 404 });
+          }
+
+          await lockerService.deleteRfidUser(found._id.toString(), {
+            source: "discord",
+            actor
+          });
+
+          await replyWithEmbed(
+            interaction,
+            buildSuccessEmbed(
+              "Uzytkownik RFID usuniety",
+              `Usunieto **${found.name}** z tagiem \`${found.tagId}\`.`
+            ),
+            {
+              components: buildDashboardComponents()
+            }
+          );
+          break;
+        }
+
         case "locker-logs": {
           const logs = await lockerService.getLogs();
           await replyWithEmbed(interaction, buildLogsEmbed(logs), {
@@ -717,9 +841,9 @@ async function createDiscordBot(config, lockerService) {
       const embed = buildErrorEmbed(message);
 
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ embeds: [embed], ephemeral: true }).catch(() => {});
+        await interaction.followUp({ embeds: [embed], flags: MessageFlags.Ephemeral }).catch(() => {});
       } else {
-        await interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral }).catch(() => {});
       }
     }
   });

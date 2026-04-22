@@ -265,6 +265,81 @@ ul {
   flex-wrap: wrap;
 }
 
+.menu-button {
+  min-height: 44px;
+  width: 44px;
+  padding: 0;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 18, 32, 0.75);
+  border: 1px solid var(--line);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.menu-button span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 999px;
+  position: relative;
+}
+
+.menu-button span::before,
+.menu-button span::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 18px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 999px;
+}
+
+.menu-button span::before {
+  top: -6px;
+}
+
+.menu-button span::after {
+  top: 6px;
+}
+
+.menu-drawer {
+  position: absolute;
+  top: 78px;
+  right: 28px;
+  min-width: 220px;
+  padding: 12px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  z-index: 6;
+}
+
+.menu-drawer nav {
+  display: grid;
+  gap: 8px;
+}
+
+.menu-link {
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.08);
+  box-shadow: none;
+}
+
+.menu-link.active {
+  background: linear-gradient(135deg, var(--accent-2), #9af0d1);
+  color: #04111b;
+}
+
 .app-shell {
   position: relative;
   z-index: 1;
@@ -326,6 +401,14 @@ ul {
   grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
   gap: 24px;
   align-items: start;
+}
+
+.page {
+  display: none;
+}
+
+.page.active {
+  display: block;
 }
 
 .left {
@@ -715,6 +798,90 @@ select:focus,
   font-size: 22px;
 }
 
+.users-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.users-sidebar,
+.users-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.checkbox-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.05);
+}
+
+.checkbox-card input {
+  accent-color: var(--accent-2);
+}
+
+.users-list {
+  display: grid;
+  gap: 14px;
+}
+
+.user-card {
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.04);
+}
+
+.user-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.user-card-title {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.user-tag-chip,
+.user-locker-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.06);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-lockers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.user-card-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
 .timer {
   display: inline-flex;
   align-items: center;
@@ -778,6 +945,11 @@ select:focus,
     gap: 18px;
   }
 
+  .users-layout,
+  .checkbox-grid {
+    grid-template-columns: 1fr;
+  }
+
   .field-grid,
   .lockers {
     grid-template-columns: 1fr;
@@ -801,6 +973,11 @@ select:focus,
   .section-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .user-card-header,
+  .user-card-actions {
+    flex-direction: column;
   }
 
   .locker-top,
@@ -890,6 +1067,13 @@ select:focus,
     gap: 12px;
   }
 
+  .menu-drawer {
+    top: 68px;
+    right: 14px;
+    left: 14px;
+    min-width: 0;
+  }
+
   .app-shell {
     padding: 12px 14px 20px;
   }
@@ -963,6 +1147,9 @@ select:focus,
 </div>
 
 <div class="topbar-actions">
+<button id="menuButton" class="menu-button" type="button" aria-label="Otworz menu">
+<span></span>
+</button>
 <button id="themeToggle" class="theme-toggle" type="button">Motyw: system</button>
 <div id="userChip" class="user-chip hidden">
 <strong id="userDisplayName"></strong>
@@ -976,7 +1163,15 @@ select:focus,
 </div>
 </div>
 
+<div id="menuDrawer" class="menu-drawer hidden">
+<nav>
+<button class="menu-link active" type="button" data-page="dashboard">Dashboard</button>
+<button class="menu-link" type="button" data-page="users">Uzytkownicy RFID</button>
+</nav>
+</div>
+
 <div class="app-shell">
+<section id="dashboardPage" class="page active">
 <div class="dashboard">
 <div class="left">
 
@@ -1063,6 +1258,59 @@ select:focus,
 </div>
 </div>
 </div>
+</section>
+
+<section id="usersPage" class="page">
+<div class="users-layout">
+<div class="users-sidebar">
+<div class="card">
+<div class="section-copy">
+<h2 class="card-title">Uzytkownicy RFID</h2>
+<p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, ktore skrytki moga otwierac po przylozeniu karty.</p>
+</div>
+
+<form id="rfidUserForm" class="auth-form">
+<input id="rfidUserId" type="hidden">
+
+<label class="field">
+<span class="field-label">Nazwa uzytkownika</span>
+<input id="rfidUserName" type="text" placeholder="np. Jan Kowalski" required>
+</label>
+
+<label class="field">
+<span class="field-label">ID taga RFID</span>
+<input id="rfidUserTagId" type="text" placeholder="np. 04A1B2C3D4" required>
+</label>
+
+<div class="field">
+<span class="field-label">Skrytki z dostepem</span>
+<div class="checkbox-grid">
+<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="1"> <span>Skrytka 1</span></label>
+<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="2"> <span>Skrytka 2</span></label>
+<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="3"> <span>Skrytka 3</span></label>
+</div>
+</div>
+
+<button id="rfidUserSubmit" type="submit">Dodaj uzytkownika</button>
+<button id="rfidUserReset" class="secondary-button" type="button">Wyczysc formularz</button>
+</form>
+</div>
+</div>
+
+<div class="users-main">
+<div class="card">
+<div class="section-header">
+<div class="section-copy">
+<h2>Lista uzytkownikow</h2>
+<p>Przegladaj i edytuj przypisania kart RFID do skrytek oraz przygotuj konfiguracje pod czytnik uzytkownika.</p>
+</div>
+<button class="secondary-button" type="button" onclick="loadRfidUsers()">Odswiez liste</button>
+</div>
+<div id="rfidUsersList" class="users-list"></div>
+</div>
+</div>
+</div>
+</section>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -1078,6 +1326,8 @@ let lastHttpOk = true;
 let socket = null;
 let isAuthenticated = false;
 let currentUser = null;
+let currentPage = "dashboard";
+let rfidUsersData = [];
 
 function showAuthView(message = "") {
   isAuthenticated = false;
@@ -1100,6 +1350,7 @@ function showAppView() {
   document.getElementById("appView").classList.remove("hidden");
   document.getElementById("authError").innerText = "";
   updateUserChip();
+  setPage(currentPage, false);
 }
 
 function updateUserChip() {
@@ -1135,6 +1386,14 @@ function connectSocket() {
     ].includes(log.event)) {
       await loadLockers();
     }
+
+    if ([
+      "RFID_USER_CREATED",
+      "RFID_USER_UPDATED",
+      "RFID_USER_DELETED"
+    ].includes(log.event)) {
+      await loadRfidUsers();
+    }
   });
   socket.on("logs-cleared", () => {
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
@@ -1148,6 +1407,25 @@ function connectSocket() {
   socket.on("connect_error", () => {
     setServerStatus("offline", "Nie można połączyć z serwerem");
   });
+}
+
+function toggleMenu(forceOpen = null) {
+  const drawer = document.getElementById("menuDrawer");
+  const shouldOpen = forceOpen === null ? drawer.classList.contains("hidden") : forceOpen;
+  drawer.classList.toggle("hidden", !shouldOpen);
+}
+
+function setPage(page, closeMenu = true) {
+  currentPage = page;
+  document.getElementById("dashboardPage").classList.toggle("active", page === "dashboard");
+  document.getElementById("usersPage").classList.toggle("active", page === "users");
+  document.querySelectorAll(".menu-link").forEach(link => {
+    link.classList.toggle("active", link.dataset.page === page);
+  });
+
+  if (closeMenu) {
+    toggleMenu(false);
+  }
 }
 
 function getStoredTheme() {
@@ -1307,8 +1585,161 @@ async function initializeDashboard() {
   await Promise.all([
     loadLockers(),
     loadActiveCodes(),
-    loadLogs()
+    loadLogs(),
+    loadRfidUsers()
   ]);
+}
+
+function resetRfidUserForm() {
+  document.getElementById("rfidUserId").value = "";
+  document.getElementById("rfidUserName").value = "";
+  document.getElementById("rfidUserTagId").value = "";
+  document.querySelectorAll('input[name="allowedLocker"]').forEach(input => {
+    input.checked = false;
+  });
+  document.getElementById("rfidUserSubmit").textContent = "Dodaj uzytkownika";
+}
+
+function getSelectedAllowedLockers() {
+  return [...document.querySelectorAll('input[name="allowedLocker"]:checked')]
+    .map(input => Number(input.value));
+}
+
+function populateRfidUserForm(user) {
+  document.getElementById("rfidUserId").value = user._id;
+  document.getElementById("rfidUserName").value = user.name;
+  document.getElementById("rfidUserTagId").value = user.tagId;
+  document.querySelectorAll('input[name="allowedLocker"]').forEach(input => {
+    input.checked = user.allowedLockers.includes(Number(input.value));
+  });
+  document.getElementById("rfidUserSubmit").textContent = "Zapisz zmiany";
+  setPage("users");
+}
+
+function renderRfidUsers() {
+  const container = document.getElementById("rfidUsersList");
+  container.innerHTML = "";
+
+  if (rfidUsersData.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted-empty";
+    empty.textContent = "Brak zarejestrowanych uzytkownikow RFID.";
+    container.appendChild(empty);
+    return;
+  }
+
+  rfidUsersData.forEach(user => {
+    const card = document.createElement("div");
+    card.className = "user-card";
+
+    const header = document.createElement("div");
+    header.className = "user-card-header";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("h3");
+    title.className = "user-card-title";
+    title.textContent = user.name;
+
+    const tag = document.createElement("div");
+    tag.className = "user-tag-chip";
+    tag.textContent = `Tag RFID: ${user.tagId}`;
+
+    meta.appendChild(title);
+    meta.appendChild(tag);
+
+    const actions = document.createElement("div");
+    actions.className = "user-card-actions";
+
+    const editButton = document.createElement("button");
+    editButton.className = "secondary-button";
+    editButton.textContent = "Edytuj";
+    editButton.addEventListener("click", () => populateRfidUserForm(user));
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "danger";
+    deleteButton.textContent = "Usun";
+    deleteButton.addEventListener("click", () => deleteRfidUser(user._id, user.name));
+
+    actions.appendChild(editButton);
+    actions.appendChild(deleteButton);
+    header.appendChild(meta);
+    header.appendChild(actions);
+
+    const lockers = document.createElement("div");
+    lockers.className = "user-lockers";
+    user.allowedLockers.forEach(locker => {
+      const chip = document.createElement("span");
+      chip.className = "user-locker-chip";
+      chip.textContent = `S${locker}`;
+      lockers.appendChild(chip);
+    });
+
+    card.appendChild(header);
+    card.appendChild(lockers);
+    container.appendChild(card);
+  });
+}
+
+async function loadRfidUsers() {
+  try {
+    rfidUsersData = await apiFetch("/users");
+    renderRfidUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function submitRfidUserForm(event) {
+  event.preventDefault();
+
+  const userId = document.getElementById("rfidUserId").value;
+  const payload = {
+    name: document.getElementById("rfidUserName").value.trim(),
+    tagId: document.getElementById("rfidUserTagId").value.trim(),
+    allowedLockers: getSelectedAllowedLockers()
+  };
+
+  try {
+    if (userId) {
+      await apiFetch(`/users/${userId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Uzytkownik RFID zaktualizowany.");
+    } else {
+      await apiFetch("/users", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Uzytkownik RFID dodany.");
+    }
+
+    resetRfidUserForm();
+    await loadRfidUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function deleteRfidUser(userId, name) {
+  const confirmed = window.confirm(`Czy na pewno chcesz usunac uzytkownika ${name}?`);
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiFetch(`/users/${userId}`, {
+      method: "DELETE"
+    });
+    showToast("Uzytkownik RFID usuniety.");
+    resetRfidUserForm();
+    await loadRfidUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
 }
 
 async function generateCode() {
@@ -1572,6 +2003,24 @@ function addLog(log) {
       text = "⚠️ zwolniono blokade wszystkich skrytek";
       cls = "log-warning";
       break;
+    case "RFID_ACCESS_GRANTED":
+      text = "🪪 autoryzowany tag RFID";
+      cls = "log-success";
+      break;
+    case "RFID_ACCESS_DENIED":
+      text = "⛔ odrzucony tag RFID";
+      cls = "log-error";
+      break;
+    case "RFID_USER_CREATED":
+      text = "👤 dodano uzytkownika RFID";
+      break;
+    case "RFID_USER_UPDATED":
+      text = "🛠️ zaktualizowano uzytkownika RFID";
+      break;
+    case "RFID_USER_DELETED":
+      text = "🗑️ usunieto uzytkownika RFID";
+      cls = "log-warning";
+      break;
   }
 
   li.className = cls;
@@ -1617,7 +2066,13 @@ async function clearLogs() {
 }
 
 document.getElementById("themeToggle").addEventListener("click", cycleTheme);
+document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
+document.querySelectorAll(".menu-link").forEach(link => {
+  link.addEventListener("click", () => setPage(link.dataset.page));
+});
 document.getElementById("logoutButton").addEventListener("click", logout);
+document.getElementById("rfidUserForm").addEventListener("submit", submitRfidUserForm);
+document.getElementById("rfidUserReset").addEventListener("click", resetRfidUserForm);
 document.getElementById("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
 
@@ -1631,6 +2086,19 @@ document.getElementById("loginForm").addEventListener("submit", async event => {
     showToast("Zalogowano pomyślnie.");
   } catch (error) {
     document.getElementById("authError").innerText = error.message;
+  }
+});
+
+document.addEventListener("click", event => {
+  const drawer = document.getElementById("menuDrawer");
+  const menuButton = document.getElementById("menuButton");
+
+  if (drawer.classList.contains("hidden")) {
+    return;
+  }
+
+  if (!drawer.contains(event.target) && !menuButton.contains(event.target)) {
+    toggleMenu(false);
   }
 });
 

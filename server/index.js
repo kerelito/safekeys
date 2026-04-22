@@ -180,6 +180,7 @@ app.use([
   "/open-locker",
   "/release-all-lockers",
   "/lockers",
+  "/users",
   "/active-codes",
   "/logs",
   "/logs/clear"
@@ -188,6 +189,12 @@ app.use([
 app.post("/verify-code", requireDeviceKey, asyncHandler(async (req, res) => {
   const { code } = req.body;
   const result = await lockerService.verifyCode(code, { source: "device" });
+  res.json(result);
+}));
+
+app.post("/verify-tag", requireDeviceKey, asyncHandler(async (req, res) => {
+  const { tagId } = req.body;
+  const result = await lockerService.verifyRfidTag(tagId, { source: "rfid-user" });
   res.json(result);
 }));
 
@@ -236,6 +243,46 @@ app.post("/release-all-lockers", asyncHandler(async (req, res) => {
 
 app.get("/lockers", asyncHandler(async (req, res) => {
   const result = await lockerService.getLockers();
+  res.json(result);
+}));
+
+app.get("/users", asyncHandler(async (req, res) => {
+  const users = await lockerService.getRfidUsers();
+  res.json(users);
+}));
+
+app.post("/users", asyncHandler(async (req, res) => {
+  const result = await lockerService.createRfidUser({
+    name: req.body.name,
+    tagId: req.body.tagId,
+    allowedLockers: req.body.allowedLockers
+  }, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.status(201).json(result);
+}));
+
+app.put("/users/:userId", asyncHandler(async (req, res) => {
+  const result = await lockerService.updateRfidUser(req.params.userId, {
+    name: req.body.name,
+    tagId: req.body.tagId,
+    allowedLockers: req.body.allowedLockers
+  }, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.json(result);
+}));
+
+app.delete("/users/:userId", asyncHandler(async (req, res) => {
+  const result = await lockerService.deleteRfidUser(req.params.userId, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
   res.json(result);
 }));
 

@@ -11,11 +11,15 @@ Gotowy szkic startowy dla ESP32 znajdziesz w [SafeKeysESP32.ino](/Users/karol/Pr
 - raportowanie stanu RFID przez `POST /locker-status`
 - raportowanie stanu kontraktonu przez `POST /locker-door-status`
 - weryfikacje 4-cyfrowego kodu przez `POST /verify-code`
+- weryfikacje uzytkownika RFID przez `POST /verify-tag`
 
 ## Zalozenia sprzetowe
 
 - 3 przekazniki do zamkow
-- 3 wejscia cyfrowe dla informacji `hasTag`
+- docelowo 4 czytniki RFID po SPI:
+  3 do sprawdzania obecnosci klucza w skrytkach
+  1 dla uzytkownika przykladajacego swoja karte
+- obecny szkic zostawia miejsce na podpiecie biblioteki czytnika i endpointu `/verify-tag`
 - 3 wejscia cyfrowe dla informacji `isDoorClosed`
 - klawiatura 4x4 do wpisywania kodu
 
@@ -39,4 +43,4 @@ Zainstaluj:
 
 ## Wazna uwaga
 
-Jesli Twoj modul RFID nie daje prostego sygnalu HIGH/LOW, tylko trzeba czytac go po SPI/UART/I2C, to zamien funkcje `readTagPresent()` na wlasna implementacje dla konkretnego czytnika.
+Jesli Twoj modul RFID nie daje prostego sygnalu HIGH/LOW, tylko trzeba czytac go po SPI/UART/I2C, to zamien funkcje `readTagPresent()` na wlasna implementacje dla konkretnego czytnika i wykorzystaj `verifyUserTagRemotely()` dla czytnika uzytkownika.

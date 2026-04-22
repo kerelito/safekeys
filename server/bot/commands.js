@@ -74,6 +74,44 @@ const commands = [
     .setDMPermission(false),
 
   new SlashCommandBuilder()
+    .setName("locker-users")
+    .setDescription("Pokazuje liste uzytkownikow RFID i ich uprawnienia.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName("locker-user-add")
+    .setDescription("Dodaje nowego uzytkownika RFID.")
+    .addStringOption(option =>
+      option
+        .setName("nazwa")
+        .setDescription("Nazwa uzytkownika")
+        .setRequired(true))
+    .addStringOption(option =>
+      option
+        .setName("tag")
+        .setDescription("ID taga RFID")
+        .setRequired(true))
+    .addStringOption(option =>
+      option
+        .setName("skrytki")
+        .setDescription("Lista skrytek, np. 1,2")
+        .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName("locker-user-remove")
+    .setDescription("Usuwa uzytkownika RFID po ID taga.")
+    .addStringOption(option =>
+      option
+        .setName("tag")
+        .setDescription("ID taga RFID")
+        .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
     .setName("locker-logs")
     .setDescription("Pokazuje ostatnie zdarzenia systemowe.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)

@@ -60,9 +60,41 @@ const LockerSchema = new mongoose.Schema({
   }
 });
 
+const RfidUserSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  tagId: {
+    type: String,
+    required: true,
+    unique: true,
+    uppercase: true,
+    trim: true
+  },
+  allowedLockers: [{
+    type: Number,
+    required: true
+  }],
+  active: {
+    type: Boolean,
+    default: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
 const Code = mongoose.models.Code || mongoose.model("Code", CodeSchema);
 const Log = mongoose.models.Log || mongoose.model("Log", LogSchema);
 const Locker = mongoose.models.Locker || mongoose.model("Locker", LockerSchema);
+const RfidUser = mongoose.models.RfidUser || mongoose.model("RfidUser", RfidUserSchema);
 
 const ALLOWED_LOCKERS = [1, 2, 3];
 const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
@@ -101,6 +133,41 @@ function assertValidDoorClosed(isDoorClosed) {
   if (typeof isDoorClosed !== "boolean") {
     throw createHttpError(400, "Pole isDoorClosed musi być typu boolean.");
   }
+}
+
+function normalizeTagId(tagId) {
+  return typeof tagId === "string"
+    ? tagId.trim().replace(/\s+/g, "").toUpperCase()
+    : "";
+}
+
+function assertValidTagId(tagId) {
+  const normalizedTagId = normalizeTagId(tagId);
+
+  if (!normalizedTagId || normalizedTagId.length < 4) {
+    throw createHttpError(400, "Podaj prawidlowe ID taga RFID.");
+  }
+
+  return normalizedTagId;
+}
+
+function assertValidUserName(name) {
+  if (typeof name !== "string" || name.trim().length < 2) {
+    throw createHttpError(400, "Podaj nazwe uzytkownika.");
+  }
+
+  return name.trim();
+}
+
+function assertValidAllowedLockers(allowedLockers) {
+  if (!Array.isArray(allowedLockers) || allowedLockers.length === 0) {
+    throw createHttpError(400, "Wybierz co najmniej jedna skrytke.");
+  }
+
+  const normalized = [...new Set(allowedLockers.map(value => Number(value)))];
+
+  normalized.forEach(locker => assertValidLocker(locker));
+  return normalized.sort((a, b) => a - b);
 }
 
 class LockerService extends EventEmitter {
@@ -355,6 +422,136 @@ class LockerService extends EventEmitter {
 
   async getLogs() {
     return Log.find().sort({ timestamp: -1 }).limit(50);
+  }
+
+  async getRfidUsers() {
+    return RfidUser.find().sort({ name: 1 }).lean();
+  }
+
+  async createRfidUser(payload, context = {}) {
+    const name = assertValidUserName(payload.name);
+    const tagId = assertValidTagId(payload.tagId);
+    const allowedLockers = assertValidAllowedLockers(payload.allowedLockers);
+
+    const existing = await RfidUser.findOne({ tagId });
+    if (existing) {
+      throw createHttpError(409, "Uzytkownik z tym tagiem RFID juz istnieje.");
+    }
+
+    const user = await RfidUser.create({
+      name,
+      tagId,
+      allowedLockers,
+      updatedAt: new Date()
+    });
+
+    await this.createLog({
+      event: "RFID_USER_CREATED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${name} • ${tagId}`
+    });
+
+    return user.toObject();
+  }
+
+  async updateRfidUser(userId, payload, context = {}) {
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      throw createHttpError(400, "Nieprawidlowe ID uzytkownika.");
+    }
+
+    const name = assertValidUserName(payload.name);
+    const tagId = assertValidTagId(payload.tagId);
+    const allowedLockers = assertValidAllowedLockers(payload.allowedLockers);
+    const user = await RfidUser.findById(userId);
+
+    if (!user) {
+      throw createHttpError(404, "Nie znaleziono uzytkownika RFID.");
+    }
+
+    const existingWithTag = await RfidUser.findOne({ tagId, _id: { $ne: userId } });
+    if (existingWithTag) {
+      throw createHttpError(409, "Inny uzytkownik ma juz ten tag RFID.");
+    }
+
+    user.name = name;
+    user.tagId = tagId;
+    user.allowedLockers = allowedLockers;
+    user.updatedAt = new Date();
+    await user.save();
+
+    await this.createLog({
+      event: "RFID_USER_UPDATED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${name} • ${tagId}`
+    });
+
+    return user.toObject();
+  }
+
+  async deleteRfidUser(userId, context = {}) {
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      throw createHttpError(400, "Nieprawidlowe ID uzytkownika.");
+    }
+
+    const user = await RfidUser.findById(userId);
+    if (!user) {
+      throw createHttpError(404, "Nie znaleziono uzytkownika RFID.");
+    }
+
+    await user.deleteOne();
+
+    await this.createLog({
+      event: "RFID_USER_DELETED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${user.name} • ${user.tagId}`
+    });
+
+    return { success: true };
+  }
+
+  async verifyRfidTag(tagId, context = {}) {
+    const normalizedTagId = assertValidTagId(tagId);
+    const user = await RfidUser.findOne({ tagId: normalizedTagId, active: true });
+
+    if (!user) {
+      await this.createLog({
+        event: "RFID_ACCESS_DENIED",
+        source: context.source || "rfid-user",
+        actor: normalizedTagId
+      });
+
+      return {
+        valid: false
+      };
+    }
+
+    const openedLockers = [];
+
+    for (const locker of user.allowedLockers) {
+      await this.openLocker(locker, {
+        source: context.source || "rfid-user",
+        actor: `${user.name} • ${user.tagId}`
+      });
+      openedLockers.push(locker);
+    }
+
+    await this.createLog({
+      event: "RFID_ACCESS_GRANTED",
+      source: context.source || "rfid-user",
+      actor: `${user.name} • ${user.tagId}`,
+      success: true
+    });
+
+    return {
+      valid: true,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        tagId: user.tagId
+      },
+      allowedLockers: [...user.allowedLockers],
+      openedLockers
+    };
   }
 
   async clearLogs(context = {}) {
