@@ -129,7 +129,7 @@ function updateThemeButton(theme) {
 
 function updateThemeColor(resolvedTheme) {
   const metaTheme = document.querySelector('meta[name="theme-color"]');
-  metaTheme.setAttribute("content", resolvedTheme === "dark" ? "#07111f" : "#eef4ff");
+  metaTheme.setAttribute("content", resolvedTheme === "dark" ? "#07111f" : "#edf3ff");
 }
 
 function applyTheme(theme) {
