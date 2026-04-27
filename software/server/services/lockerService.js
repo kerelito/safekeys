@@ -31,8 +31,30 @@ function parseGenerateCodeInput(lockerOrPayload, hours) {
   };
 }
 
-function normalizeEmailError(message) {
-  if (typeof message !== "string" || !message.trim()) {
+function normalizeEmailError(error) {
+  if (!error) {
+    return "Nie udało się wysłać wiadomości e-mail.";
+  }
+
+  if (error.code === "ETIMEDOUT") {
+    return "Polaczenie z serwerem SMTP przekroczylo limit czasu. Sprawdz host, port oraz to, czy hosting pozwala na ruch SMTP.";
+  }
+
+  if (error.code === "ENOTFOUND") {
+    return "Nie udalo sie odnalezc serwera SMTP. Sprawdz adres SMTP_HOST.";
+  }
+
+  if (error.code === "ECONNREFUSED") {
+    return "Serwer SMTP odrzucil polaczenie. Sprawdz port oraz ustawienie SMTP_SECURE.";
+  }
+
+  if (error.code === "EAUTH") {
+    return "Logowanie do SMTP nie powiodlo sie. Sprawdz SMTP_USER i SMTP_PASS.";
+  }
+
+  const message = typeof error.message === "string" ? error.message : "";
+
+  if (!message.trim()) {
     return "Nie udało się wysłać wiadomości e-mail.";
   }
 
@@ -175,7 +197,7 @@ class LockerService extends EventEmitter {
         sentAt: codeRecord.emailSentAt
       };
     } catch (error) {
-      const errorMessage = normalizeEmailError(error.message);
+      const errorMessage = normalizeEmailError(error);
 
       console.error("Nie udalo sie wyslac e-maila z kodem SafeKeys.", {
         locker: codeRecord.locker,
@@ -186,7 +208,10 @@ class LockerService extends EventEmitter {
         errorMessage: error.message,
         errorCode: error.code || null,
         errorResponse: error.response || null,
-        errorCommand: error.command || null
+        errorCommand: error.command || null,
+        smtpHost: error.smtpHost || null,
+        smtpPort: error.smtpPort || null,
+        smtpSecure: error.smtpSecure ?? null
       });
 
       codeRecord.emailDeliveryAttempted = true;

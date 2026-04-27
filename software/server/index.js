@@ -191,7 +191,14 @@ lockerService.setEmailService(emailService);
 if (emailService.isEnabled()) {
   emailService.verifyConnection()
     .then(() => console.log("Wysylka e-mail aktywna ✅"))
-    .catch(error => console.error("Nie udalo sie zweryfikowac SMTP ❌", error));
+    .catch(error => console.error("Nie udalo sie zweryfikowac SMTP ❌", {
+      errorMessage: error.message,
+      errorCode: error.code || null,
+      errorCommand: error.command || null,
+      smtpHost: error.smtpHost || null,
+      smtpPort: error.smtpPort || null,
+      smtpSecure: error.smtpSecure ?? null
+    }));
 } else {
   console.log("Wysylka e-mail pominięta: brak konfiguracji SMTP.");
 }
