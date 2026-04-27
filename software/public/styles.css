@@ -381,17 +381,119 @@ ul {
   padding: 20px 28px 34px;
 }
 
-.server-status {
+.system-status {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--control-bg);
   backdrop-filter: blur(14px);
+}
+
+.status-indicator {
+  position: relative;
+  min-height: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-indicator:hover,
+.status-indicator:focus,
+.status-indicator:focus-visible {
+  transform: none;
+  filter: none;
+  box-shadow: none;
+}
+
+.status-indicator:focus-visible {
+  outline: 2px solid rgba(107, 197, 255, 0.5);
+  outline-offset: 4px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 16px rgba(255, 207, 102, 0.65);
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.status-indicator.is-online .status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 16px rgba(115, 224, 169, 0.72);
+}
+
+.status-indicator.is-offline .status-dot {
+  background: var(--danger);
+  box-shadow: 0 0 16px rgba(255, 107, 107, 0.7);
+}
+
+.status-indicator:hover .status-dot,
+.status-indicator:focus .status-dot,
+.status-indicator:focus-visible .status-dot {
+  transform: scale(1.15);
+}
+
+.status-popover {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  min-width: 220px;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)),
+    var(--panel-strong);
+  color: var(--text);
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  z-index: 5;
+}
+
+.status-popover strong {
   font-size: 13px;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.status-popover small {
   color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.status-lines {
+  display: grid;
+  gap: 4px;
+}
+
+.status-line {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.status-indicator:hover .status-popover,
+.status-indicator:focus .status-popover,
+.status-indicator:focus-visible .status-popover {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .theme-toggle {
@@ -410,29 +512,12 @@ ul {
 :root[data-theme="light"] .theme-toggle,
 :root[data-theme="light"] .menu-button,
 :root[data-theme="light"] .logout-button,
-:root[data-theme="light"] .server-status,
+:root[data-theme="light"] .system-status,
+:root[data-theme="light"] .status-popover,
 :root[data-theme="light"] .user-chip {
   background: var(--control-bg);
   color: var(--text);
   box-shadow: 0 10px 26px rgba(46, 73, 112, 0.08);
-}
-
-.server-status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--warning);
-  box-shadow: 0 0 16px rgba(255, 207, 102, 0.65);
-}
-
-.server-status.online .server-status-dot {
-  background: var(--accent);
-  box-shadow: 0 0 16px rgba(115, 224, 169, 0.72);
-}
-
-.server-status.offline .server-status-dot {
-  background: var(--danger);
-  box-shadow: 0 0 16px rgba(255, 107, 107, 0.7);
 }
 
 .dashboard {
@@ -1156,9 +1241,21 @@ select:focus,
 
   .hero-badge,
   .theme-toggle,
-  .server-status {
+  .system-status {
     width: 100%;
     justify-content: center;
+  }
+
+  .status-popover {
+    right: auto;
+    left: 50%;
+    transform: translate(-50%, -4px);
+  }
+
+  .status-indicator:hover .status-popover,
+  .status-indicator:focus .status-popover,
+  .status-indicator:focus-visible .status-popover {
+    transform: translate(-50%, 0);
   }
 
   .card {

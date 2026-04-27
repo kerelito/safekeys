@@ -36,6 +36,7 @@ const SMTP_REPLY_TO = process.env.SMTP_REPLY_TO;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
+const DEVICE_HEARTBEAT_TIMEOUT_MS = 45 * 1000;
 
 if (!MONGODB_URI) {
   throw new Error("Brakuje zmiennej środowiskowej MONGODB_URI.");
@@ -119,6 +120,55 @@ function requireDeviceKey(req, res, next) {
 
 function getSessionActor(req, fallback = "panel") {
   return req.session?.displayName || req.session?.username || fallback;
+}
+
+const MONGOOSE_STATES = {
+  0: "disconnected",
+  1: "connected",
+  2: "connecting",
+  3: "disconnecting"
+};
+
+const deviceStatus = {
+  lastSeenAt: null,
+  pingMs: null,
+  wifiRssi: null,
+  ip: null,
+  firmware: null,
+  uptimeMs: null,
+  freeHeap: null
+};
+
+function getDatabaseStatus() {
+  const readyState = mongoose.connection.readyState;
+  return {
+    connected: readyState === 1,
+    state: MONGOOSE_STATES[readyState] || "unknown"
+  };
+}
+
+function getEsp32Status() {
+  const lastSeenAt = deviceStatus.lastSeenAt ? new Date(deviceStatus.lastSeenAt) : null;
+  const connected = Boolean(lastSeenAt) && (Date.now() - lastSeenAt.getTime()) <= DEVICE_HEARTBEAT_TIMEOUT_MS;
+
+  return {
+    connected,
+    lastSeenAt: deviceStatus.lastSeenAt,
+    pingMs: deviceStatus.pingMs,
+    wifiRssi: deviceStatus.wifiRssi,
+    ip: deviceStatus.ip,
+    firmware: deviceStatus.firmware,
+    uptimeMs: deviceStatus.uptimeMs,
+    freeHeap: deviceStatus.freeHeap
+  };
+}
+
+function buildSystemStatus() {
+  return {
+    serverTime: new Date().toISOString(),
+    database: getDatabaseStatus(),
+    esp32: getEsp32Status()
+  };
 }
 
 mongoose.connect(MONGODB_URI)
@@ -210,6 +260,7 @@ app.use([
   "/open-locker",
   "/release-all-lockers",
   "/lockers",
+  "/system-status",
   "/users",
   "/active-codes",
   "/logs",
@@ -339,10 +390,27 @@ app.post("/locker-door-status", requireDeviceKey, asyncHandler(async (req, res) 
   res.json(result);
 }));
 
+app.post("/device/heartbeat", requireDeviceKey, (req, res) => {
+  deviceStatus.lastSeenAt = new Date().toISOString();
+  deviceStatus.pingMs = typeof req.body.pingMs === "number" ? req.body.pingMs : null;
+  deviceStatus.wifiRssi = typeof req.body.wifiRssi === "number" ? req.body.wifiRssi : null;
+  deviceStatus.ip = typeof req.body.ip === "string" ? req.body.ip : null;
+  deviceStatus.firmware = typeof req.body.firmware === "string" ? req.body.firmware : null;
+  deviceStatus.uptimeMs = typeof req.body.uptimeMs === "number" ? req.body.uptimeMs : null;
+  deviceStatus.freeHeap = typeof req.body.freeHeap === "number" ? req.body.freeHeap : null;
+
+  io.emit("system-status", buildSystemStatus());
+  res.json({ ok: true, serverTime: new Date().toISOString() });
+});
+
 app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
   const actions = await lockerService.consumeRemoteActions();
   res.json({ actions });
 }));
+
+app.get("/system-status", (req, res) => {
+  res.json(buildSystemStatus());
+});
 
 app.get("/active-codes", asyncHandler(async (req, res) => {
   const codes = await lockerService.getActiveCodes();

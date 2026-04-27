@@ -62,9 +62,28 @@
 <span id="userUsername"></span>
 </div>
 <button id="logoutButton" class="logout-button" type="button">Wyloguj</button>
-<div id="serverStatus" class="server-status">
-<span class="server-status-dot"></span>
-<span id="serverStatusText">Łączenie z serwerem...</span>
+<div id="systemStatus" class="system-status" aria-label="Status systemu">
+<button id="serverStatus" class="status-indicator" type="button" data-service="server" aria-label="Status połączenia z serwerem">
+<span class="status-dot"></span>
+<span class="status-popover">
+<strong>Serwer</strong>
+<small>Łączenie...</small>
+</span>
+</button>
+<button id="databaseStatus" class="status-indicator" type="button" data-service="database" aria-label="Status połączenia z bazą danych">
+<span class="status-dot"></span>
+<span class="status-popover">
+<strong>Baza danych</strong>
+<small>Oczekiwanie na status...</small>
+</span>
+</button>
+<button id="esp32Status" class="status-indicator" type="button" data-service="esp32" aria-label="Status połączenia z ESP32">
+<span class="status-dot"></span>
+<span class="status-popover">
+<strong>ESP32</strong>
+<small>Oczekiwanie na heartbeat...</small>
+</span>
+</button>
 </div>
 </div>
 </div>

@@ -11,6 +11,135 @@ let isGeneratingCode = false;
 let currentUser = null;
 let currentPage = "dashboard";
 let rfidUsersData = [];
+let systemStatusData = null;
+
+const STATUS_ELEMENT_IDS = {
+  server: "serverStatus",
+  database: "databaseStatus",
+  esp32: "esp32Status"
+};
+
+function formatRelativeTime(value) {
+  if (!value) {
+    return "brak danych";
+  }
+
+  const diffMs = Date.now() - new Date(value).getTime();
+  if (Number.isNaN(diffMs) || diffMs < 0) {
+    return "przed chwilą";
+  }
+
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 5) {
+    return "przed chwilą";
+  }
+
+  if (seconds < 60) {
+    return `${seconds} s temu`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} min temu`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours} godz. temu`;
+}
+
+function updateStatusIndicator(service, { state = "pending", title, summary, lines = [] }) {
+  const element = document.getElementById(STATUS_ELEMENT_IDS[service]);
+  if (!element) {
+    return;
+  }
+
+  element.classList.remove("is-online", "is-offline");
+  if (state === "online") {
+    element.classList.add("is-online");
+  } else if (state === "offline") {
+    element.classList.add("is-offline");
+  }
+
+  const popover = element.querySelector(".status-popover");
+  popover.innerHTML = "";
+
+  const titleElement = document.createElement("strong");
+  titleElement.textContent = title;
+
+  const summaryElement = document.createElement("small");
+  summaryElement.textContent = summary;
+
+  popover.appendChild(titleElement);
+  popover.appendChild(summaryElement);
+
+  if (lines.length > 0) {
+    const linesWrapper = document.createElement("div");
+    linesWrapper.className = "status-lines";
+
+    lines.forEach(line => {
+      const lineElement = document.createElement("span");
+      lineElement.className = "status-line";
+      lineElement.textContent = line;
+      linesWrapper.appendChild(lineElement);
+    });
+
+    popover.appendChild(linesWrapper);
+  }
+}
+
+function renderSystemStatus() {
+  const socketConnected = Boolean(socket?.connected);
+  const databaseConnected = Boolean(systemStatusData?.database?.connected);
+  const esp32Connected = Boolean(systemStatusData?.esp32?.connected);
+  const databaseState = systemStatusData?.database?.state || "unknown";
+  const esp32 = systemStatusData?.esp32 || {};
+
+  updateStatusIndicator("server", {
+    state: lastHttpOk ? "online" : "offline",
+    title: "Serwer",
+    summary: lastHttpOk ? "API odpowiada poprawnie." : "Brak odpowiedzi z API.",
+    lines: [
+      `HTTP API: ${lastHttpOk ? "OK" : "brak odpowiedzi"}`,
+      `Socket.IO: ${socketConnected ? "połączony" : "rozłączony"}`
+    ]
+  });
+
+  updateStatusIndicator("database", {
+    state: databaseConnected ? "online" : "offline",
+    title: "Baza danych",
+    summary: databaseConnected ? "MongoDB jest dostępne." : "MongoDB nie jest dostępne.",
+    lines: [
+      `Stan połączenia: ${databaseState}`,
+      `Ostatnia aktualizacja: ${formatRelativeTime(systemStatusData?.serverTime)}`
+    ]
+  });
+
+  updateStatusIndicator("esp32", {
+    state: esp32Connected ? "online" : "offline",
+    title: "ESP32",
+    summary: esp32Connected ? "Heartbeat dociera do serwera." : "Brak świeżego heartbeat z urządzenia.",
+    lines: [
+      `Ostatni kontakt: ${formatRelativeTime(esp32.lastSeenAt)}`,
+      `Ping: ${typeof esp32.pingMs === "number" ? `${esp32.pingMs} ms` : "brak danych"}`,
+      `WiFi RSSI: ${typeof esp32.wifiRssi === "number" ? `${esp32.wifiRssi} dBm` : "brak danych"}`,
+      `IP: ${esp32.ip || "brak danych"}`
+    ]
+  });
+}
+
+async function refreshSystemStatus() {
+  if (!isAuthenticated) {
+    return;
+  }
+
+  try {
+    systemStatusData = await apiFetch("/system-status");
+  } catch (error) {
+    systemStatusData = null;
+  }
+
+  renderSystemStatus();
+}
 
 function showAuthView(message = "") {
   isAuthenticated = false;
@@ -25,6 +154,9 @@ function showAuthView(message = "") {
     socket.disconnect();
     socket = null;
   }
+
+  systemStatusData = null;
+  renderSystemStatus();
 }
 
 function showAppView() {
@@ -82,13 +214,18 @@ function connectSocket() {
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
   });
   socket.on("connect", () => {
-    setServerStatus(lastHttpOk ? "online" : "", lastHttpOk ? "Połączono z serwerem" : "Połączono, trwa weryfikacja API");
+    renderSystemStatus();
+    refreshSystemStatus();
+  });
+  socket.on("system-status", payload => {
+    systemStatusData = payload;
+    renderSystemStatus();
   });
   socket.on("disconnect", () => {
-    setServerStatus("offline", "Rozłączono z serwerem");
+    renderSystemStatus();
   });
   socket.on("connect_error", () => {
-    setServerStatus("offline", "Nie można połączyć z serwerem");
+    renderSystemStatus();
   });
 }
 
@@ -154,19 +291,6 @@ function renderEmptyState(listId, message) {
   empty.className = "muted-empty";
   empty.textContent = message;
   list.appendChild(empty);
-}
-
-function setServerStatus(state, label) {
-  const status = document.getElementById("serverStatus");
-  const text = document.getElementById("serverStatusText");
-
-  status.classList.remove("online", "offline");
-
-  if (state) {
-    status.classList.add(state);
-  }
-
-  text.innerText = label;
 }
 
 function showToast(msg, isError = false) {
@@ -283,7 +407,7 @@ async function apiFetch(path, options = {}) {
     });
   } catch (error) {
     lastHttpOk = false;
-    setServerStatus("offline", "Brak połączenia z serwerem");
+    renderSystemStatus();
     throw new Error("Brak połączenia z serwerem.");
   }
 
@@ -301,15 +425,13 @@ async function apiFetch(path, options = {}) {
 
     if (res.status >= 500) {
       lastHttpOk = false;
-      setServerStatus("offline", "Serwer niedostępny");
+      renderSystemStatus();
     }
     throw new Error(data?.error || "Operacja nie powiodła się.");
   }
 
   lastHttpOk = true;
-  if (socket && socket.connected) {
-    setServerStatus("online", "Połączono z serwerem");
-  }
+  renderSystemStatus();
 
   return data;
 }
@@ -351,6 +473,7 @@ async function initializeDashboard() {
   showAppView();
   connectSocket();
   await Promise.all([
+    refreshSystemStatus(),
     loadLockers(),
     loadActiveCodes(),
     loadLogs(),
@@ -922,6 +1045,7 @@ themeMedia.addEventListener("change", () => {
 });
 updateGenerateButtonLabel();
 applyTheme(getStoredTheme());
+renderSystemStatus();
 
 window.onload = async () => {
   try {
@@ -948,3 +1072,8 @@ setInterval(() => {
     loadLockers();
   }
 }, 5000);
+setInterval(() => {
+  if (isAuthenticated) {
+    refreshSystemStatus();
+  }
+}, 15000);
