@@ -253,7 +253,7 @@ ul {
 
 .topbar {
   position: relative;
-  z-index: 1;
+  z-index: 8;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -464,7 +464,7 @@ ul {
   pointer-events: none;
   transform: translateY(-4px);
   transition: opacity 160ms ease, transform 160ms ease;
-  z-index: 5;
+  z-index: 12;
 }
 
 .status-popover strong {
