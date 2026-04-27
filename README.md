@@ -84,22 +84,43 @@ Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
 
 ## Wysyłka kodów e-mailem
 
-Panel WWW pozwala teraz podczas generowania kodu podać opcjonalny adres e-mail. Jeśli serwer ma skonfigurowane SMTP, SafeKeys spróbuje automatycznie wysłać wygenerowany kod na wskazany adres.
+Panel WWW pozwala teraz podczas generowania kodu podać opcjonalny adres e-mail. Jeśli serwer ma skonfigurowaną wysyłkę e-mail, SafeKeys spróbuje automatycznie wysłać wygenerowany kod na wskazany adres.
 
 Do konfiguracji użyj zmiennych:
+
+- `BREVO_API_KEY`
+- `SMTP_FROM_EMAIL`
+- `SMTP_FROM_NAME`
+- `SMTP_REPLY_TO`
+
+Opcjonalnie, jeśli środowisko pozwala na ruch SMTP:
 
 - `SMTP_HOST`
 - `SMTP_PORT`
 - `SMTP_SECURE`
 - `SMTP_USER`
 - `SMTP_PASS`
-- `SMTP_FROM_EMAIL`
-- `SMTP_FROM_NAME`
-- `SMTP_REPLY_TO`
 
-Jeśli operator poda adres e-mail, a SMTP nie będzie skonfigurowane albo wysyłka się nie powiedzie, kod nadal zostanie wygenerowany w systemie, a panel pokaże status błędu dostarczenia.
+Jeśli operator poda adres e-mail, a wysyłka nie będzie skonfigurowana albo się nie powiedzie, kod nadal zostanie wygenerowany w systemie, a panel pokaże status błędu dostarczenia.
 
-### Konfiguracja Brevo
+### Konfiguracja Brevo API
+
+Na Railway `Free`, `Trial` i `Hobby` użyj Brevo API po HTTPS:
+
+```env
+BREVO_API_KEY=xkeysib-twoj-klucz-api-brevo
+SMTP_FROM_EMAIL=powiadomienia@twojadomena.pl
+SMTP_FROM_NAME=SafeKeys
+SMTP_REPLY_TO=kontakt@twojadomena.pl
+```
+
+Uwagi:
+
+- `BREVO_API_KEY` to klucz API z Brevo, nie klucz SMTP.
+- `SMTP_FROM_EMAIL` powinien być zweryfikowanym nadawcą lub adresem z uwierzytelnionej domeny w Brevo.
+- Ten tryb nie używa SMTP, więc działa na Railway przez zwykły HTTPS.
+
+### Konfiguracja Brevo SMTP
 
 Dla Brevo możesz użyć poniższego zestawu:
 

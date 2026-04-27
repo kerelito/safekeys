@@ -33,6 +33,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM_EMAIL = process.env.SMTP_FROM_EMAIL;
 const SMTP_FROM_NAME = process.env.SMTP_FROM_NAME;
 const SMTP_REPLY_TO = process.env.SMTP_REPLY_TO;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
@@ -181,6 +182,7 @@ const emailService = createEmailService({
   secure: SMTP_SECURE,
   user: SMTP_USER,
   pass: SMTP_PASS,
+  apiKey: BREVO_API_KEY,
   fromEmail: SMTP_FROM_EMAIL,
   fromName: SMTP_FROM_NAME,
   replyTo: SMTP_REPLY_TO
@@ -191,16 +193,18 @@ lockerService.setEmailService(emailService);
 if (emailService.isEnabled()) {
   emailService.verifyConnection()
     .then(() => console.log("Wysylka e-mail aktywna ✅"))
-    .catch(error => console.error("Nie udalo sie zweryfikowac SMTP ❌", {
+    .catch(error => console.error("Nie udalo sie zweryfikowac wysylki e-mail ❌", {
       errorMessage: error.message,
       errorCode: error.code || null,
       errorCommand: error.command || null,
+      emailProvider: error.emailProvider || null,
+      apiEndpoint: error.apiEndpoint || null,
       smtpHost: error.smtpHost || null,
       smtpPort: error.smtpPort || null,
       smtpSecure: error.smtpSecure ?? null
     }));
 } else {
-  console.log("Wysylka e-mail pominięta: brak konfiguracji SMTP.");
+  console.log("Wysylka e-mail pominieta: brak konfiguracji.");
 }
 
 lockerService.on("log", log => {

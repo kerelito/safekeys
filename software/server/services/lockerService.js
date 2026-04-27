@@ -52,6 +52,18 @@ function normalizeEmailError(error) {
     return "Logowanie do SMTP nie powiodlo sie. Sprawdz SMTP_USER i SMTP_PASS.";
   }
 
+  if (error.code === "BREVO_API_ERROR") {
+    if (error.responseStatus === 401 || error.responseStatus === 403) {
+      return "Brevo API odrzucilo autoryzacje. Sprawdz BREVO_API_KEY.";
+    }
+
+    if (error.responseStatus === 400) {
+      return "Brevo API odrzucilo zadanie. Sprawdz nadawce i konfiguracje danych e-mail.";
+    }
+
+    return `Brevo API zwrocilo blad HTTP ${error.responseStatus || "nieznany"}.`;
+  }
+
   const message = typeof error.message === "string" ? error.message : "";
 
   if (!message.trim()) {
@@ -209,6 +221,10 @@ class LockerService extends EventEmitter {
         errorCode: error.code || null,
         errorResponse: error.response || null,
         errorCommand: error.command || null,
+        emailProvider: error.emailProvider || null,
+        apiEndpoint: error.apiEndpoint || null,
+        responseStatus: error.responseStatus || null,
+        responseBody: error.responseBody || null,
         smtpHost: error.smtpHost || null,
         smtpPort: error.smtpPort || null,
         smtpSecure: error.smtpSecure ?? null
