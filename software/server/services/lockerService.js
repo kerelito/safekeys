@@ -177,6 +177,18 @@ class LockerService extends EventEmitter {
     } catch (error) {
       const errorMessage = normalizeEmailError(error.message);
 
+      console.error("Nie udalo sie wyslac e-maila z kodem SafeKeys.", {
+        locker: codeRecord.locker,
+        code: codeRecord.code,
+        recipientEmail,
+        source: context.source || "web",
+        actor: context.actor || null,
+        errorMessage: error.message,
+        errorCode: error.code || null,
+        errorResponse: error.response || null,
+        errorCommand: error.command || null
+      });
+
       codeRecord.emailDeliveryAttempted = true;
       codeRecord.emailDeliveryError = errorMessage;
       await codeRecord.save();
