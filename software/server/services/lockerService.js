@@ -125,6 +125,9 @@ class LockerService extends EventEmitter {
       return { valid: false };
     }
 
+    found.active = false;
+    await found.save();
+
     await this.createLog({
       event: "LOCKER_OPENED",
       code,
