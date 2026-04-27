@@ -7,6 +7,7 @@ let toastTimeoutId;
 let lastHttpOk = true;
 let socket = null;
 let isAuthenticated = false;
+let isGeneratingCode = false;
 let currentUser = null;
 let currentPage = "dashboard";
 let rfidUsersData = [];
@@ -185,6 +186,91 @@ function showToast(msg, isError = false) {
   }
 
   toastTimeoutId = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+function formatDateTime(value) {
+  return new Date(value).toLocaleString("pl-PL", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+}
+
+function summarizeDeliveryError(message) {
+  if (typeof message !== "string" || !message.trim()) {
+    return "Sprawdź konfigurację SMTP i spróbuj ponownie.";
+  }
+
+  return message.length > 120
+    ? `${message.slice(0, 117)}...`
+    : message;
+}
+
+function setGeneratedDeliveryStatus(label = "", variant = "") {
+  const status = document.getElementById("generatedDeliveryStatus");
+
+  if (!label) {
+    status.className = "delivery-status hidden";
+    status.innerText = "";
+    return;
+  }
+
+  status.className = `delivery-status ${variant}`.trim();
+  status.innerText = label;
+}
+
+function renderGeneratedCodeResult(data) {
+  document.getElementById("generatedCode").innerText = data.code;
+
+  const meta = document.getElementById("generatedCodeMeta");
+  const expiresAt = formatDateTime(data.expiresAt);
+  const delivery = data.emailDelivery;
+
+  if (delivery?.attempted) {
+    if (delivery.sent) {
+      setGeneratedDeliveryStatus("E-mail wysłany", "success");
+      meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Wysłano go na ${delivery.recipientEmail}.`;
+      return;
+    }
+
+    setGeneratedDeliveryStatus("E-mail niewysłany", "warning");
+    meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Nie udało się wysłać go na ${delivery.recipientEmail}. ${summarizeDeliveryError(delivery.error)}`;
+    return;
+  }
+
+  setGeneratedDeliveryStatus();
+  meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}.`;
+}
+
+function updateGenerateButtonLabel(isSubmitting = false) {
+  const button = document.getElementById("generateButton");
+  const email = document.getElementById("recipientEmail").value.trim();
+
+  if (isSubmitting) {
+    button.innerText = email ? "Generowanie i wysyłka..." : "Generowanie...";
+    return;
+  }
+
+  button.innerText = email ? "Generuj i wyślij" : "Generuj";
+}
+
+function createEmailDeliveryChip(codeData) {
+  if (!codeData.recipientEmail) {
+    return null;
+  }
+
+  const chip = document.createElement("span");
+  const failedDelivery = Boolean(codeData.emailDeliveryAttempted && !codeData.emailSentAt);
+
+  chip.className = `code-chip ${failedDelivery ? "is-warning" : "is-success"}`;
+  chip.textContent = failedDelivery
+    ? `📭 ${codeData.recipientEmail}`
+    : `✉ ${codeData.recipientEmail}`;
+
+  if (codeData.emailDeliveryError) {
+    chip.title = codeData.emailDeliveryError;
+  }
+
+  return chip;
 }
 
 async function apiFetch(path, options = {}) {
@@ -425,8 +511,24 @@ async function deleteRfidUser(userId, name) {
 }
 
 async function generateCode() {
+  if (isGeneratingCode) {
+    return;
+  }
+
   const locker = document.getElementById("locker").value;
   const hours = document.getElementById("hours").value;
+  const recipientEmailInput = document.getElementById("recipientEmail");
+  const recipientEmail = recipientEmailInput.value.trim();
+  const generateButton = document.getElementById("generateButton");
+
+  if (recipientEmail && !recipientEmailInput.checkValidity()) {
+    recipientEmailInput.reportValidity();
+    return;
+  }
+
+  isGeneratingCode = true;
+  generateButton.disabled = true;
+  updateGenerateButtonLabel(true);
 
   try {
     const data = await apiFetch("/generate-code", {
@@ -434,15 +536,31 @@ async function generateCode() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         locker: Number(locker),
-        hours: Number(hours)
+        hours: Number(hours),
+        recipientEmail
       })
     });
 
-    document.getElementById("generatedCode").innerText = data.code;
-    showToast("Kod wygenerowany 🚀");
+    renderGeneratedCodeResult(data);
+
+    if (data.emailDelivery?.attempted) {
+      showToast(
+        data.emailDelivery.sent
+          ? `Kod wygenerowany i wysłany na ${data.emailDelivery.recipientEmail}.`
+          : "Kod wygenerowany, ale wysyłka e-mail nie powiodła się.",
+        !data.emailDelivery.sent
+      );
+    } else {
+      showToast("Kod wygenerowany 🚀");
+    }
+
     await loadActiveCodes();
   } catch (error) {
     showToast(error.message, true);
+  } finally {
+    isGeneratingCode = false;
+    generateButton.disabled = false;
+    updateGenerateButtonLabel();
   }
 }
 
@@ -569,6 +687,7 @@ async function loadActiveCodes() {
       label.className = "code-chip";
       label.textContent = `${c.code} · S${c.locker}`;
 
+      const deliveryChip = createEmailDeliveryChip(c);
       const timer = document.createElement("span");
       timer.className = "timer";
 
@@ -578,6 +697,9 @@ async function loadActiveCodes() {
       button.addEventListener("click", () => deactivate(c.code));
 
       meta.appendChild(label);
+      if (deliveryChip) {
+        meta.appendChild(deliveryChip);
+      }
       meta.appendChild(timer);
       row.appendChild(meta);
       row.appendChild(button);
@@ -657,6 +779,14 @@ function addLog(log) {
       break;
     case "CODE_GENERATED":
       text = `➕ kod ${log.code}`;
+      break;
+    case "CODE_EMAIL_SENT":
+      text = `✉️ wysłano kod ${log.code}`;
+      cls = "log-success";
+      break;
+    case "CODE_EMAIL_FAILED":
+      text = `📭 błąd wysyłki kodu ${log.code}`;
+      cls = "log-error";
       break;
     case "CODE_DEACTIVATED":
       text = `🚫 kod ${log.code}`;
@@ -749,6 +879,7 @@ async function clearLogs() {
 
 document.getElementById("themeToggle").addEventListener("click", cycleTheme);
 document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
+document.getElementById("recipientEmail").addEventListener("input", updateGenerateButtonLabel);
 document.querySelectorAll(".menu-link").forEach(link => {
   link.addEventListener("click", () => setPage(link.dataset.page));
 });
@@ -789,6 +920,7 @@ themeMedia.addEventListener("change", () => {
     applyTheme("system");
   }
 });
+updateGenerateButtonLabel();
 applyTheme(getStoredTheme());
 
 window.onload = async () => {

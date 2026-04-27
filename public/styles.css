@@ -574,11 +574,22 @@ ul {
   gap: 8px;
 }
 
+.email-field {
+  margin-top: 16px;
+}
+
 .field-label {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.16em;
   color: var(--muted);
+}
+
+.field-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .generated-output {
@@ -592,6 +603,13 @@ ul {
   border-radius: 22px;
   background: var(--generated-output-bg);
   border: 1px solid var(--generated-output-border);
+}
+
+.generated-output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .generated-output small {
@@ -609,6 +627,36 @@ ul {
 
 :root[data-theme="light"] .generated-code {
   color: #11233c;
+}
+
+.generated-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.delivery-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.delivery-status.success {
+  color: var(--status-good);
+}
+
+.delivery-status.warning {
+  color: var(--status-alert);
 }
 
 .card-title {
@@ -771,6 +819,14 @@ button:hover {
   filter: saturate(1.04);
 }
 
+button:disabled {
+  cursor: wait;
+  transform: none;
+  filter: none;
+  opacity: 0.72;
+  box-shadow: none;
+}
+
 .danger {
   color: #fff2f2;
   background: linear-gradient(135deg, #ff7b7b, #ff4f6f);
@@ -779,7 +835,8 @@ button:hover {
 }
 
 select,
-.field-grid input {
+.field-grid input,
+.email-field input {
   width: 100%;
   min-height: 52px;
   padding: 0 16px;
@@ -793,7 +850,8 @@ select,
 }
 
 select:focus,
-.field-grid input:focus {
+.field-grid input:focus,
+.email-field input:focus {
   border-color: rgba(107, 197, 255, 0.55);
   box-shadow: 0 0 0 4px rgba(107, 197, 255, 0.12);
 }
@@ -970,6 +1028,14 @@ select:focus,
   letter-spacing: 0.05em;
 }
 
+.code-chip.is-success {
+  color: var(--status-good);
+}
+
+.code-chip.is-warning {
+  color: var(--status-alert);
+}
+
 .log-success { color: var(--log-success); }
 .log-error { color: var(--log-error); }
 .log-info { color: var(--log-info); }
@@ -1111,6 +1177,11 @@ select:focus,
   .section-copy p {
     font-size: 13px;
     line-height: 1.55;
+  }
+
+  .generated-output-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .code-row {

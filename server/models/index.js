@@ -23,6 +23,24 @@ const CodeSchema = new mongoose.Schema({
   expiresAt: {
     type: Date,
     required: true
+  },
+  recipientEmail: {
+    type: String,
+    default: null,
+    trim: true,
+    lowercase: true
+  },
+  emailDeliveryAttempted: {
+    type: Boolean,
+    default: false
+  },
+  emailSentAt: {
+    type: Date,
+    default: null
+  },
+  emailDeliveryError: {
+    type: String,
+    default: null
   }
 });
 

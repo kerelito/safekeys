@@ -69,3 +69,43 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 - Urządzenie może raportować status skrytek i pobierać zakolejkowane akcje.
 - RFID użytkownika jest osobnym bytem od RFID obecności klucza w skrytce.
 - Frontend pozostaje prostą aplikacją statyczną bez bundlera, żeby wdrożenie na Railway było lekkie.
+
+## Wysyłka kodów e-mailem
+
+Panel WWW pozwala teraz podczas generowania kodu podać opcjonalny adres e-mail. Jeśli serwer ma skonfigurowane SMTP, SafeKeys spróbuje automatycznie wysłać wygenerowany kod na wskazany adres.
+
+Do konfiguracji użyj zmiennych:
+
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_SECURE`
+- `SMTP_USER`
+- `SMTP_PASS`
+- `SMTP_FROM_EMAIL`
+- `SMTP_FROM_NAME`
+- `SMTP_REPLY_TO`
+
+Jeśli operator poda adres e-mail, a SMTP nie będzie skonfigurowane albo wysyłka się nie powiedzie, kod nadal zostanie wygenerowany w systemie, a panel pokaże status błędu dostarczenia.
+
+### Konfiguracja Brevo
+
+Dla Brevo możesz użyć poniższego zestawu:
+
+```env
+SMTP_HOST=smtp-relay.brevo.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=twoj-login-brevo@example.com
+SMTP_PASS=twoj-klucz-smtp-brevo
+SMTP_FROM_EMAIL=powiadomienia@twojadomena.pl
+SMTP_FROM_NAME=SafeKeys
+SMTP_REPLY_TO=kontakt@twojadomena.pl
+```
+
+Uwagi:
+
+- `SMTP_USER` to login SMTP z panelu Brevo.
+- `SMTP_PASS` to klucz SMTP z Brevo, nie klucz API.
+- `SMTP_FROM_EMAIL` powinien być zweryfikowanym nadawcą lub adresem z uwierzytelnionej domeny w Brevo.
+- Domyślnie ustawione jest `587` i `SMTP_SECURE=false`, co odpowiada zalecanemu połączeniu bez wymuszania SSL/TLS na starcie. Jeśli chcesz użyć portu `465`, ustaw `SMTP_SECURE=true`.
+- Przed wysyłką z aplikacji warto w Brevo dodać i uwierzytelnić domenę oraz skonfigurować nadawcę transakcyjnego.

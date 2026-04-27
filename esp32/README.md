@@ -1,27 +1,27 @@
-# SafeKeys ESP32
+# SafeKeys ESP32 Debug
 
-Gotowy szkic startowy dla ESP32 znajdziesz w [SafeKeysESP32.ino](/Users/karol/Projects/locker-system/esp32/SafeKeysESP32.ino:1).
+Aktualny szkic w [SafeKeysESP32.ino](/Users/karol/Projects/locker-system/esp32/SafeKeysESP32.ino:1) jest przygotowany jako prosty wariant debugowy pod:
 
-## Co obsluguje
+- ESP32 z wbudowana dioda LED
+- klawiature 4x4
+- polaczenie z backendem SafeKeys przez `POST /verify-code`
 
-- Wi-Fi + polaczenie z backendem SafeKeys
-- pobieranie zdalnych akcji z `GET /device/actions`
-- otwieranie konkretnej skrytki
-- zwolnienie wszystkich skrytek naraz
-- raportowanie stanu RFID przez `POST /locker-status`
-- raportowanie stanu kontraktonu przez `POST /locker-door-status`
-- weryfikacje 4-cyfrowego kodu przez `POST /verify-code`
-- weryfikacje uzytkownika RFID przez `POST /verify-tag`
+## Co robi ten wariant
 
-## Zalozenia sprzetowe
+- laczy sie z Wi-Fi
+- przyjmuje 4-cyfrowy kod z klawiatury
+- wysyla go do backendu
+- wypisuje pelny przebieg do `Serial`
+- pokazuje stan na diodzie LED
 
-- 3 przekazniki do zamkow
-- docelowo 4 czytniki RFID po SPI:
-  3 do sprawdzania obecnosci klucza w skrytkach
-  1 dla uzytkownika przykladajacego swoja karte
-- obecny szkic zostawia miejsce na podpiecie biblioteki czytnika i endpointu `/verify-tag`
-- 3 wejscia cyfrowe dla informacji `isDoorClosed`
-- klawiatura 4x4 do wpisywania kodu
+## Zachowanie LED
+
+- podczas laczenia z Wi-Fi: pojedyncze krotkie migniecia
+- po udanym polaczeniu: 2 spokojne migniecia
+- przy kazdym nacisnieciu klawisza: krotki impuls
+- przy poprawnym kodzie: 2 dluzsze migniecia
+- przy blednym kodzie: 4 migniecia
+- przy bledzie sieci lub API: 5 szybkich migniec
 
 ## Co ustawic przed wgraniem
 
@@ -31,8 +31,38 @@ W pliku `.ino` podmien:
 - `WIFI_PASSWORD`
 - `API_BASE_URL`
 - `DEVICE_API_KEY`
-- piny przekaznikow, czujnikow i klawiatury
-- poziomy aktywne `RELAY_ACTIVE_LEVEL`, `TAG_PRESENT_LEVEL`, `DOOR_CLOSED_LEVEL`
+- `rowPins`
+- `colPins`
+
+Jesli Twoja plytka ma diode na innym pinie niz domyslny, zmien tez:
+
+- `STATUS_LED_PIN`
+- `STATUS_LED_ACTIVE_LEVEL`
+
+## Obsluga klawiatury
+
+- `0-9` dodaje cyfre do bufora
+- `*` czysci bufor
+- `#` wysyla 4-cyfrowy kod do backendu
+- `A` wymusza ponowne laczenie z Wi-Fi
+- `B` wypisuje aktualny status
+- `C` wypisuje pomoc
+- `D` robi szybki reset bufora
+
+## Backend
+
+Ten szkic zaklada, ze backend juz dziala i ma ustawione:
+
+- `MONGODB_URI`
+- `SESSION_SECRET`
+- `DEVICE_API_KEY`
+- `ADMIN_1_*`, `ADMIN_2_*`, `ADMIN_3_*`
+
+Wazne:
+
+- `DEVICE_API_KEY` w ESP32 musi byc taki sam jak `DEVICE_API_KEY` na serwerze
+- endpoint `POST /verify-code` wymaga naglowka `x-device-key`
+- dla Railway szkic korzysta z `secureClient.setInsecure()` dla prostszego debugowania
 
 ## Biblioteki Arduino
 
@@ -41,6 +71,11 @@ Zainstaluj:
 - `ArduinoJson`
 - `Keypad`
 
-## Wazna uwaga
+## Dalszy krok
 
-Jesli Twoj modul RFID nie daje prostego sygnalu HIGH/LOW, tylko trzeba czytac go po SPI/UART/I2C, to zamien funkcje `readTagPresent()` na wlasna implementacje dla konkretnego czytnika i wykorzystaj `verifyUserTagRemotely()` dla czytnika uzytkownika.
+Kiedy potwierdzisz, ze klawiatura, LED i weryfikacja kodow dzialaja stabilnie, mozna na tej bazie z powrotem dolozyc:
+
+- przekazniki
+- czujniki drzwiczek
+- czytniki RFID
+- odbior zdalnych akcji z `/device/actions`

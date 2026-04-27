@@ -1,5 +1,6 @@
 const ALLOWED_LOCKERS = [1, 2, 3];
 const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function createHttpError(status, message) {
   const error = new Error(message);
@@ -61,6 +62,26 @@ function assertValidUserName(name) {
   return name.trim();
 }
 
+function normalizeEmail(email) {
+  return typeof email === "string"
+    ? email.trim().toLowerCase()
+    : "";
+}
+
+function assertValidRecipientEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail) {
+    return null;
+  }
+
+  if (!EMAIL_REGEX.test(normalizedEmail)) {
+    throw createHttpError(400, "Podaj prawidlowy adres e-mail.");
+  }
+
+  return normalizedEmail;
+}
+
 function assertValidAllowedLockers(allowedLockers) {
   if (!Array.isArray(allowedLockers) || allowedLockers.length === 0) {
     throw createHttpError(400, "Wybierz co najmniej jedna skrytke.");
@@ -81,6 +102,7 @@ module.exports = {
   assertValidHasTag,
   assertValidHours,
   assertValidLocker,
+  assertValidRecipientEmail,
   assertValidTagId,
   assertValidUserName,
   createHttpError

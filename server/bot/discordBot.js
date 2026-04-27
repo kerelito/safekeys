@@ -55,6 +55,16 @@ const EVENT_META = {
     label: "Kod wygenerowany",
     emoji: "✨"
   },
+  CODE_EMAIL_SENT: {
+    color: BRAND.success,
+    label: "Kod wyslany e-mailem",
+    emoji: "✉️"
+  },
+  CODE_EMAIL_FAILED: {
+    color: BRAND.danger,
+    label: "Blad wysylki e-mail",
+    emoji: "📭"
+  },
   CODE_DEACTIVATED: {
     color: BRAND.warning,
     label: "Kod dezaktywowany",
@@ -158,6 +168,10 @@ function getLogText(log) {
       return `Wprowadzono nieprawidlowy kod \`${log.code}\`.`;
     case "CODE_GENERATED":
       return `Wygenerowano nowy kod \`${log.code}\` dla skrytki S${log.locker}.`;
+    case "CODE_EMAIL_SENT":
+      return `Kod \`${log.code}\` dla skrytki S${log.locker} zostal wyslany e-mailem.`;
+    case "CODE_EMAIL_FAILED":
+      return `Nie udalo sie wyslac kodu \`${log.code}\` dla skrytki S${log.locker} e-mailem.`;
     case "CODE_DEACTIVATED":
       return `Kod \`${log.code}\` dla skrytki S${log.locker} zostal dezaktywowany.`;
     case "KEY_REMOVED":

@@ -9,6 +9,7 @@ const session = require("express-session");
 const { Server } = require("socket.io");
 
 const { createDiscordBot } = require("./bot/discordBot");
+const { createEmailService } = require("./services/emailService");
 const { lockerService } = require("./services/lockerService");
 
 const app = express();
@@ -24,6 +25,14 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_NOTIFICATIONS_CHANNEL_ID = process.env.DISCORD_NOTIFICATIONS_CHANNEL_ID;
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT;
+const SMTP_SECURE = process.env.SMTP_SECURE;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM_EMAIL = process.env.SMTP_FROM_EMAIL;
+const SMTP_FROM_NAME = process.env.SMTP_FROM_NAME;
+const SMTP_REPLY_TO = process.env.SMTP_REPLY_TO;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
@@ -116,6 +125,27 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("Połączono z MongoDB ✅"))
   .catch(err => console.error("Błąd MongoDB ❌", err));
 
+const emailService = createEmailService({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_SECURE,
+  user: SMTP_USER,
+  pass: SMTP_PASS,
+  fromEmail: SMTP_FROM_EMAIL,
+  fromName: SMTP_FROM_NAME,
+  replyTo: SMTP_REPLY_TO
+});
+
+lockerService.setEmailService(emailService);
+
+if (emailService.isEnabled()) {
+  emailService.verifyConnection()
+    .then(() => console.log("Wysylka e-mail aktywna ✅"))
+    .catch(error => console.error("Nie udalo sie zweryfikowac SMTP ❌", error));
+} else {
+  console.log("Wysylka e-mail pominięta: brak konfiguracji SMTP.");
+}
+
 lockerService.on("log", log => {
   io.emit("new-log", log);
 });
@@ -199,10 +229,11 @@ app.post("/verify-tag", requireDeviceKey, asyncHandler(async (req, res) => {
 }));
 
 app.post("/generate-code", asyncHandler(async (req, res) => {
-  const locker = Number(req.body.locker);
-  const hours = Number(req.body.hours);
-
-  const result = await lockerService.generateCode(locker, hours, {
+  const result = await lockerService.generateCode({
+    locker: Number(req.body.locker),
+    hours: Number(req.body.hours),
+    recipientEmail: req.body.recipientEmail
+  }, {
     source: "web",
     actor: getSessionActor(req)
   });

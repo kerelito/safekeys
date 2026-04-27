@@ -119,13 +119,23 @@
 
 <label class="field">
 <span class="field-label">Akcja</span>
-<button onclick="generateCode()">Generuj</button>
+<button id="generateButton" type="button" onclick="generateCode()">Generuj</button>
 </label>
 </div>
 
+<label class="field email-field">
+<span class="field-label">Wyślij kod na e-mail</span>
+<input id="recipientEmail" type="email" inputmode="email" autocomplete="email" placeholder="np. operator@firma.pl">
+<small class="field-help">Opcjonalnie. Jeśli podasz adres, SafeKeys spróbuje wysłać kod automatycznie zaraz po wygenerowaniu.</small>
+</label>
+
 <div class="generated-output">
+<div class="generated-output-header">
 <small>Ostatnio wygenerowany kod</small>
+<span id="generatedDeliveryStatus" class="delivery-status hidden"></span>
+</div>
 <h3 id="generatedCode" class="generated-code">----</h3>
+<p id="generatedCodeMeta" class="generated-meta">Kod pojawi się tutaj po wygenerowaniu. Możesz go zostawić tylko w panelu albo od razu wysłać na e-mail.</p>
 </div>
 </div>
 

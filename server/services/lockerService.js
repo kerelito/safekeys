@@ -9,15 +9,45 @@ const {
   assertValidHasTag,
   assertValidHours,
   assertValidLocker,
+  assertValidRecipientEmail,
   assertValidTagId,
   assertValidUserName,
   createHttpError
 } = require("./lockerValidation");
 
+function parseGenerateCodeInput(lockerOrPayload, hours) {
+  if (typeof lockerOrPayload === "object" && lockerOrPayload !== null) {
+    return {
+      locker: Number(lockerOrPayload.locker),
+      hours: Number(lockerOrPayload.hours),
+      recipientEmail: assertValidRecipientEmail(lockerOrPayload.recipientEmail || lockerOrPayload.email)
+    };
+  }
+
+  return {
+    locker: lockerOrPayload,
+    hours,
+    recipientEmail: null
+  };
+}
+
+function normalizeEmailError(message) {
+  if (typeof message !== "string" || !message.trim()) {
+    return "Nie udało się wysłać wiadomości e-mail.";
+  }
+
+  return message.trim().slice(0, 240);
+}
+
 class LockerService extends EventEmitter {
   constructor() {
     super();
     this.pendingRemoteActions = [];
+    this.emailService = null;
+  }
+
+  setEmailService(emailService) {
+    this.emailService = emailService;
   }
 
   async createLog(payload) {
@@ -76,18 +106,114 @@ class LockerService extends EventEmitter {
     };
   }
 
-  async generateCode(locker, hours, context = {}) {
+  async deliverCodeByEmail(codeRecord, context = {}) {
+    const recipientEmail = codeRecord.recipientEmail;
+    const attemptedResponse = {
+      attempted: true,
+      sent: false,
+      recipientEmail,
+      sentAt: null,
+      error: null
+    };
+
+    if (!recipientEmail) {
+      return {
+        attempted: false,
+        sent: false,
+        recipientEmail: null,
+        sentAt: null,
+        error: null
+      };
+    }
+
+    if (!this.emailService || !this.emailService.isEnabled()) {
+      const errorMessage = "Wysylka e-mail nie jest skonfigurowana na serwerze.";
+
+      codeRecord.emailDeliveryAttempted = true;
+      codeRecord.emailDeliveryError = errorMessage;
+      await codeRecord.save();
+
+      await this.createLog({
+        event: "CODE_EMAIL_FAILED",
+        code: codeRecord.code,
+        locker: codeRecord.locker,
+        source: context.source || "web",
+        actor: context.actor || null
+      });
+
+      return {
+        ...attemptedResponse,
+        error: errorMessage
+      };
+    }
+
+    try {
+      await this.emailService.sendGeneratedCodeEmail({
+        to: recipientEmail,
+        code: codeRecord.code,
+        locker: codeRecord.locker,
+        expiresAt: codeRecord.expiresAt,
+        requestedBy: context.actor || null
+      });
+
+      codeRecord.emailDeliveryAttempted = true;
+      codeRecord.emailSentAt = new Date();
+      codeRecord.emailDeliveryError = null;
+      await codeRecord.save();
+
+      await this.createLog({
+        event: "CODE_EMAIL_SENT",
+        code: codeRecord.code,
+        locker: codeRecord.locker,
+        source: context.source || "web",
+        actor: context.actor || null
+      });
+
+      return {
+        ...attemptedResponse,
+        sent: true,
+        sentAt: codeRecord.emailSentAt
+      };
+    } catch (error) {
+      const errorMessage = normalizeEmailError(error.message);
+
+      codeRecord.emailDeliveryAttempted = true;
+      codeRecord.emailDeliveryError = errorMessage;
+      await codeRecord.save();
+
+      await this.createLog({
+        event: "CODE_EMAIL_FAILED",
+        code: codeRecord.code,
+        locker: codeRecord.locker,
+        source: context.source || "web",
+        actor: context.actor || null
+      });
+
+      return {
+        ...attemptedResponse,
+        error: errorMessage
+      };
+    }
+  }
+
+  async generateCode(lockerOrPayload, hoursOrContext, maybeContext = {}) {
+    const { locker, hours, recipientEmail } = parseGenerateCodeInput(lockerOrPayload, hoursOrContext);
+    const context = typeof lockerOrPayload === "object" && lockerOrPayload !== null
+      ? (hoursOrContext || {})
+      : maybeContext;
+
     assertValidLocker(locker);
     assertValidHours(hours);
 
     const code = await this.generateUniqueCode();
     const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-    await Code.create({
+    const codeRecord = await Code.create({
       code,
       locker,
       active: true,
-      expiresAt
+      expiresAt,
+      recipientEmail
     });
 
     await this.createLog({
@@ -98,7 +224,16 @@ class LockerService extends EventEmitter {
       actor: context.actor || null
     });
 
-    return { code, expiresAt };
+    const emailDelivery = await this.deliverCodeByEmail(codeRecord, context);
+
+    return {
+      code,
+      locker,
+      hours,
+      expiresAt,
+      recipientEmail,
+      emailDelivery
+    };
   }
 
   async deactivateCode(code, context = {}) {
