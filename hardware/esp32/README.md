@@ -1,6 +1,6 @@
 # SafeKeys ESP32 Debug
 
-Aktualny szkic w [SafeKeysESP32.ino](/Users/karol/Projects/locker-system/esp32/SafeKeysESP32.ino:1) jest przygotowany jako prosty wariant debugowy pod:
+Aktualny szkic w [SafeKeysESP32.ino](/Users/karol/Projects/locker-system/hardware/esp32/SafeKeysESP32.ino:1) jest przygotowany jako prosty wariant debugowy pod:
 
 - ESP32 z wbudowana dioda LED
 - klawiature 4x4

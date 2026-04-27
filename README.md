@@ -6,62 +6,74 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 
 ```text
 .
-├── esp32/
-│   ├── README.md
-│   └── SafeKeysESP32.ino
-├── public/
-│   ├── app.js
-│   ├── assets/
-│   │   └── safekeys-logo.png
-│   ├── index.html
-│   └── styles.css
-├── server/
-│   ├── bot/
-│   │   ├── commands.js
-│   │   └── discordBot.js
-│   ├── models/
+├── hardware/
+│   └── esp32/
+│       ├── README.md
+│       └── SafeKeysESP32.ino
+├── software/
+│   ├── public/
+│   │   ├── app.js
+│   │   ├── assets/
+│   │   │   └── safekeys-logo.png
+│   │   ├── index.html
+│   │   └── styles.css
+│   ├── server/
+│   │   ├── bot/
+│   │   │   ├── commands.js
+│   │   │   └── discordBot.js
+│   │   ├── models/
+│   │   │   └── index.js
+│   │   ├── services/
+│   │   │   ├── emailService.js
+│   │   │   ├── lockerService.js
+│   │   │   └── lockerValidation.js
 │   │   └── index.js
-│   ├── services/
-│   │   ├── lockerService.js
-│   │   └── lockerValidation.js
-│   └── index.js
-├── .env.example
-├── package-lock.json
-├── package.json
+│   ├── .env.example
+│   ├── package-lock.json
+│   └── package.json
 └── README.md
 ```
 
 ## Co gdzie jest
 
-- `server/index.js`
+- `software/server/index.js`
   Główny serwer Express, sesje, Socket.IO, routing HTTP i boot Discorda.
 
-- `server/services/lockerService.js`
+- `software/server/services/lockerService.js`
   Logika biznesowa systemu skrytek: kody, status skrytek, RFID użytkowników, logi i zdalne akcje.
 
-- `server/services/lockerValidation.js`
+- `software/server/services/lockerValidation.js`
   Walidacja danych wejściowych i wspólne błędy HTTP.
 
-- `server/models/index.js`
+- `software/server/models/index.js`
   Modele Mongoose używane przez backend.
 
-- `server/bot/commands.js`
+- `software/server/bot/commands.js`
   Definicje slash commandów Discorda.
 
-- `server/bot/discordBot.js`
+- `software/server/bot/discordBot.js`
   Obsługa interakcji Discord, embedów i akcji administracyjnych.
 
-- `public/index.html`
+- `software/public/index.html`
   Struktura dashboardu i widoków panelu.
 
-- `public/styles.css`
+- `software/public/styles.css`
   Style panelu WWW.
 
-- `public/app.js`
+- `software/public/app.js`
   Frontend dashboardu: logowanie, przełączanie podstron, żądania API, Socket.IO i renderowanie UI.
 
-- `esp32/SafeKeysESP32.ino`
+- `hardware/esp32/SafeKeysESP32.ino`
   Szkic pod firmware ESP32 przygotowany pod integrację z backendem.
+
+## Uruchamianie software
+
+```bash
+cd software
+npm start
+```
+
+Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
 
 ## Aktualne założenia
 
