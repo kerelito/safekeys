@@ -22,7 +22,7 @@
 static const char* WIFI_SSID = "YOUR_WIFI_NAME";
 static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
-static const char* API_BASE_URL = "https://safekeys-production-2760.up.railway.app";
+static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
 
 #ifdef LED_BUILTIN

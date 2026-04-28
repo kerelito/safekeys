@@ -28,7 +28,7 @@
 static const char* WIFI_SSID = "TP-Link_70FC";
 static const char* WIFI_PASSWORD = "13793814";
 
-static const char* API_BASE_URL = "https://safekeys-production-2760.up.railway.app";
+static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
 
 #ifdef LED_BUILTIN
@@ -95,11 +95,40 @@ String enteredCode;
 
 unsigned long lastWifiRetryMs = 0;
 const unsigned long WIFI_RETRY_MS = 5000;
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+const unsigned long WIFI_LOADING_FRAME_MS = 120;
 unsigned long lastHeartbeatMs = 0;
 const unsigned long HEARTBEAT_INTERVAL_MS = 15000;
 long lastHeartbeatPingMs = -1;
 
+struct StatusLedEffect {
+  bool active;
+  bool pulseMode;
+  bool state;
+  uint8_t transitionsLeft;
+  unsigned long phaseStartedMs;
+  unsigned long onMs;
+  unsigned long offMs;
+};
+
+struct CodeResultFlashEffect {
+  bool active;
+  bool success;
+  uint8_t count;
+  uint8_t stage;
+  unsigned long stageStartedMs;
+};
+
+bool wifiConnectInProgress = false;
+unsigned long wifiConnectStartedMs = 0;
+unsigned long lastWifiLoadingFrameMs = 0;
+uint8_t wifiLoadingFrame = 0;
+bool statusLedBaseEnabled = false;
+StatusLedEffect statusLedEffect = { false, false, false, 0, 0, 0, 0 };
+CodeResultFlashEffect codeResultFlash = { false, false, 0, 0, 0 };
+
 void connectWifi();
+void serviceWifiConnection(unsigned long now);
 bool isWifiReady();
 void handleKeypad();
 void maybeSendHeartbeat();
@@ -110,6 +139,8 @@ bool sendHeartbeat();
 void printUsage();
 void printStatus();
 void setStatusLed(bool enabled);
+void writeStatusLed(bool enabled);
+void serviceStatusLed(unsigned long now);
 void blinkLed(uint8_t times, unsigned long onMs, unsigned long offMs);
 void pulseLed(unsigned long durationMs);
 void configureLockerInputs();
@@ -121,6 +152,8 @@ void renderLockerStatus();
 void renderCodeEntry();
 void renderWifiLoadingFrame(uint8_t frameIndex);
 void flashCodeResult(const String& code, bool success);
+void serviceCodeResultFlash(unsigned long now);
+void renderCodeResultFrame(bool success, uint8_t count, bool visible);
 void clearStrip();
 char mapRawKeyToChar(uint8_t rawKey);
 
@@ -175,20 +208,23 @@ void setup() {
 }
 
 void loop() {
+  const unsigned long now = millis();
+
+  serviceStatusLed(now);
+  serviceWifiConnection(now);
+  serviceCodeResultFlash(now);
+
   if (!isWifiReady()) {
-    if (millis() - lastWifiRetryMs >= WIFI_RETRY_MS) {
-      lastWifiRetryMs = millis();
+    if (!wifiConnectInProgress && now - lastWifiRetryMs >= WIFI_RETRY_MS) {
       connectWifi();
     }
 
-    delay(20);
     return;
   }
 
   maybeSendHeartbeat();
   handleKeypad();
   updateVisualState();
-  delay(10);
 }
 
 void connectWifi() {
@@ -197,18 +233,22 @@ void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  unsigned long start = millis();
-  uint8_t frame = 0;
+  wifiConnectInProgress = true;
+  wifiConnectStartedMs = millis();
+  lastWifiRetryMs = wifiConnectStartedMs;
+  lastWifiLoadingFrameMs = 0;
+  wifiLoadingFrame = 0;
+  renderWifiLoadingFrame(wifiLoadingFrame);
+  pulseLed(35);
+}
 
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    renderWifiLoadingFrame(frame);
-    frame = static_cast<uint8_t>((frame + 1) % (TOTAL_LEDS / 2));
-    pulseLed(35);
-    Serial.print(".");
-    delay(120);
+void serviceWifiConnection(unsigned long now) {
+  if (!wifiConnectInProgress) {
+    return;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    wifiConnectInProgress = false;
     Serial.println();
     Serial.print("WiFi connected. IP: ");
     Serial.println(WiFi.localIP());
@@ -218,10 +258,23 @@ void connectWifi() {
     return;
   }
 
-  Serial.println();
-  Serial.println("WiFi connection failed. ESP32 will retry automatically.");
-  blinkLed(4, 150, 120);
-  updateVisualState();
+  if (now - wifiConnectStartedMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    wifiConnectInProgress = false;
+    lastWifiRetryMs = now;
+    Serial.println();
+    Serial.println("WiFi connection failed. ESP32 will retry automatically.");
+    blinkLed(4, 150, 120);
+    updateVisualState();
+    return;
+  }
+
+  if (lastWifiLoadingFrameMs == 0 || now - lastWifiLoadingFrameMs >= WIFI_LOADING_FRAME_MS) {
+    lastWifiLoadingFrameMs = now;
+    renderWifiLoadingFrame(wifiLoadingFrame);
+    wifiLoadingFrame = static_cast<uint8_t>((wifiLoadingFrame + 1) % (TOTAL_LEDS / 2));
+    pulseLed(35);
+    Serial.print(".");
+  }
 }
 
 bool isWifiReady() {
@@ -298,7 +351,6 @@ void handleKeypad() {
     Serial.println("Manual WiFi reconnect requested.");
     enteredCode = "";
     WiFi.disconnect(true, true);
-    delay(200);
     connectWifi();
     return;
   }
@@ -508,24 +560,79 @@ void printStatus() {
 }
 
 void setStatusLed(bool enabled) {
-  digitalWrite(STATUS_LED_PIN, enabled ? STATUS_LED_ACTIVE_LEVEL : !STATUS_LED_ACTIVE_LEVEL);
-}
-
-void blinkLed(uint8_t times, unsigned long onMs, unsigned long offMs) {
-  for (uint8_t i = 0; i < times; i += 1) {
-    setStatusLed(true);
-    delay(onMs);
-    setStatusLed(false);
-    if (i + 1 < times) {
-      delay(offMs);
-    }
+  statusLedBaseEnabled = enabled;
+  if (!statusLedEffect.active) {
+    writeStatusLed(enabled);
   }
 }
 
+void writeStatusLed(bool enabled) {
+  digitalWrite(STATUS_LED_PIN, enabled ? STATUS_LED_ACTIVE_LEVEL : !STATUS_LED_ACTIVE_LEVEL);
+}
+
+void serviceStatusLed(unsigned long now) {
+  if (!statusLedEffect.active) {
+    return;
+  }
+
+  if (statusLedEffect.pulseMode) {
+    if (now - statusLedEffect.phaseStartedMs >= statusLedEffect.onMs) {
+      statusLedEffect.active = false;
+      writeStatusLed(statusLedBaseEnabled);
+    }
+    return;
+  }
+
+  const unsigned long phaseDuration = statusLedEffect.state ? statusLedEffect.onMs : statusLedEffect.offMs;
+  if (now - statusLedEffect.phaseStartedMs < phaseDuration) {
+    return;
+  }
+
+  if (statusLedEffect.transitionsLeft == 0) {
+    statusLedEffect.active = false;
+    writeStatusLed(statusLedBaseEnabled);
+    return;
+  }
+
+  statusLedEffect.state = !statusLedEffect.state;
+  statusLedEffect.transitionsLeft -= 1;
+  statusLedEffect.phaseStartedMs = now;
+  writeStatusLed(statusLedEffect.state);
+
+  if (statusLedEffect.transitionsLeft == 0 && !statusLedEffect.state) {
+    statusLedEffect.active = false;
+    writeStatusLed(statusLedBaseEnabled);
+  }
+}
+
+void blinkLed(uint8_t times, unsigned long onMs, unsigned long offMs) {
+  if (times == 0) {
+    return;
+  }
+
+  statusLedEffect = {
+    true,
+    false,
+    true,
+    static_cast<uint8_t>(times * 2 - 1),
+    millis(),
+    onMs,
+    offMs
+  };
+  writeStatusLed(true);
+}
+
 void pulseLed(unsigned long durationMs) {
-  setStatusLed(true);
-  delay(durationMs);
-  setStatusLed(false);
+  statusLedEffect = {
+    true,
+    true,
+    true,
+    0,
+    millis(),
+    durationMs,
+    0
+  };
+  writeStatusLed(true);
 }
 
 void configureLockerInputs() {
@@ -555,6 +662,10 @@ bool isLockerComplete(const LockerState& state) {
 }
 
 void updateVisualState() {
+  if (codeResultFlash.active || wifiConnectInProgress) {
+    return;
+  }
+
   if (!isWifiReady()) {
     return;
   }
@@ -611,25 +722,54 @@ void renderWifiLoadingFrame(uint8_t frameIndex) {
 }
 
 void flashCodeResult(const String& code, bool success) {
-  const uint32_t resultColor = success ? colorGreen(EFFECT_BRIGHTNESS) : colorRed(EFFECT_BRIGHTNESS);
-  const uint8_t count = min(static_cast<size_t>(CODE_LENGTH), code.length());
+  codeResultFlash = {
+    true,
+    success,
+    static_cast<uint8_t>(min(static_cast<size_t>(CODE_LENGTH), code.length())),
+    0,
+    millis()
+  };
+  renderCodeResultFrame(codeResultFlash.success, codeResultFlash.count, true);
+}
 
-  clearStrip();
-  for (uint8_t i = 0; i < count; i += 1) {
-    strip.setPixelColor(CODE_ENTRY_LED_POSITIONS[i], resultColor);
+void serviceCodeResultFlash(unsigned long now) {
+  if (!codeResultFlash.active) {
+    return;
   }
-  strip.show();
-  delay(180);
 
-  clearStrip();
-  strip.show();
-  delay(120);
-
-  for (uint8_t i = 0; i < count; i += 1) {
-    strip.setPixelColor(CODE_ENTRY_LED_POSITIONS[i], resultColor);
+  static const unsigned long STAGE_DURATIONS_MS[] = { 180, 120, 180 };
+  if (now - codeResultFlash.stageStartedMs < STAGE_DURATIONS_MS[codeResultFlash.stage]) {
+    return;
   }
+
+  codeResultFlash.stageStartedMs = now;
+  codeResultFlash.stage += 1;
+
+  if (codeResultFlash.stage == 1) {
+    renderCodeResultFrame(codeResultFlash.success, codeResultFlash.count, false);
+    return;
+  }
+
+  if (codeResultFlash.stage == 2) {
+    renderCodeResultFrame(codeResultFlash.success, codeResultFlash.count, true);
+    return;
+  }
+
+  codeResultFlash.active = false;
+  updateVisualState();
+}
+
+void renderCodeResultFrame(bool success, uint8_t count, bool visible) {
+  clearStrip();
+
+  if (visible) {
+    const uint32_t resultColor = success ? colorGreen(EFFECT_BRIGHTNESS) : colorRed(EFFECT_BRIGHTNESS);
+    for (uint8_t i = 0; i < count; i += 1) {
+      strip.setPixelColor(CODE_ENTRY_LED_POSITIONS[i], resultColor);
+    }
+  }
+
   strip.show();
-  delay(180);
 }
 
 void clearStrip() {

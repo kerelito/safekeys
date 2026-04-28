@@ -1,6 +1,6 @@
 # SafeKeys
 
-System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i przygotowaniem pod hardware na ESP32.
+System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i przygotowaniem pod hardware na ESP32. Produkcyjny adres panelu: `https://www.safekeys.pl`.
 
 ## Struktura projektu
 
@@ -109,9 +109,9 @@ Na Railway `Free`, `Trial` i `Hobby` użyj Brevo API po HTTPS:
 
 ```env
 BREVO_API_KEY=xkeysib-twoj-klucz-api-brevo
-SMTP_FROM_EMAIL=powiadomienia@twojadomena.pl
+SMTP_FROM_EMAIL=powiadomienia@safekeys.pl
 SMTP_FROM_NAME=SafeKeys
-SMTP_REPLY_TO=kontakt@twojadomena.pl
+SMTP_REPLY_TO=kontakt@safekeys.pl
 ```
 
 Uwagi:
@@ -130,9 +130,9 @@ SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=twoj-login-brevo@example.com
 SMTP_PASS=twoj-klucz-smtp-brevo
-SMTP_FROM_EMAIL=powiadomienia@twojadomena.pl
+SMTP_FROM_EMAIL=powiadomienia@safekeys.pl
 SMTP_FROM_NAME=SafeKeys
-SMTP_REPLY_TO=kontakt@twojadomena.pl
+SMTP_REPLY_TO=kontakt@safekeys.pl
 ```
 
 Uwagi:

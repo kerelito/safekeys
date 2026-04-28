@@ -4,7 +4,7 @@ Aktualny szkic w [SafeKeysESP32.ino](/Users/karol/Projects/locker-system/hardwar
 
 - ESP32 z wbudowana dioda LED
 - klawiature 4x4
-- polaczenie z backendem SafeKeys przez `POST /verify-code`
+- polaczenie z backendem SafeKeys przez `https://www.safekeys.pl/verify-code`
 
 ## Co robi ten wariant
 
@@ -62,6 +62,7 @@ Wazne:
 
 - `DEVICE_API_KEY` w ESP32 musi byc taki sam jak `DEVICE_API_KEY` na serwerze
 - endpoint `POST /verify-code` wymaga naglowka `x-device-key`
+- publiczny adres produkcyjny systemu to `https://www.safekeys.pl`
 - dla Railway szkic korzysta z `secureClient.setInsecure()` dla prostszego debugowania
 
 ## Biblioteki Arduino
