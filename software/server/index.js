@@ -219,6 +219,10 @@ lockerService.on("remote-action-queued", action => {
   io.emit("remote-action-queued", action);
 });
 
+lockerService.on("active-codes-changed", () => {
+  io.emit("active-codes-changed");
+});
+
 app.use(express.static(PUBLIC_DIR));
 
 app.get("/", (req, res) => {

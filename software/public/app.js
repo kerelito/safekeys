@@ -210,6 +210,9 @@ function connectSocket() {
       await loadRfidUsers();
     }
   });
+  socket.on("active-codes-changed", async () => {
+    await loadActiveCodes();
+  });
   socket.on("logs-cleared", () => {
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
   });

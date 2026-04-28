@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <I2CKeyPad.h>
 #include <Adafruit_NeoPixel.h>
+#include <PCF8574.h>
 
 /*
   SafeKeys ESP32 - wariant v2

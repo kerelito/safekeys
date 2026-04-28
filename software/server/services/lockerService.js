@@ -127,6 +127,7 @@ class LockerService extends EventEmitter {
 
     found.active = false;
     await found.save();
+    this.emit("active-codes-changed");
 
     await this.createLog({
       event: "LOCKER_OPENED",
@@ -271,6 +272,7 @@ class LockerService extends EventEmitter {
       expiresAt,
       recipientEmail
     });
+    this.emit("active-codes-changed");
 
     await this.createLog({
       event: "CODE_GENERATED",
@@ -302,6 +304,7 @@ class LockerService extends EventEmitter {
 
     found.active = false;
     await found.save();
+    this.emit("active-codes-changed");
 
     await this.createLog({
       event: "CODE_DEACTIVATED",
