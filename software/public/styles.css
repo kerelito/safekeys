@@ -764,8 +764,17 @@ ul {
 }
 
 .logs {
+  height: 760px;
   min-height: 760px;
+  display: flex;
+  flex-direction: column;
+}
+
+#logs {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding-right: 6px;
 }
 
 .lockers {
@@ -848,6 +857,7 @@ ul {
   color: var(--muted);
   line-height: 1.5;
   font-size: 14px;
+  white-space: normal;
 }
 
 .locker-actions {
@@ -1306,8 +1316,8 @@ select:focus,
   }
 
   .logs {
-    min-height: 0;
-    max-height: 52vh;
+    height: 52vh;
+    min-height: 420px;
   }
 
   .toast {
@@ -1358,6 +1368,7 @@ select:focus,
   }
 
   .logs {
-    max-height: 48vh;
+    height: 48vh;
+    min-height: 360px;
   }
 }

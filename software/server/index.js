@@ -11,6 +11,7 @@ const { Server } = require("socket.io");
 const { createDiscordBot } = require("./bot/discordBot");
 const { createEmailService } = require("./services/emailService");
 const { lockerService } = require("./services/lockerService");
+const { panelUserService } = require("./services/panelUserService");
 
 const app = express();
 app.use(cors());
@@ -45,16 +46,6 @@ if (!MONGODB_URI) {
 
 if (!SESSION_SECRET) {
   throw new Error("Brakuje zmiennej środowiskowej SESSION_SECRET.");
-}
-
-const PANEL_USERS = [1, 2, 3].map(index => ({
-  username: process.env[`ADMIN_${index}_USERNAME`],
-  password: process.env[`ADMIN_${index}_PASSWORD`],
-  displayName: process.env[`ADMIN_${index}_DISPLAY_NAME`]
-})).filter(user => user.username && user.password && user.displayName);
-
-if (PANEL_USERS.length !== 3) {
-  throw new Error("Brakuje pełnej konfiguracji trzech użytkowników panelu w zmiennych ADMIN_1_*, ADMIN_2_* i ADMIN_3_*.");
 }
 
 if (IS_PRODUCTION) {
@@ -97,6 +88,14 @@ function requireAuth(req, res, next) {
   }
 
   return res.status(401).json({ error: "Wymagane logowanie." });
+}
+
+function requireMaster(req, res, next) {
+  if (req.session?.role === "master") {
+    return next();
+  }
+
+  return res.status(403).json({ error: "Ta sekcja jest dostępna tylko dla użytkownika master." });
 }
 
 function asyncHandler(handler) {
@@ -172,10 +171,6 @@ function buildSystemStatus() {
   };
 }
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log("Połączono z MongoDB ✅"))
-  .catch(err => console.error("Błąd MongoDB ❌", err));
-
 const emailService = createEmailService({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -233,11 +228,13 @@ app.get("/auth/session", (req, res) => {
   res.json({
     authenticated: Boolean(req.session?.isAuthenticated),
     username: req.session?.username || null,
-    displayName: req.session?.displayName || null
+    displayName: req.session?.displayName || null,
+    role: req.session?.role || null,
+    isMaster: req.session?.role === "master"
   });
 });
 
-app.post("/auth/login", (req, res) => {
+app.post("/auth/login", asyncHandler(async (req, res) => {
   const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
   const password = typeof req.body.password === "string" ? req.body.password : "";
 
@@ -245,22 +242,22 @@ app.post("/auth/login", (req, res) => {
     return res.status(400).json({ error: "Podaj login i hasło." });
   }
 
-  const matchedUser = PANEL_USERS.find(user => user.username === username && user.password === password);
-
-  if (!matchedUser) {
-    return res.status(401).json({ error: "Nieprawidłowy login lub hasło." });
-  }
+  const matchedUser = await panelUserService.authenticate(username, password);
 
   req.session.isAuthenticated = true;
   req.session.username = matchedUser.username;
   req.session.displayName = matchedUser.displayName;
+  req.session.role = matchedUser.role;
+  req.session.userId = matchedUser._id;
 
   return res.json({
     success: true,
     username: matchedUser.username,
-    displayName: matchedUser.displayName
+    displayName: matchedUser.displayName,
+    role: matchedUser.role,
+    isMaster: matchedUser.role === "master"
   });
-});
+}));
 
 app.post("/auth/logout", (req, res) => {
   req.session.destroy(() => {
@@ -277,6 +274,8 @@ app.use([
   "/lockers",
   "/system-status",
   "/users",
+  "/rfid-items",
+  "/panel-users",
   "/active-codes",
   "/logs",
   "/logs/clear"
@@ -348,11 +347,29 @@ app.get("/users", asyncHandler(async (req, res) => {
   res.json(users);
 }));
 
+app.get("/rfid-items", asyncHandler(async (req, res) => {
+  const items = await lockerService.getRfidItems();
+  res.json(items);
+}));
+
 app.post("/users", asyncHandler(async (req, res) => {
   const result = await lockerService.createRfidUser({
     name: req.body.name,
     tagId: req.body.tagId,
     allowedLockers: req.body.allowedLockers
+  }, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.status(201).json(result);
+}));
+
+app.post("/rfid-items", asyncHandler(async (req, res) => {
+  const result = await lockerService.createRfidItem({
+    name: req.body.name,
+    tagId: req.body.tagId,
+    itemType: req.body.itemType
   }, {
     source: "web",
     actor: getSessionActor(req)
@@ -383,12 +400,90 @@ app.delete("/users/:userId", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
+app.put("/rfid-items/:itemId", asyncHandler(async (req, res) => {
+  const result = await lockerService.updateRfidItem(req.params.itemId, {
+    name: req.body.name,
+    tagId: req.body.tagId,
+    itemType: req.body.itemType
+  }, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.json(result);
+}));
+
+app.delete("/rfid-items/:itemId", asyncHandler(async (req, res) => {
+  const result = await lockerService.deleteRfidItem(req.params.itemId, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.json(result);
+}));
+
+app.get("/panel-users", requireMaster, asyncHandler(async (req, res) => {
+  const users = await panelUserService.getPanelUsers();
+  res.json(users);
+}));
+
+app.post("/panel-users", requireMaster, asyncHandler(async (req, res) => {
+  const result = await panelUserService.createPanelUser({
+    username: req.body.username,
+    displayName: req.body.displayName,
+    password: req.body.password,
+    role: req.body.role
+  });
+
+  await lockerService.createLog({
+    event: "PANEL_USER_CREATED",
+    source: "web",
+    actor: `${getSessionActor(req)} • ${result.displayName} • @${result.username}`
+  });
+
+  res.status(201).json(result);
+}));
+
+app.put("/panel-users/:userId", requireMaster, asyncHandler(async (req, res) => {
+  const result = await panelUserService.updatePanelUser(req.params.userId, {
+    username: req.body.username,
+    displayName: req.body.displayName,
+    password: req.body.password,
+    role: req.body.role
+  }, {
+    currentUserId: req.session?.userId || null
+  });
+
+  await lockerService.createLog({
+    event: "PANEL_USER_UPDATED",
+    source: "web",
+    actor: `${getSessionActor(req)} • ${result.displayName} • @${result.username}`
+  });
+
+  res.json(result);
+}));
+
+app.delete("/panel-users/:userId", requireMaster, asyncHandler(async (req, res) => {
+  const removedUser = await panelUserService.deletePanelUser(req.params.userId, {
+    currentUserId: req.session?.userId || null
+  });
+
+  await lockerService.createLog({
+    event: "PANEL_USER_DELETED",
+    source: "web",
+    actor: `${getSessionActor(req)} • ${removedUser.displayName} • @${removedUser.username}`
+  });
+
+  res.json({ success: true });
+}));
+
 app.post("/locker-status", requireDeviceKey, asyncHandler(async (req, res) => {
   const locker = Number(req.body.locker);
   const { hasTag } = req.body;
 
   const result = await lockerService.updateLockerStatus(locker, hasTag, {
-    source: "rfid"
+    source: "rfid",
+    tagId: req.body.tagId
   });
 
   res.json(result);
@@ -457,9 +552,22 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: message });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Server działa na ${HOST}:${PORT}`);
-});
+async function startServer() {
+  try {
+    await mongoose.connect(MONGODB_URI);
+    console.log("Połączono z MongoDB ✅");
+    await panelUserService.ensureSeededFromEnv();
+
+    server.listen(PORT, HOST, () => {
+      console.log(`Server działa na ${HOST}:${PORT}`);
+    });
+  } catch (error) {
+    console.error("Błąd startu serwera ❌", error);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 if (DISCORD_BOT_TOKEN && DISCORD_CLIENT_ID) {
   createDiscordBot({

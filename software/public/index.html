@@ -92,6 +92,8 @@
 <nav>
 <button class="menu-link active" type="button" data-page="dashboard">Dashboard</button>
 <button class="menu-link" type="button" data-page="users">Użytkownicy RFID</button>
+<button class="menu-link" type="button" data-page="items">Przedmioty RFID</button>
+<button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers">Użytkownicy panelu</button>
 </nav>
 </div>
 
@@ -242,6 +244,115 @@
 <button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież listę</button>
 </div>
 <div id="rfidUsersList" class="users-list"></div>
+</div>
+</div>
+</div>
+</section>
+
+<section id="itemsPage" class="page">
+<div class="users-layout">
+<div class="users-sidebar">
+<div class="card">
+<div class="section-copy">
+<h2 class="card-title">Przedmioty RFID</h2>
+<p>Dodawaj własne przedmioty rozpoznawane po UID taga RFID. System pokaże ich nazwę i typ w logach oraz w statusie skrytek.</p>
+</div>
+
+<form id="rfidItemForm" class="auth-form">
+<input id="rfidItemId" type="hidden">
+
+<label class="field">
+<span class="field-label">Nazwa przedmiotu</span>
+<input id="rfidItemName" type="text" placeholder="np. Klucz do magazynu" required>
+</label>
+
+<label class="field">
+<span class="field-label">UID taga RFID</span>
+<input id="rfidItemTagId" type="text" placeholder="np. 04A1B2C3D4" required>
+</label>
+
+<label class="field">
+<span class="field-label">Typ</span>
+<select id="rfidItemType" required>
+<option value="brelok">Brelok</option>
+<option value="karta">Karta</option>
+<option value="inne">Inne</option>
+</select>
+</label>
+
+<button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
+<button id="rfidItemReset" class="secondary-button" type="button">Wyczyść formularz</button>
+</form>
+</div>
+</div>
+
+<div class="users-main">
+<div class="card">
+<div class="section-header">
+<div class="section-copy">
+<h2>Lista przedmiotów</h2>
+<p>Tu zarządzasz mapowaniem UID tagów na czytelne nazwy i typy przedmiotów.</p>
+</div>
+<button class="secondary-button" type="button" onclick="loadRfidItems()">Odśwież listę</button>
+</div>
+<div id="rfidItemsList" class="users-list"></div>
+</div>
+</div>
+</div>
+</section>
+
+<section id="panelUsersPage" class="page">
+<div class="users-layout">
+<div class="users-sidebar">
+<div class="card">
+<div class="section-copy">
+<h2 class="card-title">Użytkownicy panelu</h2>
+<p>Tylko użytkownik master może dodawać, usuwać i edytować konta administratorów panelu.</p>
+</div>
+
+<form id="panelUserForm" class="auth-form">
+<input id="panelUserId" type="hidden">
+
+<label class="field">
+<span class="field-label">Nazwa wyświetlana</span>
+<input id="panelUserDisplayName" type="text" placeholder="np. Jan Kowalski" required>
+</label>
+
+<label class="field">
+<span class="field-label">Login</span>
+<input id="panelUserUsername" type="text" placeholder="np. admin" required>
+</label>
+
+<label class="field">
+<span class="field-label">Hasło</span>
+<input id="panelUserPassword" type="password" placeholder="Minimum 6 znaków">
+<small class="field-help">Przy edycji zostaw puste, jeśli hasło ma pozostać bez zmian.</small>
+</label>
+
+<label class="field">
+<span class="field-label">Rola</span>
+<select id="panelUserRole" required>
+<option value="admin">Administrator</option>
+<option value="master">Master</option>
+</select>
+</label>
+
+<button id="panelUserSubmit" type="submit">Dodaj użytkownika</button>
+<button id="panelUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
+</form>
+</div>
+</div>
+
+<div class="users-main">
+<div class="card">
+<div class="section-header">
+<div class="section-copy">
+<h2>Lista kont panelu</h2>
+<p>Konta są teraz trzymane poza zmiennymi środowiskowymi i można nimi zarządzać z poziomu panelu.</p>
+</div>
+<button class="secondary-button" type="button" onclick="loadPanelUsers()">Odśwież listę</button>
+</div>
+<div id="panelUsersList" class="users-list"></div>
 </div>
 </div>
 </div>

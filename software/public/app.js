@@ -11,7 +11,15 @@ let isGeneratingCode = false;
 let currentUser = null;
 let currentPage = "dashboard";
 let rfidUsersData = [];
+let rfidItemsData = [];
+let panelUsersData = [];
 let systemStatusData = null;
+
+const RFID_ITEM_TYPE_LABELS = {
+  brelok: "Brelok",
+  karta: "Karta",
+  inne: "Inne"
+};
 
 const STATUS_ELEMENT_IDS = {
   server: "serverStatus",
@@ -165,6 +173,7 @@ function showAppView() {
   document.getElementById("appView").classList.remove("hidden");
   document.getElementById("authError").innerText = "";
   updateUserChip();
+  updateMasterUi();
   setPage(currentPage, false);
 }
 
@@ -177,8 +186,17 @@ function updateUserChip() {
   }
 
   document.getElementById("userDisplayName").innerText = currentUser.displayName;
-  document.getElementById("userUsername").innerText = `@${currentUser.username}`;
+  document.getElementById("userUsername").innerText = `@${currentUser.username} · ${currentUser.role === "master" ? "master" : "admin"}`;
   chip.classList.remove("hidden");
+}
+
+function updateMasterUi() {
+  const isMaster = Boolean(currentUser?.isMaster);
+  document.getElementById("panelUsersMenuLink").classList.toggle("hidden", !isMaster);
+
+  if (!isMaster && currentPage === "panelUsers") {
+    setPage("dashboard");
+  }
 }
 
 function connectSocket() {
@@ -208,6 +226,22 @@ function connectSocket() {
       "RFID_USER_DELETED"
     ].includes(log.event)) {
       await loadRfidUsers();
+    }
+
+    if ([
+      "RFID_ITEM_CREATED",
+      "RFID_ITEM_UPDATED",
+      "RFID_ITEM_DELETED"
+    ].includes(log.event)) {
+      await loadRfidItems();
+    }
+
+    if ([
+      "PANEL_USER_CREATED",
+      "PANEL_USER_UPDATED",
+      "PANEL_USER_DELETED"
+    ].includes(log.event) && currentUser?.isMaster) {
+      await loadPanelUsers();
     }
   });
   socket.on("active-codes-changed", async () => {
@@ -239,9 +273,15 @@ function toggleMenu(forceOpen = null) {
 }
 
 function setPage(page, closeMenu = true) {
+  if (page === "panelUsers" && !currentUser?.isMaster) {
+    page = "dashboard";
+  }
+
   currentPage = page;
   document.getElementById("dashboardPage").classList.toggle("active", page === "dashboard");
   document.getElementById("usersPage").classList.toggle("active", page === "users");
+  document.getElementById("itemsPage").classList.toggle("active", page === "items");
+  document.getElementById("panelUsersPage").classList.toggle("active", page === "panelUsers");
   document.querySelectorAll(".menu-link").forEach(link => {
     link.classList.toggle("active", link.dataset.page === page);
   });
@@ -444,7 +484,9 @@ async function checkSession() {
   if (data.authenticated) {
     currentUser = {
       username: data.username,
-      displayName: data.displayName
+      displayName: data.displayName,
+      role: data.role,
+      isMaster: data.isMaster
     };
   }
 
@@ -460,7 +502,9 @@ async function login(username, password) {
 
   currentUser = {
     username: data.username,
-    displayName: data.displayName
+    displayName: data.displayName,
+    role: data.role,
+    isMaster: data.isMaster
   };
 }
 
@@ -480,7 +524,9 @@ async function initializeDashboard() {
     loadLockers(),
     loadActiveCodes(),
     loadLogs(),
-    loadRfidUsers()
+    loadRfidUsers(),
+    loadRfidItems(),
+    currentUser?.isMaster ? loadPanelUsers() : Promise.resolve()
   ]);
 }
 
@@ -492,6 +538,24 @@ function resetRfidUserForm() {
     input.checked = false;
   });
   document.getElementById("rfidUserSubmit").textContent = "Dodaj użytkownika";
+}
+
+function resetRfidItemForm() {
+  document.getElementById("rfidItemId").value = "";
+  document.getElementById("rfidItemName").value = "";
+  document.getElementById("rfidItemTagId").value = "";
+  document.getElementById("rfidItemType").value = "brelok";
+  document.getElementById("rfidItemSubmit").textContent = "Dodaj przedmiot";
+}
+
+function resetPanelUserForm() {
+  document.getElementById("panelUserId").value = "";
+  document.getElementById("panelUserDisplayName").value = "";
+  document.getElementById("panelUserUsername").value = "";
+  document.getElementById("panelUserPassword").value = "";
+  document.getElementById("panelUserRole").value = "admin";
+  document.getElementById("panelUserPassword").required = true;
+  document.getElementById("panelUserSubmit").textContent = "Dodaj użytkownika";
 }
 
 function getSelectedAllowedLockers() {
@@ -508,6 +572,59 @@ function populateRfidUserForm(user) {
   });
   document.getElementById("rfidUserSubmit").textContent = "Zapisz zmiany";
   setPage("users");
+}
+
+function populateRfidItemForm(item) {
+  document.getElementById("rfidItemId").value = item._id;
+  document.getElementById("rfidItemName").value = item.name;
+  document.getElementById("rfidItemTagId").value = item.tagId;
+  document.getElementById("rfidItemType").value = item.itemType;
+  document.getElementById("rfidItemSubmit").textContent = "Zapisz zmiany";
+  setPage("items");
+}
+
+function populatePanelUserForm(user) {
+  document.getElementById("panelUserId").value = user._id;
+  document.getElementById("panelUserDisplayName").value = user.displayName;
+  document.getElementById("panelUserUsername").value = user.username;
+  document.getElementById("panelUserPassword").value = "";
+  document.getElementById("panelUserPassword").required = false;
+  document.getElementById("panelUserRole").value = user.role;
+  document.getElementById("panelUserSubmit").textContent = "Zapisz zmiany";
+  setPage("panelUsers");
+}
+
+function getItemTypeLabel(itemType) {
+  return RFID_ITEM_TYPE_LABELS[itemType] || "Inne";
+}
+
+function describeDetectedItem(data) {
+  if (!data?.hasTag) {
+    return {
+      title: "Brak przedmiotu",
+      meta: "Czytnik RFID nie wykrywa teraz żadnego taga w skrytce."
+    };
+  }
+
+  if (data.detectedItemKnown && data.detectedItemName) {
+    const itemType = data.detectedItemType ? getItemTypeLabel(data.detectedItemType) : "Przedmiot RFID";
+    return {
+      title: `${itemType}: ${data.detectedItemName}`,
+      meta: `UID ${data.detectedTagId || "brak danych"}`
+    };
+  }
+
+  if (data.detectedTagId) {
+    return {
+      title: `Obcy obiekt: ${data.detectedTagId}`,
+      meta: "Tag nie znajduje się na liście zdefiniowanych przedmiotów RFID."
+    };
+  }
+
+  return {
+    title: "Przedmiot RFID obecny",
+    meta: "System nie otrzymał jeszcze UID tego przedmiotu."
+  };
 }
 
 function renderRfidUsers() {
@@ -574,10 +691,169 @@ function renderRfidUsers() {
   });
 }
 
+function renderRfidItems() {
+  const container = document.getElementById("rfidItemsList");
+  container.innerHTML = "";
+
+  if (rfidItemsData.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted-empty";
+    empty.textContent = "Brak zdefiniowanych przedmiotów RFID.";
+    container.appendChild(empty);
+    return;
+  }
+
+  rfidItemsData.forEach(item => {
+    const card = document.createElement("div");
+    card.className = "user-card";
+
+    const header = document.createElement("div");
+    header.className = "user-card-header";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("h3");
+    title.className = "user-card-title";
+    title.textContent = item.name;
+
+    const tag = document.createElement("div");
+    tag.className = "user-tag-chip";
+    tag.textContent = `UID: ${item.tagId}`;
+
+    meta.appendChild(title);
+    meta.appendChild(tag);
+
+    const chips = document.createElement("div");
+    chips.className = "user-lockers";
+
+    const typeChip = document.createElement("span");
+    typeChip.className = "user-locker-chip";
+    typeChip.textContent = getItemTypeLabel(item.itemType);
+    chips.appendChild(typeChip);
+
+    const actions = document.createElement("div");
+    actions.className = "user-card-actions";
+
+    const editButton = document.createElement("button");
+    editButton.className = "secondary-button";
+    editButton.textContent = "Edytuj";
+    editButton.addEventListener("click", () => populateRfidItemForm(item));
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "danger";
+    deleteButton.textContent = "Usuń";
+    deleteButton.addEventListener("click", () => deleteRfidItem(item._id, item.name));
+
+    actions.appendChild(editButton);
+    actions.appendChild(deleteButton);
+    header.appendChild(meta);
+    header.appendChild(actions);
+
+    card.appendChild(header);
+    card.appendChild(chips);
+    container.appendChild(card);
+  });
+}
+
+function renderPanelUsers() {
+  const container = document.getElementById("panelUsersList");
+  container.innerHTML = "";
+
+  if (!currentUser?.isMaster) {
+    const empty = document.createElement("div");
+    empty.className = "muted-empty";
+    empty.textContent = "Ta sekcja jest dostępna tylko dla użytkownika master.";
+    container.appendChild(empty);
+    return;
+  }
+
+  if (panelUsersData.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted-empty";
+    empty.textContent = "Brak kont panelu.";
+    container.appendChild(empty);
+    return;
+  }
+
+  panelUsersData.forEach(user => {
+    const card = document.createElement("div");
+    card.className = "user-card";
+
+    const header = document.createElement("div");
+    header.className = "user-card-header";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("h3");
+    title.className = "user-card-title";
+    title.textContent = user.displayName;
+
+    const tag = document.createElement("div");
+    tag.className = "user-tag-chip";
+    tag.textContent = `@${user.username}`;
+
+    meta.appendChild(title);
+    meta.appendChild(tag);
+
+    const chips = document.createElement("div");
+    chips.className = "user-lockers";
+
+    const roleChip = document.createElement("span");
+    roleChip.className = "user-locker-chip";
+    roleChip.textContent = user.role === "master" ? "Master" : "Administrator";
+    chips.appendChild(roleChip);
+
+    const actions = document.createElement("div");
+    actions.className = "user-card-actions";
+
+    const editButton = document.createElement("button");
+    editButton.className = "secondary-button";
+    editButton.textContent = "Edytuj";
+    editButton.addEventListener("click", () => populatePanelUserForm(user));
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "danger";
+    deleteButton.textContent = "Usuń";
+    deleteButton.disabled = currentUser.username === user.username;
+    deleteButton.addEventListener("click", () => deletePanelUser(user._id, user.displayName));
+
+    actions.appendChild(editButton);
+    actions.appendChild(deleteButton);
+    header.appendChild(meta);
+    header.appendChild(actions);
+
+    card.appendChild(header);
+    card.appendChild(chips);
+    container.appendChild(card);
+  });
+}
+
 async function loadRfidUsers() {
   try {
     rfidUsersData = await apiFetch("/users");
     renderRfidUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function loadRfidItems() {
+  try {
+    rfidItemsData = await apiFetch("/rfid-items");
+    renderRfidItems();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function loadPanelUsers() {
+  if (!currentUser?.isMaster) {
+    panelUsersData = [];
+    renderPanelUsers();
+    return;
+  }
+
+  try {
+    panelUsersData = await apiFetch("/panel-users");
+    renderPanelUsers();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -617,6 +893,76 @@ async function submitRfidUserForm(event) {
   }
 }
 
+async function submitRfidItemForm(event) {
+  event.preventDefault();
+
+  const itemId = document.getElementById("rfidItemId").value;
+  const payload = {
+    name: document.getElementById("rfidItemName").value.trim(),
+    tagId: document.getElementById("rfidItemTagId").value.trim(),
+    itemType: document.getElementById("rfidItemType").value
+  };
+
+  try {
+    if (itemId) {
+      await apiFetch(`/rfid-items/${itemId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Przedmiot RFID zaktualizowany.");
+    } else {
+      await apiFetch("/rfid-items", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Przedmiot RFID dodany.");
+    }
+
+    resetRfidItemForm();
+    await loadRfidItems();
+    await loadLockers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function submitPanelUserForm(event) {
+  event.preventDefault();
+
+  const userId = document.getElementById("panelUserId").value;
+  const payload = {
+    displayName: document.getElementById("panelUserDisplayName").value.trim(),
+    username: document.getElementById("panelUserUsername").value.trim(),
+    password: document.getElementById("panelUserPassword").value,
+    role: document.getElementById("panelUserRole").value
+  };
+
+  try {
+    if (userId) {
+      await apiFetch(`/panel-users/${userId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Użytkownik panelu zaktualizowany.");
+    } else {
+      await apiFetch("/panel-users", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      showToast("Użytkownik panelu dodany.");
+    }
+
+    resetPanelUserForm();
+    await loadPanelUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 async function deleteRfidUser(userId, name) {
   const confirmed = window.confirm(`Czy na pewno chcesz usunąć użytkownika ${name}?`);
 
@@ -631,6 +977,45 @@ async function deleteRfidUser(userId, name) {
     showToast("Użytkownik RFID usunięty.");
     resetRfidUserForm();
     await loadRfidUsers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function deleteRfidItem(itemId, name) {
+  const confirmed = window.confirm(`Czy na pewno chcesz usunąć przedmiot ${name}?`);
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiFetch(`/rfid-items/${itemId}`, {
+      method: "DELETE"
+    });
+    showToast("Przedmiot RFID usunięty.");
+    resetRfidItemForm();
+    await loadRfidItems();
+    await loadLockers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function deletePanelUser(userId, name) {
+  const confirmed = window.confirm(`Czy na pewno chcesz usunąć użytkownika panelu ${name}?`);
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiFetch(`/panel-users/${userId}`, {
+      method: "DELETE"
+    });
+    showToast("Użytkownik panelu usunięty.");
+    resetPanelUserForm();
+    await loadPanelUsers();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -725,9 +1110,14 @@ async function loadLockers() {
 
       const copy = document.createElement("div");
       copy.className = "locker-copy";
-      copy.textContent = l.hasTag && l.isDoorClosed
-        ? "Skrytka jest gotowa operacyjnie. Klucz znajduje się na miejscu, a kontrakton potwierdza zamknięcie."
-        : "Skrytka wymaga uwagi operatora. Sprawdź status RFID oraz domknięcie drzwiczek.";
+      const detectedItem = describeDetectedItem(l);
+      copy.textContent = [
+        l.hasTag && l.isDoorClosed
+          ? "Skrytka jest gotowa operacyjnie. Klucz znajduje się na miejscu, a kontrakton potwierdza zamknięcie."
+          : "Skrytka wymaga uwagi operatora. Sprawdź status RFID oraz domknięcie drzwiczek.",
+        `${detectedItem.title}.`,
+        detectedItem.meta
+      ].join(" ");
 
       const actions = document.createElement("div");
       actions.className = "locker-actions";
@@ -890,6 +1280,7 @@ function addLog(log) {
   const li = document.createElement("li");
 
   const time = new Date(log.timestamp).toLocaleString();
+  const itemLabel = formatLogItemLabel(log);
 
   let text = "";
   let cls = "log-info";
@@ -919,11 +1310,11 @@ function addLog(log) {
       cls = "log-warning";
       break;
     case "KEY_REMOVED":
-      text = `🔑 wyjęty S${log.locker}`;
+      text = `🔑 wyjęty S${log.locker}${itemLabel}`;
       cls = "log-warning";
       break;
     case "KEY_RETURNED":
-      text = `📥 zwrócony S${log.locker}`;
+      text = `📥 zwrócony S${log.locker}${itemLabel}`;
       cls = "log-success";
       break;
     case "LOCKER_DOOR_OPENED":
@@ -942,11 +1333,11 @@ function addLog(log) {
       cls = "log-warning";
       break;
     case "RFID_ACCESS_GRANTED":
-      text = "🪪 autoryzowany tag RFID";
+      text = `🪪 autoryzowany tag RFID${itemLabel}`;
       cls = "log-success";
       break;
     case "RFID_ACCESS_DENIED":
-      text = "⛔ odrzucony tag RFID";
+      text = `⛔ odrzucony tag RFID${itemLabel}`;
       cls = "log-error";
       break;
     case "RFID_USER_CREATED":
@@ -959,12 +1350,45 @@ function addLog(log) {
       text = "🗑️ usunięto użytkownika RFID";
       cls = "log-warning";
       break;
+    case "RFID_ITEM_CREATED":
+      text = "🏷️ dodano przedmiot RFID";
+      break;
+    case "RFID_ITEM_UPDATED":
+      text = "🛠️ zaktualizowano przedmiot RFID";
+      break;
+    case "RFID_ITEM_DELETED":
+      text = "🗑️ usunięto przedmiot RFID";
+      cls = "log-warning";
+      break;
+    case "PANEL_USER_CREATED":
+      text = "🧑 dodano użytkownika panelu";
+      break;
+    case "PANEL_USER_UPDATED":
+      text = "🛠️ zaktualizowano użytkownika panelu";
+      break;
+    case "PANEL_USER_DELETED":
+      text = "🗑️ usunięto użytkownika panelu";
+      cls = "log-warning";
+      break;
   }
 
   li.className = cls;
   li.innerText = `${time} | ${text}`;
   list.prepend(li);
   list.scrollTop = 0;
+}
+
+function formatLogItemLabel(log) {
+  if (log.itemKnown && log.itemName) {
+    const typeLabel = log.itemType ? getItemTypeLabel(log.itemType).toLowerCase() : "przedmiot";
+    return ` · ${typeLabel}: ${log.itemName}`;
+  }
+
+  if (log.tagId) {
+    return ` · obcy obiekt: ${log.tagId}`;
+  }
+
+  return "";
 }
 
 async function loadLogs() {
@@ -1012,6 +1436,10 @@ document.querySelectorAll(".menu-link").forEach(link => {
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("rfidUserForm").addEventListener("submit", submitRfidUserForm);
 document.getElementById("rfidUserReset").addEventListener("click", resetRfidUserForm);
+document.getElementById("rfidItemForm").addEventListener("submit", submitRfidItemForm);
+document.getElementById("rfidItemReset").addEventListener("click", resetRfidItemForm);
+document.getElementById("panelUserForm").addEventListener("submit", submitPanelUserForm);
+document.getElementById("panelUserReset").addEventListener("click", resetPanelUserForm);
 document.getElementById("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
 

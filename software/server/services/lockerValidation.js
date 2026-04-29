@@ -62,6 +62,66 @@ function assertValidUserName(name) {
   return name.trim();
 }
 
+function assertValidRfidItemName(name) {
+  if (typeof name !== "string" || name.trim().length < 2) {
+    throw createHttpError(400, "Podaj nazwe przedmiotu RFID.");
+  }
+
+  return name.trim();
+}
+
+function assertValidRfidItemType(itemType) {
+  if (!["brelok", "karta", "inne"].includes(itemType)) {
+    throw createHttpError(400, "Wybierz prawidlowy typ przedmiotu RFID.");
+  }
+
+  return itemType;
+}
+
+function assertValidPanelUsername(username) {
+  const normalized = typeof username === "string"
+    ? username.trim().toLowerCase()
+    : "";
+
+  if (!/^[a-z0-9._-]{3,32}$/.test(normalized)) {
+    throw createHttpError(400, "Login moze zawierac 3-32 znaki: litery, cyfry, kropke, myslnik lub podkreslenie.");
+  }
+
+  return normalized;
+}
+
+function assertValidPanelDisplayName(displayName) {
+  if (typeof displayName !== "string" || displayName.trim().length < 2) {
+    throw createHttpError(400, "Podaj nazwe wyswietlana uzytkownika panelu.");
+  }
+
+  return displayName.trim();
+}
+
+function assertValidPanelRole(role) {
+  if (!["master", "admin"].includes(role)) {
+    throw createHttpError(400, "Nieprawidlowa rola uzytkownika panelu.");
+  }
+
+  return role;
+}
+
+function assertValidPanelPassword(password, { required = true } = {}) {
+  if (password == null || password === "") {
+    if (required) {
+      throw createHttpError(400, "Podaj haslo uzytkownika panelu.");
+    }
+
+    return null;
+  }
+
+  if (typeof password !== "string" || password.length < 6) {
+    throw createHttpError(400, "Haslo musi miec co najmniej 6 znakow.");
+  }
+
+  return password;
+}
+
 function normalizeEmail(email) {
   return typeof email === "string"
     ? email.trim().toLowerCase()
@@ -102,7 +162,13 @@ module.exports = {
   assertValidHasTag,
   assertValidHours,
   assertValidLocker,
+  assertValidPanelDisplayName,
+  assertValidPanelPassword,
+  assertValidPanelRole,
+  assertValidPanelUsername,
   assertValidRecipientEmail,
+  assertValidRfidItemName,
+  assertValidRfidItemType,
   assertValidTagId,
   assertValidUserName,
   createHttpError

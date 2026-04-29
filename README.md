@@ -80,7 +80,9 @@ Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
 - Panel WWW i Discord korzystają z tego samego backendu.
 - Urządzenie może raportować status skrytek i pobierać zakolejkowane akcje.
 - RFID użytkownika jest osobnym bytem od RFID obecności klucza w skrytce.
+- Przedmioty RFID mogą być opisane własną nazwą i typem, a nieznane UID są pokazywane jako obce obiekty.
 - Frontend pozostaje prostą aplikacją statyczną bez bundlera, żeby wdrożenie na Railway było lekkie.
+- Konta panelu są przechowywane w MongoDB; zmienne `ADMIN_*` służą już jako seed startowy, gdy baza nie ma jeszcze żadnego użytkownika panelu.
 
 ## Wysyłka kodów e-mailem
 

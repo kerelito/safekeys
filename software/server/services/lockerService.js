@@ -1,6 +1,6 @@
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-const { Code, Log, Locker, RfidUser } = require("../models");
+const { Code, Log, Locker, RfidUser, RfidItem } = require("../models");
 const {
   ALLOWED_LOCKERS,
   assertValidAllowedLockers,
@@ -10,6 +10,8 @@ const {
   assertValidHours,
   assertValidLocker,
   assertValidRecipientEmail,
+  assertValidRfidItemName,
+  assertValidRfidItemType,
   assertValidTagId,
   assertValidUserName,
   createHttpError
@@ -94,6 +96,47 @@ class LockerService extends EventEmitter {
 
     this.emit("log", log);
     return log;
+  }
+
+  async findRfidItemByTagId(tagId) {
+    if (!tagId) {
+      return null;
+    }
+
+    return RfidItem.findOne({
+      tagId: assertValidTagId(tagId),
+      active: true
+    }).lean();
+  }
+
+  async describeDetectedItem(tagId) {
+    if (!tagId) {
+      return {
+        tagId: null,
+        itemName: null,
+        itemType: null,
+        itemKnown: null
+      };
+    }
+
+    const normalizedTagId = assertValidTagId(tagId);
+    const item = await this.findRfidItemByTagId(normalizedTagId);
+
+    if (!item) {
+      return {
+        tagId: normalizedTagId,
+        itemName: null,
+        itemType: null,
+        itemKnown: false
+      };
+    }
+
+    return {
+      tagId: item.tagId,
+      itemName: item.name,
+      itemType: item.itemType,
+      itemKnown: true
+    };
   }
 
   async generateUniqueCode() {
@@ -325,7 +368,12 @@ class LockerService extends EventEmitter {
       return {
         locker: num,
         hasTag: found ? found.hasTag : false,
-        isDoorClosed: found ? found.isDoorClosed !== false : true
+        isDoorClosed: found ? found.isDoorClosed !== false : true,
+        detectedTagId: found?.detectedTagId || null,
+        detectedItemName: found?.detectedItemName || null,
+        detectedItemType: found?.detectedItemType || null,
+        detectedItemKnown: typeof found?.detectedItemKnown === "boolean" ? found.detectedItemKnown : null,
+        detectedAt: found?.detectedAt || null
       };
     });
   }
@@ -336,11 +384,40 @@ class LockerService extends EventEmitter {
 
     let found = await Locker.findOne({ locker });
     const prev = found ? found.hasTag : null;
+    const previousItem = found
+      ? {
+          tagId: found.detectedTagId || null,
+          itemName: found.detectedItemName || null,
+          itemType: found.detectedItemType || null,
+          itemKnown: typeof found.detectedItemKnown === "boolean" ? found.detectedItemKnown : null
+        }
+      : null;
+    const nextItem = hasTag
+      ? (context.tagId ? await this.describeDetectedItem(context.tagId) : previousItem)
+      : {
+          tagId: null,
+          itemName: null,
+          itemType: null,
+          itemKnown: null
+        };
 
     if (!found) {
-      found = await Locker.create({ locker, hasTag });
+      found = await Locker.create({
+        locker,
+        hasTag,
+        detectedTagId: nextItem?.tagId || null,
+        detectedItemName: nextItem?.itemName || null,
+        detectedItemType: nextItem?.itemType || null,
+        detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+        detectedAt: hasTag ? new Date() : null
+      });
     } else {
       found.hasTag = hasTag;
+      found.detectedTagId = nextItem?.tagId || null;
+      found.detectedItemName = nextItem?.itemName || null;
+      found.detectedItemType = nextItem?.itemType || null;
+      found.detectedItemKnown = typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null;
+      found.detectedAt = hasTag ? new Date() : null;
       await found.save();
     }
 
@@ -348,6 +425,10 @@ class LockerService extends EventEmitter {
       await this.createLog({
         event: "KEY_REMOVED",
         locker,
+        tagId: previousItem?.tagId || null,
+        itemName: previousItem?.itemName || null,
+        itemType: previousItem?.itemType || null,
+        itemKnown: typeof previousItem?.itemKnown === "boolean" ? previousItem.itemKnown : null,
         source: context.source || "rfid",
         actor: context.actor || null
       });
@@ -357,6 +438,10 @@ class LockerService extends EventEmitter {
       await this.createLog({
         event: "KEY_RETURNED",
         locker,
+        tagId: nextItem?.tagId || null,
+        itemName: nextItem?.itemName || null,
+        itemType: nextItem?.itemType || null,
+        itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
         source: context.source || "rfid",
         actor: context.actor || null
       });
@@ -466,6 +551,10 @@ class LockerService extends EventEmitter {
     return RfidUser.find().sort({ name: 1 }).lean();
   }
 
+  async getRfidItems() {
+    return RfidItem.find().sort({ name: 1 }).lean();
+  }
+
   async createRfidUser(payload, context = {}) {
     const name = assertValidUserName(payload.name);
     const tagId = assertValidTagId(payload.tagId);
@@ -547,19 +636,130 @@ class LockerService extends EventEmitter {
     return { success: true };
   }
 
+  async createRfidItem(payload, context = {}) {
+    const name = assertValidRfidItemName(payload.name);
+    const tagId = assertValidTagId(payload.tagId);
+    const itemType = assertValidRfidItemType(payload.itemType);
+
+    const existing = await RfidItem.findOne({ tagId });
+    if (existing) {
+      throw createHttpError(409, "Przedmiot RFID z tym tagiem juz istnieje.");
+    }
+
+    const item = await RfidItem.create({
+      name,
+      tagId,
+      itemType,
+      updatedAt: new Date()
+    });
+
+    await this.createLog({
+      event: "RFID_ITEM_CREATED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${name} • ${tagId}`
+    });
+
+    return item.toObject();
+  }
+
+  async updateRfidItem(itemId, payload, context = {}) {
+    if (!mongoose.Types.ObjectId.isValid(itemId)) {
+      throw createHttpError(400, "Nieprawidlowe ID przedmiotu RFID.");
+    }
+
+    const name = assertValidRfidItemName(payload.name);
+    const tagId = assertValidTagId(payload.tagId);
+    const itemType = assertValidRfidItemType(payload.itemType);
+    const item = await RfidItem.findById(itemId);
+
+    if (!item) {
+      throw createHttpError(404, "Nie znaleziono przedmiotu RFID.");
+    }
+
+    const existingWithTag = await RfidItem.findOne({ tagId, _id: { $ne: itemId } });
+    if (existingWithTag) {
+      throw createHttpError(409, "Inny przedmiot RFID ma juz ten tag.");
+    }
+
+    const previousTagId = item.tagId;
+    item.name = name;
+    item.tagId = tagId;
+    item.itemType = itemType;
+    item.updatedAt = new Date();
+    await item.save();
+
+    await Locker.updateMany(
+      { detectedTagId: previousTagId },
+      {
+        $set: {
+          detectedTagId: item.tagId,
+          detectedItemName: item.name,
+          detectedItemType: item.itemType,
+          detectedItemKnown: true
+        }
+      }
+    );
+
+    await this.createLog({
+      event: "RFID_ITEM_UPDATED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${name} • ${tagId}`
+    });
+
+    return item.toObject();
+  }
+
+  async deleteRfidItem(itemId, context = {}) {
+    if (!mongoose.Types.ObjectId.isValid(itemId)) {
+      throw createHttpError(400, "Nieprawidlowe ID przedmiotu RFID.");
+    }
+
+    const item = await RfidItem.findById(itemId);
+    if (!item) {
+      throw createHttpError(404, "Nie znaleziono przedmiotu RFID.");
+    }
+
+    await Locker.updateMany(
+      { detectedTagId: item.tagId },
+      {
+        $set: {
+          detectedItemName: null,
+          detectedItemType: null,
+          detectedItemKnown: false
+        }
+      }
+    );
+
+    await item.deleteOne();
+
+    await this.createLog({
+      event: "RFID_ITEM_DELETED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${item.name} • ${item.tagId}`
+    });
+
+    return { success: true };
+  }
+
   async verifyRfidTag(tagId, context = {}) {
     const normalizedTagId = assertValidTagId(tagId);
     const user = await RfidUser.findOne({ tagId: normalizedTagId, active: true });
+    const item = await this.describeDetectedItem(normalizedTagId);
 
     if (!user) {
       await this.createLog({
         event: "RFID_ACCESS_DENIED",
         source: context.source || "rfid-user",
-        actor: normalizedTagId
+        actor: normalizedTagId,
+        tagId: item.tagId,
+        itemName: item.itemName,
+        itemType: item.itemType,
+        itemKnown: item.itemKnown
       });
 
       return {
-        valid: false
+        valid: false,
+        item
       };
     }
 
@@ -577,11 +777,16 @@ class LockerService extends EventEmitter {
       event: "RFID_ACCESS_GRANTED",
       source: context.source || "rfid-user",
       actor: `${user.name} • ${user.tagId}`,
-      success: true
+      success: true,
+      tagId: item.tagId,
+      itemName: item.itemName,
+      itemType: item.itemType,
+      itemKnown: item.itemKnown
     });
 
     return {
       valid: true,
+      item,
       user: {
         id: user._id.toString(),
         name: user.name,
