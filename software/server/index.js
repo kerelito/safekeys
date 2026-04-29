@@ -388,6 +388,11 @@ app.post("/rfid-items", asyncHandler(async (req, res) => {
 }));
 
 app.post("/rfid-items/tag-assignment/start", asyncHandler(async (req, res) => {
+  const esp32Status = getEsp32Status();
+  if (!esp32Status.connected) {
+    return res.status(409).json({ error: "Nadawanie taga jest dostępne tylko przy aktywnym połączeniu z ESP32." });
+  }
+
   const result = await lockerService.startTagAssignment({
     itemName: req.body.itemName
   }, {

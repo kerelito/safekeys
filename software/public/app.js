@@ -134,6 +134,8 @@ function renderSystemStatus() {
       `IP: ${esp32.ip || "brak danych"}`
     ]
   });
+
+  renderRfidAssignmentStatus();
 }
 
 async function refreshSystemStatus() {
@@ -774,6 +776,14 @@ function renderRfidAssignmentStatus() {
   const status = document.getElementById("rfidAssignmentStatus");
   const button = document.getElementById("assignRfidTagButton");
   const itemName = document.getElementById("rfidItemName").value.trim();
+  const esp32Connected = Boolean(systemStatusData?.esp32?.connected);
+
+  if (!esp32Connected) {
+    status.textContent = "Nadawanie taga jest dostępne tylko wtedy, gdy panel ma aktywne połączenie z ESP32.";
+    button.disabled = true;
+    button.textContent = "ESP32 offline";
+    return;
+  }
 
   if (!currentTagAssignment || !["pending", "completed", "failed"].includes(currentTagAssignment.status)) {
     status.textContent = "Możesz wpisać ID ręcznie albo uruchomić nadawanie na master readerze.";

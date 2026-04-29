@@ -233,6 +233,7 @@ ul {
 .user-chip {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   min-height: 44px;
   padding: 10px 14px;
@@ -353,7 +354,7 @@ ul {
   background: var(--panel-strong);
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
-  z-index: 6;
+  z-index: 40;
 }
 
 .menu-drawer nav {
@@ -1175,12 +1176,48 @@ select:focus,
     padding: 22px 18px 0;
     align-items: flex-start;
     flex-direction: column;
+    z-index: 20;
   }
 
   .topbar-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+  }
+
+  .menu-button,
+  .theme-toggle {
+    width: 100%;
+  }
+
+  .menu-button {
+    min-width: 0;
+  }
+
+  .user-chip,
+  .logout-button,
+  .system-status {
+    grid-column: 1 / -1;
+  }
+
+  .user-chip {
+    min-height: 72px;
+    padding: 14px 18px;
+    flex-direction: column;
+    gap: 4px;
+    text-align: center;
+  }
+
+  .user-chip strong,
+  .user-chip span {
+    display: block;
+    width: 100%;
+    text-align: center;
+  }
+
+  .logout-button {
+    width: 100%;
   }
 
   .auth-shell {
@@ -1220,6 +1257,10 @@ select:focus,
     align-items: flex-start;
   }
 
+  .brand-copy {
+    min-width: 0;
+  }
+
   .brand-mark {
     width: 42px;
     height: 42px;
@@ -1233,6 +1274,10 @@ select:focus,
   .section-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .section-header > * {
+    width: 100%;
   }
 
   .user-card-header,
@@ -1253,6 +1298,7 @@ select:focus,
 
   .hero-title {
     font-size: clamp(28px, 10vw, 38px);
+    line-height: 1.02;
   }
 
   .hero-subtitle {
@@ -1265,6 +1311,17 @@ select:focus,
   .system-status {
     width: 100%;
     justify-content: center;
+  }
+
+  .menu-drawer {
+    position: fixed;
+    top: 128px;
+    right: 18px;
+    left: 18px;
+    min-width: 0;
+    max-height: min(70vh, 520px);
+    overflow-y: auto;
+    z-index: 50;
   }
 
   .status-popover {
@@ -1284,12 +1341,24 @@ select:focus,
     border-radius: 24px;
   }
 
+  .card-title,
+  .section-header h2 {
+    font-size: 20px;
+  }
+
+  .section-header {
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
   .generated-output {
     min-height: 88px;
+    gap: 10px;
   }
 
   .section-copy {
-    margin-bottom: 14px;
+    gap: 5px;
+    margin-bottom: 12px;
   }
 
   .section-copy p {
@@ -1297,9 +1366,35 @@ select:focus,
     line-height: 1.55;
   }
 
+  .hero-card {
+    padding-bottom: 22px;
+  }
+
+  .hero-header {
+    margin-bottom: 18px;
+    gap: 14px;
+  }
+
+  .field-grid {
+    gap: 10px;
+  }
+
+  .email-field {
+    margin-top: 12px;
+  }
+
   .generated-output-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .generated-output-header > * {
+    width: 100%;
+  }
+
+  .delivery-status {
+    justify-content: center;
+    text-align: center;
   }
 
   .code-row {
@@ -1309,6 +1404,7 @@ select:focus,
 
   .code-meta {
     align-items: flex-start;
+    width: 100%;
   }
 
   .code-chip,
@@ -1318,8 +1414,75 @@ select:focus,
   }
 
   #activeCodes button,
-  .section-header .danger {
+  .section-header .danger,
+  .section-header .secondary-button,
+  .locker-actions button,
+  .locker-toolbar button,
+  .user-card-actions button,
+  .inline-field button,
+  .auth-form button {
     width: 100%;
+  }
+
+  .auth-form {
+    gap: 12px;
+  }
+
+  .checkbox-grid {
+    gap: 8px;
+  }
+
+  .auth-form input,
+  select,
+  .field-grid input,
+  .email-field input {
+    min-height: 50px;
+    font-size: 16px;
+  }
+
+  .field-help,
+  .generated-meta,
+  .locker-copy {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .locker {
+    min-height: 0;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .locker-name {
+    font-size: 18px;
+  }
+
+  .locker-badge {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .logs {
+    border-radius: 24px;
+  }
+
+  #logs {
+    padding-right: 2px;
+  }
+
+  #logs li {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .user-card,
+  .checkbox-card {
+    padding: 16px;
+  }
+
+  .user-card-title {
+    font-size: 18px;
   }
 
   li {
@@ -1344,11 +1507,20 @@ select:focus,
     gap: 12px;
   }
 
+  .topbar-actions {
+    grid-template-columns: 1fr;
+  }
+
   .menu-drawer {
-    top: 68px;
+    top: 82px;
     right: 14px;
     left: 14px;
     min-width: 0;
+  }
+
+  .user-chip {
+    min-height: 68px;
+    padding: 12px 16px;
   }
 
   .app-shell {
@@ -1359,12 +1531,24 @@ select:focus,
     gap: 14px;
   }
 
+  .brand {
+    gap: 12px;
+  }
+
+  .brand-title {
+    font-size: 16px;
+  }
+
+  .eyebrow {
+    letter-spacing: 0.18em;
+  }
+
   .field-grid {
     gap: 10px;
   }
 
   .card {
-    padding: 18px;
+    padding: 16px;
     border-radius: 22px;
   }
 
@@ -1373,9 +1557,120 @@ select:focus,
     min-height: 50px;
   }
 
+  .auth-form {
+    gap: 10px;
+  }
+
+  .menu-link {
+    text-align: center;
+    min-height: 48px;
+  }
+
+  .hero-card {
+    padding-top: 18px;
+    padding-bottom: 18px;
+  }
+
+  .hero-title {
+    font-size: 30px;
+  }
+
+  .hero-header {
+    margin-bottom: 16px;
+  }
+
+  .hero-subtitle,
+  .section-copy p,
+  .generated-meta,
+  .locker-copy,
+  .field-help {
+    font-size: 12.5px;
+  }
+
+  .section-copy {
+    margin-bottom: 10px;
+  }
+
+  .section-header {
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .section-header h2,
+  .card-title,
+  .user-card-title {
+    font-size: 18px;
+  }
+
+  .generated-output {
+    padding: 14px 16px;
+    border-radius: 18px;
+    min-height: 0;
+  }
+
   .generated-code {
     font-size: 28px;
     letter-spacing: 0.14em;
+  }
+
+  .generated-output-header small {
+    font-size: 10px;
+  }
+
+  .delivery-status {
+    min-height: 30px;
+    padding: 6px 10px;
+  }
+
+  .code-chip,
+  .timer,
+  .user-tag-chip,
+  .user-locker-chip,
+  .locker-badge {
+    font-size: 11.5px;
+  }
+
+  .code-chip,
+  .timer,
+  .user-tag-chip,
+  .user-locker-chip {
+    padding: 7px 10px;
+  }
+
+  .locker {
+    padding: 14px;
+    gap: 10px;
+  }
+
+  .locker-name {
+    font-size: 17px;
+  }
+
+  .locker-copy {
+    font-size: 12.5px;
+  }
+
+  .user-card,
+  .checkbox-card {
+    padding: 14px;
+  }
+
+  .checkbox-card {
+    min-height: 58px;
+  }
+
+  .user-card-actions {
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .logs {
+    border-radius: 22px;
+  }
+
+  .status-popover {
+    width: min(260px, calc(100vw - 40px));
+    min-width: 0;
   }
 
   .logs {
