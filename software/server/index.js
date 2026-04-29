@@ -218,6 +218,10 @@ lockerService.on("active-codes-changed", () => {
   io.emit("active-codes-changed");
 });
 
+lockerService.on("rfid-tag-assignment-updated", assignment => {
+  io.emit("rfid-tag-assignment-updated", assignment);
+});
+
 app.use(express.static(PUBLIC_DIR));
 
 app.get("/", (req, res) => {
@@ -275,6 +279,7 @@ app.use([
   "/system-status",
   "/users",
   "/rfid-items",
+  "/rfid-items/tag-assignment",
   "/panel-users",
   "/active-codes",
   "/logs",
@@ -352,6 +357,10 @@ app.get("/rfid-items", asyncHandler(async (req, res) => {
   res.json(items);
 }));
 
+app.get("/rfid-items/tag-assignment", asyncHandler(async (req, res) => {
+  res.json({ assignment: lockerService.getCurrentTagAssignment() });
+}));
+
 app.post("/users", asyncHandler(async (req, res) => {
   const result = await lockerService.createRfidUser({
     name: req.body.name,
@@ -370,6 +379,17 @@ app.post("/rfid-items", asyncHandler(async (req, res) => {
     name: req.body.name,
     tagId: req.body.tagId,
     itemType: req.body.itemType
+  }, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+
+  res.status(201).json(result);
+}));
+
+app.post("/rfid-items/tag-assignment/start", asyncHandler(async (req, res) => {
+  const result = await lockerService.startTagAssignment({
+    itemName: req.body.itemName
   }, {
     source: "web",
     actor: getSessionActor(req)
@@ -512,6 +532,21 @@ app.post("/device/heartbeat", requireDeviceKey, (req, res) => {
   io.emit("system-status", buildSystemStatus());
   res.json({ ok: true, serverTime: new Date().toISOString() });
 });
+
+app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (req, res) => {
+  const result = await lockerService.completeTagAssignment({
+    assignmentId: req.body.assignmentId,
+    success: req.body.success,
+    tagId: req.body.tagId,
+    physicalUid: req.body.physicalUid,
+    error: req.body.error
+  }, {
+    source: "device",
+    actor: req.body.physicalUid || "device"
+  });
+
+  res.json(result);
+}));
 
 app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
   const actions = await lockerService.consumeRemoteActions();

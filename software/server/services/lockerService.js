@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
 const { Code, Log, Locker, RfidUser, RfidItem } = require("../models");
@@ -80,6 +81,7 @@ class LockerService extends EventEmitter {
     super();
     this.pendingRemoteActions = [];
     this.emailService = null;
+    this.currentTagAssignment = null;
   }
 
   setEmailService(emailService) {
@@ -483,7 +485,8 @@ class LockerService extends EventEmitter {
       locker: locker ?? null,
       createdAt: new Date(),
       source: context.source || "web",
-      actor: context.actor || null
+      actor: context.actor || null,
+      payload: context.payload || null
     };
 
     this.pendingRemoteActions.push(action);
@@ -529,6 +532,10 @@ class LockerService extends EventEmitter {
     return actions;
   }
 
+  generateRandomTagId() {
+    return crypto.randomBytes(5).toString("hex").toUpperCase();
+  }
+
   async getActiveCodes() {
     const now = new Date();
 
@@ -553,6 +560,83 @@ class LockerService extends EventEmitter {
 
   async getRfidItems() {
     return RfidItem.find().sort({ name: 1 }).lean();
+  }
+
+  getCurrentTagAssignment() {
+    return this.currentTagAssignment
+      ? { ...this.currentTagAssignment }
+      : null;
+  }
+
+  async startTagAssignment(payload = {}, context = {}) {
+    if (this.currentTagAssignment?.status === "pending") {
+      throw createHttpError(409, "Trwa już nadawanie taga RFID. Dokończ je albo poczekaj na wynik.");
+    }
+
+    const itemName = typeof payload.itemName === "string" ? payload.itemName.trim() : "";
+    const assignment = {
+      id: new mongoose.Types.ObjectId().toString(),
+      itemName: itemName || null,
+      tagId: this.generateRandomTagId(),
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      startedBy: context.actor || "system",
+      result: null
+    };
+
+    this.currentTagAssignment = assignment;
+    this.createRemoteAction("ASSIGN_RFID_TAG", null, {
+      ...context,
+      payload: {
+        assignmentId: assignment.id,
+        tagId: assignment.tagId,
+        itemName: assignment.itemName
+      }
+    });
+
+    await this.createLog({
+      event: "RFID_TAG_ASSIGNMENT_STARTED",
+      source: context.source || "web",
+      actor: `${context.actor || "system"} • ${assignment.itemName || "bez nazwy"} • ${assignment.tagId}`,
+      tagId: assignment.tagId
+    });
+
+    this.emit("rfid-tag-assignment-updated", this.getCurrentTagAssignment());
+    return this.getCurrentTagAssignment();
+  }
+
+  async completeTagAssignment(payload = {}, context = {}) {
+    if (!this.currentTagAssignment || this.currentTagAssignment.id !== payload.assignmentId) {
+      throw createHttpError(404, "Nie znaleziono aktywnego zadania nadawania taga.");
+    }
+
+    const success = payload.success === true;
+    const result = {
+      success,
+      tagId: typeof payload.tagId === "string" ? payload.tagId.trim().toUpperCase() : this.currentTagAssignment.tagId,
+      physicalUid: typeof payload.physicalUid === "string" ? payload.physicalUid.trim().toUpperCase() : null,
+      error: typeof payload.error === "string" ? payload.error.trim().slice(0, 240) : null,
+      completedAt: new Date().toISOString(),
+      source: context.source || "device"
+    };
+
+    this.currentTagAssignment = {
+      ...this.currentTagAssignment,
+      status: success ? "completed" : "failed",
+      result
+    };
+
+    await this.createLog({
+      event: success ? "RFID_TAG_ASSIGNMENT_COMPLETED" : "RFID_TAG_ASSIGNMENT_FAILED",
+      source: context.source || "device",
+      actor: result.physicalUid || context.actor || "device",
+      tagId: result.tagId,
+      itemKnown: true,
+      itemName: this.currentTagAssignment.itemName || null
+    });
+
+    this.emit("rfid-tag-assignment-updated", this.getCurrentTagAssignment());
+    return this.getCurrentTagAssignment();
   }
 
   async createRfidUser(payload, context = {}) {
@@ -659,6 +743,11 @@ class LockerService extends EventEmitter {
       actor: `${context.actor || "system"} • ${name} • ${tagId}`
     });
 
+    if (this.currentTagAssignment?.result?.tagId === tagId || this.currentTagAssignment?.tagId === tagId) {
+      this.currentTagAssignment = null;
+      this.emit("rfid-tag-assignment-updated", null);
+    }
+
     return item.toObject();
   }
 
@@ -705,6 +794,11 @@ class LockerService extends EventEmitter {
       source: context.source || "web",
       actor: `${context.actor || "system"} • ${name} • ${tagId}`
     });
+
+    if (this.currentTagAssignment?.result?.tagId === tagId || this.currentTagAssignment?.tagId === tagId) {
+      this.currentTagAssignment = null;
+      this.emit("rfid-tag-assignment-updated", null);
+    }
 
     return item.toObject();
   }

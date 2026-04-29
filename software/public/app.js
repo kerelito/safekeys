@@ -14,6 +14,7 @@ let rfidUsersData = [];
 let rfidItemsData = [];
 let panelUsersData = [];
 let systemStatusData = null;
+let currentTagAssignment = null;
 
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
@@ -242,6 +243,19 @@ function connectSocket() {
       "PANEL_USER_DELETED"
     ].includes(log.event) && currentUser?.isMaster) {
       await loadPanelUsers();
+    }
+  });
+  socket.on("rfid-tag-assignment-updated", assignment => {
+    currentTagAssignment = assignment;
+    renderRfidAssignmentStatus();
+
+    if (assignment?.status === "completed" && assignment?.result?.success && assignment?.result?.tagId) {
+      document.getElementById("rfidItemTagId").value = assignment.result.tagId;
+      showToast(`Nadano tag ${assignment.result.tagId}.`);
+    }
+
+    if (assignment?.status === "failed") {
+      showToast(assignment.result?.error || "Nie udało się nadać taga RFID.", true);
     }
   });
   socket.on("active-codes-changed", async () => {
@@ -526,6 +540,7 @@ async function initializeDashboard() {
     loadLogs(),
     loadRfidUsers(),
     loadRfidItems(),
+    loadCurrentTagAssignment(),
     currentUser?.isMaster ? loadPanelUsers() : Promise.resolve()
   ]);
 }
@@ -546,6 +561,7 @@ function resetRfidItemForm() {
   document.getElementById("rfidItemTagId").value = "";
   document.getElementById("rfidItemType").value = "brelok";
   document.getElementById("rfidItemSubmit").textContent = "Dodaj przedmiot";
+  renderRfidAssignmentStatus();
 }
 
 function resetPanelUserForm() {
@@ -754,6 +770,38 @@ function renderRfidItems() {
   });
 }
 
+function renderRfidAssignmentStatus() {
+  const status = document.getElementById("rfidAssignmentStatus");
+  const button = document.getElementById("assignRfidTagButton");
+  const itemName = document.getElementById("rfidItemName").value.trim();
+
+  if (!currentTagAssignment || !["pending", "completed", "failed"].includes(currentTagAssignment.status)) {
+    status.textContent = "Możesz wpisać ID ręcznie albo uruchomić nadawanie na master readerze.";
+    button.disabled = false;
+    button.textContent = "Nadaj tag";
+    return;
+  }
+
+  if (currentTagAssignment.status === "pending") {
+    const label = currentTagAssignment.itemName || itemName || "przedmiotu";
+    status.textContent = `Tryb nadawania jest aktywny. Przyłóż tag do master readera, aby zapisać ID ${currentTagAssignment.tagId} dla ${label}.`;
+    button.disabled = true;
+    button.textContent = "Oczekiwanie...";
+    return;
+  }
+
+  if (currentTagAssignment.status === "completed") {
+    status.textContent = `Tag został nadany. Nowe ID: ${currentTagAssignment.result?.tagId || currentTagAssignment.tagId}.`;
+    button.disabled = false;
+    button.textContent = "Nadaj tag";
+    return;
+  }
+
+  status.textContent = `Nadawanie nie powiodło się: ${currentTagAssignment.result?.error || "nieznany błąd"}.`;
+  button.disabled = false;
+  button.textContent = "Spróbuj ponownie";
+}
+
 function renderPanelUsers() {
   const container = document.getElementById("panelUsersList");
   container.innerHTML = "";
@@ -844,6 +892,16 @@ async function loadRfidItems() {
   }
 }
 
+async function loadCurrentTagAssignment() {
+  try {
+    const data = await apiFetch("/rfid-items/tag-assignment");
+    currentTagAssignment = data.assignment || null;
+    renderRfidAssignmentStatus();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 async function loadPanelUsers() {
   if (!currentUser?.isMaster) {
     panelUsersData = [];
@@ -921,8 +979,26 @@ async function submitRfidItemForm(event) {
     }
 
     resetRfidItemForm();
+    currentTagAssignment = null;
     await loadRfidItems();
     await loadLockers();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function startRfidTagAssignment() {
+  const itemName = document.getElementById("rfidItemName").value.trim();
+
+  try {
+    currentTagAssignment = await apiFetch("/rfid-items/tag-assignment/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ itemName })
+    });
+
+    renderRfidAssignmentStatus();
+    showToast("Włączono tryb nadawania taga na master readerze.");
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1438,6 +1514,8 @@ document.getElementById("rfidUserForm").addEventListener("submit", submitRfidUse
 document.getElementById("rfidUserReset").addEventListener("click", resetRfidUserForm);
 document.getElementById("rfidItemForm").addEventListener("submit", submitRfidItemForm);
 document.getElementById("rfidItemReset").addEventListener("click", resetRfidItemForm);
+document.getElementById("assignRfidTagButton").addEventListener("click", startRfidTagAssignment);
+document.getElementById("rfidItemName").addEventListener("input", renderRfidAssignmentStatus);
 document.getElementById("panelUserForm").addEventListener("submit", submitPanelUserForm);
 document.getElementById("panelUserReset").addEventListener("click", resetPanelUserForm);
 document.getElementById("loginForm").addEventListener("submit", async event => {

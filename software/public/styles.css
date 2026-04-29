@@ -659,6 +659,13 @@ ul {
   gap: 8px;
 }
 
+.inline-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
 .email-field {
   margin-top: 16px;
 }
@@ -1201,6 +1208,10 @@ select:focus,
 
   .field-grid,
   .lockers {
+    grid-template-columns: 1fr;
+  }
+
+  .inline-field {
     grid-template-columns: 1fr;
   }
 
