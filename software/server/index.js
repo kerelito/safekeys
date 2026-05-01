@@ -38,7 +38,8 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
-const DEVICE_HEARTBEAT_TIMEOUT_MS = 45 * 1000;
+const DEVICE_HEARTBEAT_TIMEOUT_MS = 180 * 1000;
+const DEVICE_STATUS_BROADCAST_INTERVAL_MS = 30000;
 
 if (!MONGODB_URI) {
   throw new Error("Brakuje zmiennej środowiskowej MONGODB_URI.");
@@ -138,6 +139,7 @@ const deviceStatus = {
   uptimeMs: null,
   freeHeap: null
 };
+let lastDeviceStatusBroadcastMs = 0;
 
 function getDatabaseStatus() {
   const readyState = mongoose.connection.readyState;
@@ -526,6 +528,7 @@ app.post("/locker-door-status", requireDeviceKey, asyncHandler(async (req, res) 
 }));
 
 app.post("/device/heartbeat", requireDeviceKey, (req, res) => {
+  const wasConnected = getEsp32Status().connected;
   deviceStatus.lastSeenAt = new Date().toISOString();
   deviceStatus.pingMs = typeof req.body.pingMs === "number" ? req.body.pingMs : null;
   deviceStatus.wifiRssi = typeof req.body.wifiRssi === "number" ? req.body.wifiRssi : null;
@@ -534,7 +537,12 @@ app.post("/device/heartbeat", requireDeviceKey, (req, res) => {
   deviceStatus.uptimeMs = typeof req.body.uptimeMs === "number" ? req.body.uptimeMs : null;
   deviceStatus.freeHeap = typeof req.body.freeHeap === "number" ? req.body.freeHeap : null;
 
-  io.emit("system-status", buildSystemStatus());
+  const now = Date.now();
+  if (!wasConnected || now - lastDeviceStatusBroadcastMs >= DEVICE_STATUS_BROADCAST_INTERVAL_MS) {
+    io.emit("system-status", buildSystemStatus());
+    lastDeviceStatusBroadcastMs = now;
+  }
+
   res.json({ ok: true, serverTime: new Date().toISOString() });
 });
 
@@ -554,7 +562,13 @@ app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (
 }));
 
 app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
-  const actions = await lockerService.consumeRemoteActions();
+  const requestedWaitMs = Number(req.query.waitMs);
+  const waitMs = Number.isFinite(requestedWaitMs)
+    ? Math.max(0, Math.min(25000, Math.trunc(requestedWaitMs)))
+    : 0;
+  const actions = waitMs > 0
+    ? await lockerService.waitForRemoteActions(waitMs)
+    : await lockerService.consumeRemoteActions();
   res.json({ actions });
 }));
 

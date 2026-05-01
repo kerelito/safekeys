@@ -1590,9 +1590,9 @@ setInterval(() => {
   if (isAuthenticated) {
     loadLockers();
   }
-}, 5000);
+}, 30000);
 setInterval(() => {
   if (isAuthenticated) {
     refreshSystemStatus();
   }
-}, 15000);
+}, 30000);

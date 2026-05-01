@@ -80,6 +80,7 @@ class LockerService extends EventEmitter {
   constructor() {
     super();
     this.pendingRemoteActions = [];
+    this.pendingRemoteActionWaiters = [];
     this.emailService = null;
     this.currentTagAssignment = null;
   }
@@ -402,6 +403,15 @@ class LockerService extends EventEmitter {
           itemType: null,
           itemKnown: null
         };
+    const itemChanged = previousItem?.tagId !== nextItem?.tagId
+      || previousItem?.itemName !== nextItem?.itemName
+      || previousItem?.itemType !== nextItem?.itemType
+      || previousItem?.itemKnown !== nextItem?.itemKnown;
+    const statusChanged = prev !== hasTag;
+
+    if (found && !statusChanged && !itemChanged) {
+      return { success: true, unchanged: true };
+    }
 
     if (!found) {
       found = await Locker.create({
@@ -459,6 +469,10 @@ class LockerService extends EventEmitter {
     let found = await Locker.findOne({ locker });
     const prev = found ? found.isDoorClosed !== false : null;
 
+    if (found && prev === isDoorClosed) {
+      return { success: true, unchanged: true };
+    }
+
     if (!found) {
       found = await Locker.create({ locker, hasTag: false, isDoorClosed });
     } else {
@@ -490,6 +504,7 @@ class LockerService extends EventEmitter {
     };
 
     this.pendingRemoteActions.push(action);
+    this.flushRemoteActionWaiters();
     this.emit("remote-action-queued", action);
     return action;
   }
@@ -530,6 +545,44 @@ class LockerService extends EventEmitter {
     const actions = [...this.pendingRemoteActions];
     this.pendingRemoteActions = [];
     return actions;
+  }
+
+  flushRemoteActionWaiters() {
+    if (this.pendingRemoteActionWaiters.length === 0 || this.pendingRemoteActions.length === 0) {
+      return;
+    }
+
+    const actions = [...this.pendingRemoteActions];
+    this.pendingRemoteActions = [];
+    const waiters = [...this.pendingRemoteActionWaiters];
+    this.pendingRemoteActionWaiters = [];
+
+    waiters.forEach(waiter => {
+      clearTimeout(waiter.timeoutId);
+      waiter.resolve(actions);
+    });
+  }
+
+  async waitForRemoteActions(timeoutMs = 0) {
+    if (this.pendingRemoteActions.length > 0) {
+      return this.consumeRemoteActions();
+    }
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return [];
+    }
+
+    return new Promise(resolve => {
+      const waiter = {
+        resolve,
+        timeoutId: setTimeout(() => {
+          this.pendingRemoteActionWaiters = this.pendingRemoteActionWaiters.filter(candidate => candidate !== waiter);
+          resolve([]);
+        }, timeoutMs)
+      };
+
+      this.pendingRemoteActionWaiters.push(waiter);
+    });
   }
 
   generateRandomTagId() {
