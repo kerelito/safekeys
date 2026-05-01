@@ -15,6 +15,8 @@ let rfidItemsData = [];
 let panelUsersData = [];
 let systemStatusData = null;
 let currentTagAssignment = null;
+let lockersData = [];
+let logsCount = 0;
 
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
@@ -54,6 +56,49 @@ function formatRelativeTime(value) {
 
   const hours = Math.floor(minutes / 60);
   return `${hours} godz. temu`;
+}
+
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
+  }
+}
+
+function setTileState(valueId, metaId, state, value, meta) {
+  setText(valueId, value);
+  setText(metaId, meta);
+
+  const tile = document.getElementById(valueId)?.closest(".status-summary-tile");
+  if (tile) {
+    tile.dataset.state = state;
+  }
+}
+
+function updateOverviewMetrics() {
+  const readyLockers = lockersData.filter(locker => locker.hasTag && locker.isDoorClosed).length;
+  const totalLockers = lockersData.length || 3;
+  const totalAccessAssignments = rfidUsersData.reduce((sum, user) => sum + user.allowedLockers.length, 0);
+  const itemTypes = new Set(rfidItemsData.map(item => item.itemType)).size;
+  const masterUsers = panelUsersData.filter(user => user.role === "master").length;
+
+  setText("metricReadyLockers", `${readyLockers}/${totalLockers}`);
+  setText("metricActiveCodes", String(activeCodesData.length));
+  setText("metricRfidUsers", String(rfidUsersData.length));
+  setText("metricRfidItems", String(rfidItemsData.length));
+
+  setText("activeCodesCount", String(activeCodesData.length));
+  setText("logsCount", String(logsCount));
+  setText("rfidUsersCount", String(rfidUsersData.length));
+  setText("rfidItemsCount", String(rfidItemsData.length));
+  setText("panelUsersCount", String(panelUsersData.length));
+
+  setText("rfidUsersSnapshotCount", String(rfidUsersData.length));
+  setText("rfidUsersSnapshotAccess", String(totalAccessAssignments));
+  setText("rfidItemsSnapshotCount", String(rfidItemsData.length));
+  setText("rfidItemsSnapshotTypes", String(itemTypes));
+  setText("panelUsersSnapshotCount", String(panelUsersData.length));
+  setText("panelUsersSnapshotMasters", String(masterUsers));
 }
 
 function updateStatusIndicator(service, { state = "pending", title, summary, lines = [] }) {
@@ -135,7 +180,37 @@ function renderSystemStatus() {
     ]
   });
 
+  setTileState(
+    "summaryServerState",
+    "summaryServerMeta",
+    lastHttpOk ? "online" : "offline",
+    lastHttpOk ? "Online" : "Offline",
+    socketConnected ? "HTTP OK, Socket połączony" : "HTTP OK, Socket rozłączony"
+  );
+  setTileState(
+    "summaryDatabaseState",
+    "summaryDatabaseMeta",
+    databaseConnected ? "online" : "offline",
+    databaseConnected ? "Połączona" : "Brak połączenia",
+    `Stan: ${databaseState}`
+  );
+  setTileState(
+    "summaryDeviceState",
+    "summaryDeviceMeta",
+    esp32Connected ? "online" : "offline",
+    esp32Connected ? "Heartbeat OK" : "Brak heartbeat",
+    typeof esp32.pingMs === "number" ? `Ping ${esp32.pingMs} ms` : "Ping niedostępny"
+  );
+  setTileState(
+    "summaryHeartbeat",
+    "summaryHeartbeatMeta",
+    esp32Connected ? "online" : "pending",
+    formatRelativeTime(esp32.lastSeenAt),
+    esp32.ip ? `ESP32 ${esp32.ip}` : "Czekam na adres urządzenia"
+  );
+
   renderRfidAssignmentStatus();
+  updateOverviewMetrics();
 }
 
 async function refreshSystemStatus() {
@@ -286,6 +361,7 @@ function toggleMenu(forceOpen = null) {
   const drawer = document.getElementById("menuDrawer");
   const shouldOpen = forceOpen === null ? drawer.classList.contains("hidden") : forceOpen;
   drawer.classList.toggle("hidden", !shouldOpen);
+  document.getElementById("menuButton").setAttribute("aria-expanded", String(shouldOpen));
 }
 
 function setPage(page, closeMenu = true) {
@@ -344,12 +420,22 @@ function cycleTheme() {
 }
 
 function renderEmptyState(listId, message) {
-  const list = document.getElementById(listId);
-  list.innerHTML = "";
-  const empty = document.createElement("li");
-  empty.className = "muted-empty";
-  empty.textContent = message;
-  list.appendChild(empty);
+  const container = document.getElementById(listId);
+  container.innerHTML = "";
+
+  const tagName = container.tagName === "UL" ? "li" : "div";
+  const empty = document.createElement(tagName);
+  empty.className = "empty-state";
+
+  const title = document.createElement("strong");
+  title.textContent = "Brak danych";
+
+  const copy = document.createElement("p");
+  copy.textContent = message;
+
+  empty.appendChild(title);
+  empty.appendChild(copy);
+  container.appendChild(empty);
 }
 
 function showToast(msg, isError = false) {
@@ -648,12 +734,10 @@ function describeDetectedItem(data) {
 function renderRfidUsers() {
   const container = document.getElementById("rfidUsersList");
   container.innerHTML = "";
+  updateOverviewMetrics();
 
   if (rfidUsersData.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "muted-empty";
-    empty.textContent = "Brak zarejestrowanych użytkowników RFID.";
-    container.appendChild(empty);
+    renderEmptyState("rfidUsersList", "Dodaj pierwszą osobę i przypisz jej skrytki, aby przygotować dostęp kartą RFID.");
     return;
   }
 
@@ -703,8 +787,13 @@ function renderRfidUsers() {
       lockers.appendChild(chip);
     });
 
+    const copy = document.createElement("p");
+    copy.className = "user-card-copy";
+    copy.textContent = `Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}. UID użytkownika jest gotowe do użycia na czytniku.`;
+
     card.appendChild(header);
     card.appendChild(lockers);
+    card.appendChild(copy);
     container.appendChild(card);
   });
 }
@@ -712,12 +801,10 @@ function renderRfidUsers() {
 function renderRfidItems() {
   const container = document.getElementById("rfidItemsList");
   container.innerHTML = "";
+  updateOverviewMetrics();
 
   if (rfidItemsData.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "muted-empty";
-    empty.textContent = "Brak zdefiniowanych przedmiotów RFID.";
-    container.appendChild(empty);
+    renderEmptyState("rfidItemsList", "Dodaj pierwszy przedmiot RFID, aby system mógł pokazywać czytelne nazwy zamiast samych UID.");
     return;
   }
 
@@ -766,8 +853,13 @@ function renderRfidItems() {
     header.appendChild(meta);
     header.appendChild(actions);
 
+    const copy = document.createElement("p");
+    copy.className = "user-card-copy";
+    copy.textContent = `Typ: ${getItemTypeLabel(item.itemType)}. UID ${item.tagId} będzie widoczne w logach i statusie skrytek jako znany przedmiot.`;
+
     card.appendChild(header);
     card.appendChild(chips);
+    card.appendChild(copy);
     container.appendChild(card);
   });
 }
@@ -815,20 +907,15 @@ function renderRfidAssignmentStatus() {
 function renderPanelUsers() {
   const container = document.getElementById("panelUsersList");
   container.innerHTML = "";
+  updateOverviewMetrics();
 
   if (!currentUser?.isMaster) {
-    const empty = document.createElement("div");
-    empty.className = "muted-empty";
-    empty.textContent = "Ta sekcja jest dostępna tylko dla użytkownika master.";
-    container.appendChild(empty);
+    renderEmptyState("panelUsersList", "Ta sekcja jest dostępna tylko dla użytkownika master.");
     return;
   }
 
   if (panelUsersData.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "muted-empty";
-    empty.textContent = "Brak kont panelu.";
-    container.appendChild(empty);
+    renderEmptyState("panelUsersList", "Nie ma jeszcze dodatkowych kont panelu. Możesz utworzyć operatorów i nadać im role.");
     return;
   }
 
@@ -878,8 +965,15 @@ function renderPanelUsers() {
     header.appendChild(meta);
     header.appendChild(actions);
 
+    const copy = document.createElement("p");
+    copy.className = "user-card-copy";
+    copy.textContent = user.role === "master"
+      ? "To konto ma pełny dostęp do zarządzania operatorami i konfiguracją panelu."
+      : "To konto ma dostęp administracyjny do codziennej obsługi systemu.";
+
     card.appendChild(header);
     card.appendChild(chips);
+    card.appendChild(copy);
     container.appendChild(card);
   });
 }
@@ -1163,11 +1257,11 @@ async function generateCode() {
 
 async function loadLockers() {
   try {
-    const data = await apiFetch("/lockers");
+    lockersData = await apiFetch("/lockers");
     const container = document.getElementById("lockers");
     container.innerHTML = "";
 
-    data.forEach(l => {
+    lockersData.forEach(l => {
       const div = document.createElement("div");
       div.className = "locker " + (l.hasTag && l.isDoorClosed ? "ok" : "bad");
 
@@ -1224,6 +1318,8 @@ async function loadLockers() {
       div.appendChild(actions);
       container.appendChild(div);
     });
+
+    updateOverviewMetrics();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1272,6 +1368,7 @@ async function loadActiveCodes() {
 
     if (activeCodesData.length === 0) {
       renderEmptyState("activeCodes", "Brak aktywnych kodów.");
+      updateOverviewMetrics();
       return;
     }
 
@@ -1310,6 +1407,7 @@ async function loadActiveCodes() {
     });
 
     updateCountdowns();
+    updateOverviewMetrics();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1328,6 +1426,7 @@ function updateCountdowns() {
       if (activeCodesData.length === 0) {
         renderEmptyState("activeCodes", "Brak aktywnych kodów.");
       }
+      updateOverviewMetrics();
       return;
     }
 
@@ -1357,7 +1456,7 @@ async function deactivate(code) {
 
 function addLog(log) {
   const list = document.getElementById("logs");
-  const emptyState = list.querySelector(".muted-empty");
+  const emptyState = list.querySelector(".empty-state");
 
   if (emptyState) {
     emptyState.remove();
@@ -1462,6 +1561,8 @@ function addLog(log) {
   li.innerText = `${time} | ${text}`;
   list.prepend(li);
   list.scrollTop = 0;
+  logsCount += 1;
+  updateOverviewMetrics();
 }
 
 function formatLogItemLabel(log) {
@@ -1480,15 +1581,19 @@ function formatLogItemLabel(log) {
 async function loadLogs() {
   try {
     const logs = await apiFetch("/logs");
+    logsCount = logs.length;
 
     if (logs.length === 0) {
       renderEmptyState("logs", "Brak logów do wyświetlenia.");
+      updateOverviewMetrics();
       return;
     }
 
     const list = document.getElementById("logs");
     list.innerHTML = "";
     logs.reverse().forEach(addLog);
+    logsCount = logs.length;
+    updateOverviewMetrics();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1506,7 +1611,9 @@ async function clearLogs() {
       method: "POST"
     });
 
+    logsCount = 0;
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
+    updateOverviewMetrics();
     showToast("Logi zostały wyczyszczone.");
   } catch (error) {
     showToast(error.message, true);
@@ -1514,6 +1621,7 @@ async function clearLogs() {
 }
 
 document.getElementById("themeToggle").addEventListener("click", cycleTheme);
+document.getElementById("menuButton").setAttribute("aria-expanded", "false");
 document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
 document.getElementById("recipientEmail").addEventListener("input", updateGenerateButtonLabel);
 document.querySelectorAll(".menu-link").forEach(link => {

@@ -66,6 +66,7 @@
 <div id="systemStatus" class="system-status" aria-label="Status systemu">
 <button id="serverStatus" class="status-indicator" type="button" data-service="server" aria-label="Status połączenia z serwerem">
 <span class="status-dot"></span>
+<span class="status-label">API</span>
 <span class="status-popover">
 <strong>Serwer</strong>
 <small>Łączenie...</small>
@@ -73,6 +74,7 @@
 </button>
 <button id="databaseStatus" class="status-indicator" type="button" data-service="database" aria-label="Status połączenia z bazą danych">
 <span class="status-dot"></span>
+<span class="status-label">DB</span>
 <span class="status-popover">
 <strong>Baza danych</strong>
 <small>Oczekiwanie na status...</small>
@@ -80,6 +82,7 @@
 </button>
 <button id="esp32Status" class="status-indicator" type="button" data-service="esp32" aria-label="Status połączenia z ESP32">
 <span class="status-dot"></span>
+<span class="status-label">ESP32</span>
 <span class="status-popover">
 <strong>ESP32</strong>
 <small>Oczekiwanie na heartbeat...</small>
@@ -101,7 +104,7 @@
 <div class="app-shell">
 <section id="dashboardPage" class="page active">
 <div class="dashboard">
-<div class="left">
+<div class="dashboard-main">
 
 <div class="card hero-card">
 <div class="hero-header">
@@ -159,6 +162,28 @@
 <h3 id="generatedCode" class="generated-code">----</h3>
 <p id="generatedCodeMeta" class="generated-meta">Kod pojawi się tutaj po wygenerowaniu. Możesz go zostawić tylko w panelu albo od razu wysłać na e-mail.</p>
 </div>
+<div class="hero-metrics">
+<article class="metric-card">
+<span class="metric-label">Skrytki gotowe</span>
+<strong id="metricReadyLockers" class="metric-value">0/3</strong>
+<small class="metric-help">Gotowe operacyjnie</small>
+</article>
+<article class="metric-card">
+<span class="metric-label">Aktywne kody</span>
+<strong id="metricActiveCodes" class="metric-value">0</strong>
+<small class="metric-help">Trwające dostępy</small>
+</article>
+<article class="metric-card">
+<span class="metric-label">Użytkownicy RFID</span>
+<strong id="metricRfidUsers" class="metric-value">0</strong>
+<small class="metric-help">Przypisane osoby</small>
+</article>
+<article class="metric-card">
+<span class="metric-label">Przedmioty RFID</span>
+<strong id="metricRfidItems" class="metric-value">0</strong>
+<small class="metric-help">Zmapowane UID</small>
+</article>
+</div>
 </div>
 
 <div class="card">
@@ -175,13 +200,47 @@
 <div id="lockers" class="lockers"></div>
 </div>
 
-<div class="card">
+</div>
+
+<aside class="dashboard-side">
+<div class="card status-summary-card">
+<div class="section-copy">
+<h2 class="card-title">Stan systemu</h2>
+<p>Najważniejsze sygnały techniczne i szybki ogląd gotowości całej platformy.</p>
+</div>
+<div class="status-summary-grid">
+<article class="status-summary-tile">
+<span class="status-summary-label">API</span>
+<strong id="summaryServerState" class="status-summary-value">Sprawdzanie</strong>
+<small id="summaryServerMeta" class="status-summary-meta">Oczekiwanie na odpowiedź</small>
+</article>
+<article class="status-summary-tile">
+<span class="status-summary-label">Baza danych</span>
+<strong id="summaryDatabaseState" class="status-summary-value">Sprawdzanie</strong>
+<small id="summaryDatabaseMeta" class="status-summary-meta">Oczekiwanie na status</small>
+</article>
+<article class="status-summary-tile">
+<span class="status-summary-label">Urządzenie</span>
+<strong id="summaryDeviceState" class="status-summary-value">Sprawdzanie</strong>
+<small id="summaryDeviceMeta" class="status-summary-meta">Brak heartbeat</small>
+</article>
+<article class="status-summary-tile accent">
+<span class="status-summary-label">Ostatni kontakt</span>
+<strong id="summaryHeartbeat" class="status-summary-value">brak danych</strong>
+<small id="summaryHeartbeatMeta" class="status-summary-meta">ESP32 / Socket.IO</small>
+</article>
+</div>
+</div>
+
+<div class="card compact-card">
+<div class="section-header">
 <div class="section-copy">
 <h2 class="card-title">Aktywne kody</h2>
-<p>Aktywne dostępy z odliczaniem i szybką dezaktywacją jednym kliknięciem.</p>
+<p>Trwające dostępy z odliczaniem i szybką dezaktywacją.</p>
 </div>
-<ul id="activeCodes"></ul>
+<span id="activeCodesCount" class="panel-counter">0</span>
 </div>
+<ul id="activeCodes" class="stack-list"></ul>
 </div>
 
 <div class="card logs">
@@ -190,18 +249,21 @@
 <h2>Logi systemowe</h2>
 <p>Zdarzenia i operacje na żywo, zsynchronizowane w czasie rzeczywistym.</p>
 </div>
+<div class="section-actions">
+<span id="logsCount" class="panel-counter">0</span>
 <button class="danger" onclick="clearLogs()">Wyczyść logi</button>
 </div>
-<ul id="logs"></ul>
 </div>
+<ul id="logs" class="stack-list"></ul>
 </div>
+</aside>
 </div>
 </section>
 
 <section id="usersPage" class="page">
 <div class="users-layout">
 <div class="users-sidebar">
-<div class="card">
+<div class="card form-card">
 <div class="section-copy">
 <h2 class="card-title">Użytkownicy RFID</h2>
 <p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, które skrytki mogą otwierać po przyłożeniu karty.</p>
@@ -236,13 +298,28 @@
 </div>
 
 <div class="users-main">
+<div class="section-snapshot">
+<article class="snapshot-card">
+<span class="snapshot-label">Użytkownicy</span>
+<strong id="rfidUsersSnapshotCount" class="snapshot-value">0</strong>
+<small class="snapshot-help">Konta RFID w systemie</small>
+</article>
+<article class="snapshot-card">
+<span class="snapshot-label">Dostęp</span>
+<strong id="rfidUsersSnapshotAccess" class="snapshot-value">0</strong>
+<small class="snapshot-help">Łączne przypisania do skrytek</small>
+</article>
+</div>
 <div class="card">
 <div class="section-header">
 <div class="section-copy">
 <h2>Lista użytkowników</h2>
 <p>Przeglądaj i edytuj przypisania kart RFID do skrytek oraz przygotuj konfigurację pod czytnik użytkownika.</p>
 </div>
+<div class="section-actions">
+<span id="rfidUsersCount" class="panel-counter">0</span>
 <button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież listę</button>
+</div>
 </div>
 <div id="rfidUsersList" class="users-list"></div>
 </div>
@@ -253,7 +330,7 @@
 <section id="itemsPage" class="page">
 <div class="users-layout">
 <div class="users-sidebar">
-<div class="card">
+<div class="card form-card">
 <div class="section-copy">
 <h2 class="card-title">Przedmioty RFID</h2>
 <p>Dodawaj własne przedmioty rozpoznawane po UID taga RFID. System pokaże ich nazwę i typ w logach oraz w statusie skrytek.</p>
@@ -292,13 +369,28 @@
 </div>
 
 <div class="users-main">
+<div class="section-snapshot">
+<article class="snapshot-card">
+<span class="snapshot-label">Przedmioty</span>
+<strong id="rfidItemsSnapshotCount" class="snapshot-value">0</strong>
+<small class="snapshot-help">Własne obiekty RFID</small>
+</article>
+<article class="snapshot-card">
+<span class="snapshot-label">Typy</span>
+<strong id="rfidItemsSnapshotTypes" class="snapshot-value">0</strong>
+<small class="snapshot-help">Aktywne kategorie</small>
+</article>
+</div>
 <div class="card">
 <div class="section-header">
 <div class="section-copy">
 <h2>Lista przedmiotów</h2>
 <p>Tu zarządzasz mapowaniem UID tagów na czytelne nazwy i typy przedmiotów.</p>
 </div>
+<div class="section-actions">
+<span id="rfidItemsCount" class="panel-counter">0</span>
 <button class="secondary-button" type="button" onclick="loadRfidItems()">Odśwież listę</button>
+</div>
 </div>
 <div id="rfidItemsList" class="users-list"></div>
 </div>
@@ -309,7 +401,7 @@
 <section id="panelUsersPage" class="page">
 <div class="users-layout">
 <div class="users-sidebar">
-<div class="card">
+<div class="card form-card">
 <div class="section-copy">
 <h2 class="card-title">Użytkownicy panelu</h2>
 <p>Tylko użytkownik master może dodawać, usuwać i edytować konta administratorów panelu.</p>
@@ -349,13 +441,28 @@
 </div>
 
 <div class="users-main">
+<div class="section-snapshot">
+<article class="snapshot-card">
+<span class="snapshot-label">Konta panelu</span>
+<strong id="panelUsersSnapshotCount" class="snapshot-value">0</strong>
+<small class="snapshot-help">Wszyscy operatorzy</small>
+</article>
+<article class="snapshot-card">
+<span class="snapshot-label">Master</span>
+<strong id="panelUsersSnapshotMasters" class="snapshot-value">0</strong>
+<small class="snapshot-help">Uprawnienia najwyższe</small>
+</article>
+</div>
 <div class="card">
 <div class="section-header">
 <div class="section-copy">
 <h2>Lista kont panelu</h2>
 <p>Konta są teraz trzymane poza zmiennymi środowiskowymi i można nimi zarządzać z poziomu panelu.</p>
 </div>
+<div class="section-actions">
+<span id="panelUsersCount" class="panel-counter">0</span>
 <button class="secondary-button" type="button" onclick="loadPanelUsers()">Odśwież listę</button>
+</div>
 </div>
 <div id="panelUsersList" class="users-list"></div>
 </div>
