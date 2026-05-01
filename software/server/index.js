@@ -123,6 +123,34 @@ function getSessionActor(req, fallback = "panel") {
   return req.session?.displayName || req.session?.username || fallback;
 }
 
+function getRequestKey(req) {
+  return req.ip || req.get("x-forwarded-for") || req.socket?.remoteAddress || "unknown";
+}
+
+function createRateLimit({ windowMs, max, message }) {
+  const buckets = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = `${req.method}:${req.path}:${getRequestKey(req)}`;
+    const bucket = buckets.get(key);
+
+    if (!bucket || now > bucket.resetAt) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    bucket.count += 1;
+    if (bucket.count > max) {
+      const retryAfterSeconds = Math.ceil((bucket.resetAt - now) / 1000);
+      res.set("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({ error: message || "Za dużo prób. Spróbuj ponownie za chwilę." });
+    }
+
+    return next();
+  };
+}
+
 const MONGOOSE_STATES = {
   0: "disconnected",
   1: "connected",
@@ -173,6 +201,91 @@ function buildSystemStatus() {
   };
 }
 
+async function buildOperationalAlerts() {
+  const [lockers, activeCodes, invalidLogs] = await Promise.all([
+    lockerService.getLockers(),
+    lockerService.getActiveCodes(),
+    lockerService.getLogs({
+      event: "INVALID_CODE",
+      from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      limit: 8
+    })
+  ]);
+  const status = buildSystemStatus();
+  const alerts = [];
+
+  if (!status.database.connected) {
+    alerts.push({
+      id: "database-offline",
+      severity: "critical",
+      title: "Baza danych offline",
+      detail: `MongoDB zgłasza stan: ${status.database.state}.`,
+      action: "Sprawdź połączenie i konfigurację MONGODB_URI."
+    });
+  }
+
+  if (!status.esp32.connected) {
+    alerts.push({
+      id: "esp32-offline",
+      severity: "warning",
+      title: "ESP32 bez świeżego heartbeat",
+      detail: status.esp32.lastSeenAt
+        ? `Ostatni kontakt: ${status.esp32.lastSeenAt}.`
+        : "Urządzenie nie wysłało jeszcze heartbeat.",
+      action: "Sprawdź zasilanie, WiFi i klucz DEVICE_API_KEY."
+    });
+  }
+
+  lockers
+    .filter(locker => !locker.hasTag || !locker.isDoorClosed)
+    .forEach(locker => {
+      alerts.push({
+        id: `locker-${locker.locker}`,
+        severity: locker.hasTag ? "warning" : "critical",
+        title: `Skrytka ${locker.locker} wymaga uwagi`,
+        detail: [
+          locker.hasTag ? "Klucz wykryty" : "Brak klucza RFID",
+          locker.isDoorClosed ? "drzwiczki zamknięte" : "drzwiczki otwarte"
+        ].join(", "),
+        action: "Zweryfikuj fizyczny stan skrytki."
+      });
+    });
+
+  if (activeCodes.length >= 5) {
+    alerts.push({
+      id: "many-active-codes",
+      severity: "info",
+      title: "Dużo aktywnych kodów",
+      detail: `Aktualnie aktywnych kodów: ${activeCodes.length}.`,
+      action: "Rozważ dezaktywację nieużywanych dostępów."
+    });
+  }
+
+  if (invalidLogs.length >= 5) {
+    alerts.push({
+      id: "invalid-code-spike",
+      severity: "warning",
+      title: "Wiele błędnych kodów",
+      detail: `Ostatnio odnotowano ${invalidLogs.length} prób z błędnym kodem.`,
+      action: "Sprawdź logi i upewnij się, że kody nie są przepisywane ręcznie z błędami."
+    });
+  }
+
+  return alerts;
+}
+
+const loginRateLimit = createRateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  message: "Za dużo prób logowania. Spróbuj ponownie za kilka minut."
+});
+
+const mutationRateLimit = createRateLimit({
+  windowMs: 60 * 1000,
+  max: 80,
+  message: "Za dużo operacji w krótkim czasie. Odczekaj chwilę."
+});
+
 const emailService = createEmailService({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -216,6 +329,10 @@ lockerService.on("remote-action-queued", action => {
   io.emit("remote-action-queued", action);
 });
 
+lockerService.on("remote-action-updated", action => {
+  io.emit("remote-action-updated", action);
+});
+
 lockerService.on("active-codes-changed", () => {
   io.emit("active-codes-changed");
 });
@@ -240,7 +357,7 @@ app.get("/auth/session", (req, res) => {
   });
 });
 
-app.post("/auth/login", asyncHandler(async (req, res) => {
+app.post("/auth/login", loginRateLimit, asyncHandler(async (req, res) => {
   const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
   const password = typeof req.body.password === "string" ? req.body.password : "";
 
@@ -256,6 +373,12 @@ app.post("/auth/login", asyncHandler(async (req, res) => {
   req.session.role = matchedUser.role;
   req.session.userId = matchedUser._id;
 
+  await lockerService.createLog({
+    event: "AUTH_LOGIN",
+    source: "web",
+    actor: matchedUser.displayName || matchedUser.username
+  });
+
   return res.json({
     success: true,
     username: matchedUser.username,
@@ -265,12 +388,20 @@ app.post("/auth/login", asyncHandler(async (req, res) => {
   });
 }));
 
-app.post("/auth/logout", (req, res) => {
+app.post("/auth/logout", asyncHandler(async (req, res) => {
+  if (req.session?.isAuthenticated) {
+    await lockerService.createLog({
+      event: "AUTH_LOGOUT",
+      source: "web",
+      actor: getSessionActor(req)
+    });
+  }
+
   req.session.destroy(() => {
     res.clearCookie("connect.sid");
     res.json({ success: true });
   });
-});
+}));
 
 app.use([
   "/generate-code",
@@ -285,8 +416,22 @@ app.use([
   "/panel-users",
   "/active-codes",
   "/logs",
-  "/logs/clear"
+  "/logs/clear",
+  "/alerts",
+  "/export/backup",
+  "/device/actions/history"
 ], requireAuth);
+
+app.use([
+  "/generate-code",
+  "/deactivate-code",
+  "/open-locker",
+  "/release-all-lockers",
+  "/users",
+  "/rfid-items",
+  "/panel-users",
+  "/logs/clear"
+], mutationRateLimit);
 
 app.post("/verify-code", requireDeviceKey, asyncHandler(async (req, res) => {
   const { code } = req.body;
@@ -561,6 +706,17 @@ app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (
   res.json(result);
 }));
 
+app.post("/device/actions/ack", requireDeviceKey, (req, res) => {
+  const result = lockerService.acknowledgeRemoteAction(req.body.actionId, {
+    success: req.body.success,
+    message: req.body.message
+  }, {
+    source: "device"
+  });
+
+  res.json(result);
+});
+
 app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
   const requestedWaitMs = Number(req.query.waitMs);
   const waitMs = Number.isFinite(requestedWaitMs)
@@ -572,17 +728,40 @@ app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
   res.json({ actions });
 }));
 
+app.get("/device/actions/history", (req, res) => {
+  res.json(lockerService.getRemoteActionHistory());
+});
+
 app.get("/system-status", (req, res) => {
   res.json(buildSystemStatus());
 });
+
+app.get("/alerts", asyncHandler(async (req, res) => {
+  const alerts = await buildOperationalAlerts();
+  res.json(alerts);
+}));
 
 app.get("/active-codes", asyncHandler(async (req, res) => {
   const codes = await lockerService.getActiveCodes();
   res.json(codes);
 }));
 
+app.get("/logs/events", asyncHandler(async (req, res) => {
+  const events = await lockerService.getLogEventTypes();
+  res.json(events.sort());
+}));
+
+app.get("/logs/export", asyncHandler(async (req, res) => {
+  const csv = await lockerService.exportLogs(req.query);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="safekeys-logi-${stamp}.csv"`);
+  res.send(csv);
+}));
+
 app.get("/logs", asyncHandler(async (req, res) => {
-  const logs = await lockerService.getLogs();
+  const logs = await lockerService.getLogs(req.query);
   res.json(logs);
 }));
 
@@ -593,6 +772,21 @@ app.post("/logs/clear", asyncHandler(async (req, res) => {
   });
 
   res.json(result);
+}));
+
+app.get("/export/backup", requireMaster, asyncHandler(async (req, res) => {
+  const [snapshot, panelUsers] = await Promise.all([
+    lockerService.getBackupSnapshot(),
+    panelUserService.getPanelUsers()
+  ]);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="safekeys-backup-${stamp}.json"`);
+  res.json({
+    ...snapshot,
+    panelUsers
+  });
 }));
 
 app.use((err, req, res, next) => {

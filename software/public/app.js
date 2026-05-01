@@ -1,4 +1,5 @@
 const THEME_STORAGE_KEY = "locker-theme";
+const COMPACT_STORAGE_KEY = "locker-density";
 const API = window.location.origin;
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -17,6 +18,9 @@ let systemStatusData = null;
 let currentTagAssignment = null;
 let lockersData = [];
 let logsCount = 0;
+let alertsData = [];
+let confirmResolver = null;
+let logSearchDebounceId = null;
 
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
@@ -213,6 +217,57 @@ function renderSystemStatus() {
   updateOverviewMetrics();
 }
 
+function renderAlerts() {
+  const list = document.getElementById("alertsList");
+  if (!list) {
+    return;
+  }
+
+  list.innerHTML = "";
+  setText("alertsCount", String(alertsData.length));
+
+  if (alertsData.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "alert-item is-info";
+    empty.innerHTML = "<strong>System wygląda zdrowo</strong><span>Nie ma teraz alertów wymagających reakcji.</span>";
+    list.appendChild(empty);
+    return;
+  }
+
+  alertsData.forEach(alert => {
+    const item = document.createElement("article");
+    item.className = `alert-item is-${alert.severity || "info"}`;
+
+    const title = document.createElement("strong");
+    title.textContent = alert.title;
+
+    const detail = document.createElement("span");
+    detail.textContent = alert.detail;
+
+    const action = document.createElement("small");
+    action.textContent = alert.action;
+
+    item.appendChild(title);
+    item.appendChild(detail);
+    item.appendChild(action);
+    list.appendChild(item);
+  });
+}
+
+async function loadAlerts() {
+  if (!isAuthenticated) {
+    return;
+  }
+
+  try {
+    alertsData = await apiFetch("/alerts");
+    renderAlerts();
+  } catch (error) {
+    alertsData = [];
+    renderAlerts();
+  }
+}
+
 async function refreshSystemStatus() {
   if (!isAuthenticated) {
     return;
@@ -225,6 +280,7 @@ async function refreshSystemStatus() {
   }
 
   renderSystemStatus();
+  await loadAlerts();
 }
 
 function showAuthView(message = "") {
@@ -285,7 +341,11 @@ function connectSocket() {
   socket = io(API, { withCredentials: true });
 
   socket.on("new-log", async log => {
-    addLog(log);
+    if (hasActiveLogFilters()) {
+      await loadLogs();
+    } else {
+      addLog(log);
+    }
 
     if ([
       "KEY_REMOVED",
@@ -321,6 +381,8 @@ function connectSocket() {
     ].includes(log.event) && currentUser?.isMaster) {
       await loadPanelUsers();
     }
+
+    await loadAlerts();
   });
   socket.on("rfid-tag-assignment-updated", assignment => {
     currentTagAssignment = assignment;
@@ -339,7 +401,10 @@ function connectSocket() {
     await loadActiveCodes();
   });
   socket.on("logs-cleared", () => {
+    logsCount = 0;
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
+    updateOverviewMetrics();
+    loadAlerts();
   });
   socket.on("connect", () => {
     renderSystemStatus();
@@ -348,6 +413,7 @@ function connectSocket() {
   socket.on("system-status", payload => {
     systemStatusData = payload;
     renderSystemStatus();
+    loadAlerts();
   });
   socket.on("disconnect", () => {
     renderSystemStatus();
@@ -419,6 +485,55 @@ function cycleTheme() {
   applyTheme(nextTheme);
 }
 
+function getStoredDensity() {
+  return localStorage.getItem(COMPACT_STORAGE_KEY) || "comfort";
+}
+
+function applyDensity(density) {
+  const normalizedDensity = density === "compact" ? "compact" : "comfort";
+  document.documentElement.dataset.density = normalizedDensity;
+  document.getElementById("compactToggle").innerText = normalizedDensity === "compact"
+    ? "Widok: kompakt"
+    : "Widok: komfort";
+}
+
+function toggleDensity() {
+  const nextDensity = getStoredDensity() === "compact" ? "comfort" : "compact";
+  localStorage.setItem(COMPACT_STORAGE_KEY, nextDensity);
+  applyDensity(nextDensity);
+}
+
+function getSearchValue(id) {
+  return (document.getElementById(id)?.value || "").trim().toLowerCase();
+}
+
+function matchesSearch(values, query) {
+  if (!query) {
+    return true;
+  }
+
+  return values
+    .filter(value => value !== null && value !== undefined)
+    .some(value => String(value).toLowerCase().includes(query));
+}
+
+function buildQueryString(params = {}) {
+  const query = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && String(value).trim() !== "") {
+      query.set(key, String(value).trim());
+    }
+  });
+
+  const serialized = query.toString();
+  return serialized ? `?${serialized}` : "";
+}
+
+function downloadUrl(path) {
+  window.location.href = API + path;
+}
+
 function renderEmptyState(listId, message) {
   const container = document.getElementById(listId);
   container.innerHTML = "";
@@ -455,6 +570,32 @@ function showToast(msg, isError = false) {
   }
 
   toastTimeoutId = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+function closeConfirmDialog(result = false) {
+  const overlay = document.getElementById("confirmOverlay");
+  overlay.classList.add("hidden");
+
+  if (confirmResolver) {
+    confirmResolver(result);
+    confirmResolver = null;
+  }
+}
+
+function confirmAction({ title, message, confirmLabel = "Potwierdź", danger = true }) {
+  const overlay = document.getElementById("confirmOverlay");
+  const accept = document.getElementById("confirmAccept");
+
+  document.getElementById("confirmTitle").textContent = title;
+  document.getElementById("confirmMessage").textContent = message;
+  accept.textContent = confirmLabel;
+  accept.classList.toggle("danger", danger);
+  overlay.classList.remove("hidden");
+
+  return new Promise(resolve => {
+    confirmResolver = resolve;
+    accept.focus();
+  });
 }
 
 function formatDateTime(value) {
@@ -625,6 +766,8 @@ async function initializeDashboard() {
     refreshSystemStatus(),
     loadLockers(),
     loadActiveCodes(),
+    loadAlerts(),
+    loadLogEvents(),
     loadLogs(),
     loadRfidUsers(),
     loadRfidItems(),
@@ -733,6 +876,15 @@ function describeDetectedItem(data) {
 
 function renderRfidUsers() {
   const container = document.getElementById("rfidUsersList");
+  const query = getSearchValue("rfidUsersSearch");
+  const getAllowedLockers = user => Array.isArray(user.allowedLockers) ? user.allowedLockers : [];
+  const visibleUsers = rfidUsersData.filter(user => matchesSearch([
+    user.name,
+    user.tagId,
+    ...getAllowedLockers(user).map(locker => `s${locker}`),
+    ...getAllowedLockers(user).map(locker => `skrytka ${locker}`)
+  ], query));
+
   container.innerHTML = "";
   updateOverviewMetrics();
 
@@ -741,7 +893,12 @@ function renderRfidUsers() {
     return;
   }
 
-  rfidUsersData.forEach(user => {
+  if (visibleUsers.length === 0) {
+    renderEmptyState("rfidUsersList", "Nie znaleziono użytkowników pasujących do wyszukiwania.");
+    return;
+  }
+
+  visibleUsers.forEach(user => {
     const card = document.createElement("div");
     card.className = "user-card";
 
@@ -800,6 +957,14 @@ function renderRfidUsers() {
 
 function renderRfidItems() {
   const container = document.getElementById("rfidItemsList");
+  const query = getSearchValue("rfidItemsSearch");
+  const visibleItems = rfidItemsData.filter(item => matchesSearch([
+    item.name,
+    item.tagId,
+    item.itemType,
+    getItemTypeLabel(item.itemType)
+  ], query));
+
   container.innerHTML = "";
   updateOverviewMetrics();
 
@@ -808,7 +973,12 @@ function renderRfidItems() {
     return;
   }
 
-  rfidItemsData.forEach(item => {
+  if (visibleItems.length === 0) {
+    renderEmptyState("rfidItemsList", "Nie znaleziono przedmiotów pasujących do wyszukiwania.");
+    return;
+  }
+
+  visibleItems.forEach(item => {
     const card = document.createElement("div");
     card.className = "user-card";
 
@@ -906,6 +1076,14 @@ function renderRfidAssignmentStatus() {
 
 function renderPanelUsers() {
   const container = document.getElementById("panelUsersList");
+  const query = getSearchValue("panelUsersSearch");
+  const visibleUsers = panelUsersData.filter(user => matchesSearch([
+    user.displayName,
+    user.username,
+    user.role,
+    user.role === "master" ? "master" : "administrator"
+  ], query));
+
   container.innerHTML = "";
   updateOverviewMetrics();
 
@@ -919,7 +1097,12 @@ function renderPanelUsers() {
     return;
   }
 
-  panelUsersData.forEach(user => {
+  if (visibleUsers.length === 0) {
+    renderEmptyState("panelUsersList", "Nie znaleziono kont pasujących do wyszukiwania.");
+    return;
+  }
+
+  visibleUsers.forEach(user => {
     const card = document.createElement("div");
     card.className = "user-card";
 
@@ -1144,7 +1327,11 @@ async function submitPanelUserForm(event) {
 }
 
 async function deleteRfidUser(userId, name) {
-  const confirmed = window.confirm(`Czy na pewno chcesz usunąć użytkownika ${name}?`);
+  const confirmed = await confirmAction({
+    title: "Usunąć użytkownika RFID?",
+    message: `Użytkownik ${name} straci dostęp kartą RFID do przypisanych skrytek.`,
+    confirmLabel: "Usuń użytkownika"
+  });
 
   if (!confirmed) {
     return;
@@ -1163,7 +1350,11 @@ async function deleteRfidUser(userId, name) {
 }
 
 async function deleteRfidItem(itemId, name) {
-  const confirmed = window.confirm(`Czy na pewno chcesz usunąć przedmiot ${name}?`);
+  const confirmed = await confirmAction({
+    title: "Usunąć przedmiot RFID?",
+    message: `Przedmiot ${name} przestanie być rozpoznawany po czytelnej nazwie w panelu i logach.`,
+    confirmLabel: "Usuń przedmiot"
+  });
 
   if (!confirmed) {
     return;
@@ -1183,7 +1374,11 @@ async function deleteRfidItem(itemId, name) {
 }
 
 async function deletePanelUser(userId, name) {
-  const confirmed = window.confirm(`Czy na pewno chcesz usunąć użytkownika panelu ${name}?`);
+  const confirmed = await confirmAction({
+    title: "Usunąć konto panelu?",
+    message: `Konto ${name} utraci możliwość logowania do panelu SafeKeys.`,
+    confirmLabel: "Usuń konto"
+  });
 
   if (!confirmed) {
     return;
@@ -1335,13 +1530,18 @@ async function openLocker(locker) {
 
     showToast(`Wysłano polecenie otwarcia S${locker}`);
     await loadLockers();
+    await loadAlerts();
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
 async function releaseAllLockers() {
-  const confirmed = window.confirm("Czy na pewno chcesz zwolnić blokadę wszystkich skrytek?");
+  const confirmed = await confirmAction({
+    title: "Zwolnić wszystkie skrytki?",
+    message: "To wyśle do urządzenia polecenie zwolnienia blokady wszystkich skrytek.",
+    confirmLabel: "Zwolnij wszystkie"
+  });
 
   if (!confirmed) {
     return;
@@ -1354,6 +1554,7 @@ async function releaseAllLockers() {
 
     showToast("Wysłano polecenie zwolnienia wszystkich skrytek.");
     await loadLockers();
+    await loadAlerts();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1369,6 +1570,7 @@ async function loadActiveCodes() {
     if (activeCodesData.length === 0) {
       renderEmptyState("activeCodes", "Brak aktywnych kodów.");
       updateOverviewMetrics();
+      await loadAlerts();
       return;
     }
 
@@ -1408,6 +1610,7 @@ async function loadActiveCodes() {
 
     updateCountdowns();
     updateOverviewMetrics();
+    await loadAlerts();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1449,12 +1652,13 @@ async function deactivate(code) {
 
     showToast("Kod dezaktywowany ❌");
     await loadActiveCodes();
+    await loadAlerts();
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
-function addLog(log) {
+function addLog(log, options = {}) {
   const list = document.getElementById("logs");
   const emptyState = list.querySelector(".empty-state");
 
@@ -1555,14 +1759,36 @@ function addLog(log) {
       text = "🗑️ usunięto użytkownika panelu";
       cls = "log-warning";
       break;
+    case "AUTH_LOGIN":
+      text = "zalogowano operatora";
+      cls = "log-success";
+      break;
+    case "AUTH_LOGOUT":
+      text = "wylogowano operatora";
+      break;
+    case "RFID_TAG_ASSIGNMENT_STARTED":
+      text = "rozpoczęto nadawanie taga RFID";
+      break;
+    case "RFID_TAG_ASSIGNMENT_COMPLETED":
+      text = `nadano tag RFID${itemLabel}`;
+      cls = "log-success";
+      break;
+    case "RFID_TAG_ASSIGNMENT_FAILED":
+      text = "nie udało się nadać taga RFID";
+      cls = "log-error";
+      break;
+    default:
+      text = log.event || "zdarzenie systemowe";
   }
 
   li.className = cls;
   li.innerText = `${time} | ${text}`;
   list.prepend(li);
   list.scrollTop = 0;
-  logsCount += 1;
-  updateOverviewMetrics();
+  if (options.increment !== false) {
+    logsCount += 1;
+    updateOverviewMetrics();
+  }
 }
 
 function formatLogItemLabel(log) {
@@ -1580,7 +1806,7 @@ function formatLogItemLabel(log) {
 
 async function loadLogs() {
   try {
-    const logs = await apiFetch("/logs");
+    const logs = await apiFetch(`/logs${getLogQueryString()}`);
     logsCount = logs.length;
 
     if (logs.length === 0) {
@@ -1591,7 +1817,7 @@ async function loadLogs() {
 
     const list = document.getElementById("logs");
     list.innerHTML = "";
-    logs.reverse().forEach(addLog);
+    logs.reverse().forEach(log => addLog(log, { increment: false }));
     logsCount = logs.length;
     updateOverviewMetrics();
   } catch (error) {
@@ -1599,8 +1825,73 @@ async function loadLogs() {
   }
 }
 
+function getLogQueryString(extra = {}) {
+  return buildQueryString({
+    event: document.getElementById("logEventFilter")?.value || "",
+    locker: document.getElementById("logLockerFilter")?.value || "",
+    q: document.getElementById("logSearchInput")?.value || "",
+    limit: 120,
+    ...extra
+  });
+}
+
+function hasActiveLogFilters() {
+  return Boolean(
+    document.getElementById("logEventFilter")?.value
+    || document.getElementById("logLockerFilter")?.value
+    || document.getElementById("logSearchInput")?.value.trim()
+  );
+}
+
+async function loadLogEvents() {
+  try {
+    const events = await apiFetch("/logs/events");
+    const select = document.getElementById("logEventFilter");
+    const currentValue = select.value;
+    select.innerHTML = '<option value="">Wszystkie</option>';
+
+    events.forEach(eventName => {
+      const option = document.createElement("option");
+      option.value = eventName;
+      option.textContent = eventName;
+      select.appendChild(option);
+    });
+
+    select.value = currentValue;
+  } catch (error) {
+    // Lista typów logów jest pomocnicza, więc nie blokujemy panelu toastem.
+  }
+}
+
+function resetLogFilters() {
+  document.getElementById("logEventFilter").value = "";
+  document.getElementById("logLockerFilter").value = "";
+  document.getElementById("logSearchInput").value = "";
+  loadLogs();
+}
+
+function scheduleLoadLogs() {
+  if (logSearchDebounceId) {
+    clearTimeout(logSearchDebounceId);
+  }
+
+  logSearchDebounceId = setTimeout(loadLogs, 250);
+}
+
+function exportLogs() {
+  downloadUrl(`/logs/export${getLogQueryString({ limit: 500 })}`);
+}
+
+function exportBackup() {
+  downloadUrl("/export/backup");
+}
+
 async function clearLogs() {
-  const confirmed = window.confirm("Czy na pewno chcesz usunąć wszystkie logi?");
+  const confirmed = await confirmAction({
+    title: "Wyczyścić logi?",
+    message: "Ta operacja usunie widoczną historię zdarzeń z bazy danych.",
+    confirmLabel: "Wyczyść logi"
+  });
 
   if (!confirmed) {
     return;
@@ -1615,12 +1906,14 @@ async function clearLogs() {
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
     updateOverviewMetrics();
     showToast("Logi zostały wyczyszczone.");
+    await loadAlerts();
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
 document.getElementById("themeToggle").addEventListener("click", cycleTheme);
+document.getElementById("compactToggle").addEventListener("click", toggleDensity);
 document.getElementById("menuButton").setAttribute("aria-expanded", "false");
 document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
 document.getElementById("recipientEmail").addEventListener("input", updateGenerateButtonLabel);
@@ -1636,6 +1929,22 @@ document.getElementById("assignRfidTagButton").addEventListener("click", startRf
 document.getElementById("rfidItemName").addEventListener("input", renderRfidAssignmentStatus);
 document.getElementById("panelUserForm").addEventListener("submit", submitPanelUserForm);
 document.getElementById("panelUserReset").addEventListener("click", resetPanelUserForm);
+document.getElementById("rfidUsersSearch").addEventListener("input", renderRfidUsers);
+document.getElementById("rfidItemsSearch").addEventListener("input", renderRfidItems);
+document.getElementById("panelUsersSearch").addEventListener("input", renderPanelUsers);
+document.getElementById("logEventFilter").addEventListener("change", loadLogs);
+document.getElementById("logLockerFilter").addEventListener("change", loadLogs);
+document.getElementById("logSearchInput").addEventListener("input", scheduleLoadLogs);
+document.getElementById("logFilterReset").addEventListener("click", resetLogFilters);
+document.getElementById("exportLogsButton").addEventListener("click", exportLogs);
+document.getElementById("backupExportButton").addEventListener("click", exportBackup);
+document.getElementById("confirmCancel").addEventListener("click", () => closeConfirmDialog(false));
+document.getElementById("confirmAccept").addEventListener("click", () => closeConfirmDialog(true));
+document.getElementById("confirmOverlay").addEventListener("click", event => {
+  if (event.target.id === "confirmOverlay") {
+    closeConfirmDialog(false);
+  }
+});
 document.getElementById("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
 
@@ -1672,6 +1981,7 @@ themeMedia.addEventListener("change", () => {
 });
 updateGenerateButtonLabel();
 applyTheme(getStoredTheme());
+applyDensity(getStoredDensity());
 renderSystemStatus();
 
 window.onload = async () => {

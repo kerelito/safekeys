@@ -2412,3 +2412,178 @@ select:focus,
     width: auto;
   }
 }
+
+/* Operational polish */
+.compact-toggle {
+  min-width: 140px;
+}
+
+.alerts-card {
+  border-color: var(--line-strong);
+}
+
+.alerts-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.alert-item {
+  display: grid;
+  gap: 5px;
+  padding: 13px 14px;
+  border: 1px solid var(--surface-border);
+  border-left-width: 4px;
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.alert-item strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.alert-item span,
+.alert-item small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.alert-item.is-critical {
+  border-left-color: #f25f6b;
+}
+
+.alert-item.is-warning {
+  border-left-color: #f5b84b;
+}
+
+.alert-item.is-info {
+  border-left-color: #4ea4ff;
+}
+
+.log-filters,
+.list-toolbar {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.log-filters {
+  grid-template-columns: minmax(130px, 1fr) minmax(120px, 0.85fr) minmax(180px, 1.25fr) auto;
+  align-items: end;
+}
+
+.list-toolbar {
+  grid-template-columns: minmax(220px, 1fr);
+}
+
+.mini-field {
+  gap: 6px;
+}
+
+.mini-field input,
+.mini-field select {
+  min-height: 42px;
+}
+
+.search-field input {
+  padding-left: 14px;
+}
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(3, 8, 15, 0.62);
+  backdrop-filter: blur(14px);
+}
+
+.confirm-dialog {
+  width: min(440px, 100%);
+  padding: 26px;
+  border: 1px solid var(--surface-border);
+  border-radius: 20px;
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.confirm-dialog h2 {
+  margin: 8px 0;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+:root[data-density="compact"] .card,
+:root[data-density="compact"] .hero-card {
+  padding: 18px;
+}
+
+:root[data-density="compact"] .dashboard,
+:root[data-density="compact"] .users-layout,
+:root[data-density="compact"] .dashboard-side,
+:root[data-density="compact"] .hero-metrics,
+:root[data-density="compact"] .status-summary-grid,
+:root[data-density="compact"] .users-list {
+  gap: 14px;
+}
+
+:root[data-density="compact"] .hero-title {
+  font-size: clamp(32px, 4vw, 52px);
+}
+
+:root[data-density="compact"] .metric-card,
+:root[data-density="compact"] .status-summary-tile,
+:root[data-density="compact"] .snapshot-card,
+:root[data-density="compact"] .user-card,
+:root[data-density="compact"] .locker {
+  padding: 14px;
+}
+
+:root[data-density="compact"] .stack-list > li {
+  padding: 10px 12px;
+}
+
+@media (max-width: 1180px) {
+  .dashboard-side .alerts-card {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .log-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .log-filters .search-field,
+  .log-filters button {
+    grid-column: 1 / -1;
+  }
+
+  .compact-toggle {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .log-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .confirm-actions {
+    display: grid;
+  }
+}

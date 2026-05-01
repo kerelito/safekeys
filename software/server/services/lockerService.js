@@ -80,6 +80,7 @@ class LockerService extends EventEmitter {
   constructor() {
     super();
     this.pendingRemoteActions = [];
+    this.remoteActionHistory = [];
     this.pendingRemoteActionWaiters = [];
     this.emailService = null;
     this.currentTagAssignment = null;
@@ -504,6 +505,14 @@ class LockerService extends EventEmitter {
     };
 
     this.pendingRemoteActions.push(action);
+    this.remoteActionHistory.unshift({
+      ...action,
+      status: "queued",
+      sentAt: null,
+      acknowledgedAt: null,
+      result: null
+    });
+    this.remoteActionHistory = this.remoteActionHistory.slice(0, 50);
     this.flushRemoteActionWaiters();
     this.emit("remote-action-queued", action);
     return action;
@@ -544,7 +553,41 @@ class LockerService extends EventEmitter {
   async consumeRemoteActions() {
     const actions = [...this.pendingRemoteActions];
     this.pendingRemoteActions = [];
+    this.markRemoteActionsSent(actions);
     return actions;
+  }
+
+  markRemoteActionsSent(actions) {
+    const sentAt = new Date();
+    actions.forEach(action => {
+      const tracked = this.remoteActionHistory.find(item => item.id === action.id);
+      if (tracked && tracked.status === "queued") {
+        tracked.status = "sent";
+        tracked.sentAt = sentAt;
+      }
+    });
+  }
+
+  acknowledgeRemoteAction(actionId, payload = {}, context = {}) {
+    const tracked = this.remoteActionHistory.find(item => item.id === actionId);
+    if (!tracked) {
+      throw createHttpError(404, "Nie znaleziono akcji urzadzenia.");
+    }
+
+    tracked.status = payload.success === false ? "failed" : "acknowledged";
+    tracked.acknowledgedAt = new Date();
+    tracked.result = {
+      success: payload.success !== false,
+      message: typeof payload.message === "string" ? payload.message.slice(0, 240) : null,
+      source: context.source || "device"
+    };
+
+    this.emit("remote-action-updated", { ...tracked });
+    return { ...tracked };
+  }
+
+  getRemoteActionHistory() {
+    return this.remoteActionHistory.map(action => ({ ...action }));
   }
 
   flushRemoteActionWaiters() {
@@ -554,6 +597,7 @@ class LockerService extends EventEmitter {
 
     const actions = [...this.pendingRemoteActions];
     this.pendingRemoteActions = [];
+    this.markRemoteActionsSent(actions);
     const waiters = [...this.pendingRemoteActionWaiters];
     this.pendingRemoteActionWaiters = [];
 
@@ -603,8 +647,82 @@ class LockerService extends EventEmitter {
     }).sort({ expiresAt: 1 });
   }
 
-  async getLogs() {
-    return Log.find().sort({ timestamp: -1 }).limit(50);
+  async getLogs(filters = {}) {
+    const query = {};
+    const limit = Math.max(1, Math.min(Number(filters.limit) || 80, 500));
+
+    if (filters.event) {
+      query.event = String(filters.event).trim();
+    }
+
+    if (filters.locker) {
+      const locker = Number(filters.locker);
+      if (Number.isInteger(locker)) {
+        query.locker = locker;
+      }
+    }
+
+    if (filters.from || filters.to) {
+      query.timestamp = {};
+      if (filters.from) {
+        query.timestamp.$gte = new Date(filters.from);
+      }
+      if (filters.to) {
+        query.timestamp.$lte = new Date(filters.to);
+      }
+    }
+
+    if (filters.q) {
+      const q = String(filters.q).trim().slice(0, 80);
+      if (q) {
+        const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        query.$or = [
+          { code: regex },
+          { tagId: regex },
+          { actor: regex },
+          { itemName: regex },
+          { source: regex },
+          { event: regex }
+        ];
+      }
+    }
+
+    return Log.find(query).sort({ timestamp: -1 }).limit(limit);
+  }
+
+  async getLogEventTypes() {
+    return Log.distinct("event");
+  }
+
+  async exportLogs(filters = {}) {
+    const logs = await this.getLogs({ ...filters, limit: filters.limit || 500 });
+    const header = ["timestamp", "event", "locker", "code", "tagId", "itemName", "source", "actor", "success"];
+    const rows = logs.map(log => header.map(key => {
+      const value = log[key] ?? "";
+      return `"${String(value).replace(/"/g, '""')}"`;
+    }).join(","));
+
+    return [header.join(","), ...rows].join("\n");
+  }
+
+  async getBackupSnapshot() {
+    const [lockers, rfidUsers, rfidItems, activeCodes, logs] = await Promise.all([
+      this.getLockers(),
+      this.getRfidUsers(),
+      this.getRfidItems(),
+      this.getActiveCodes(),
+      this.getLogs({ limit: 500 })
+    ]);
+
+    return {
+      exportedAt: new Date().toISOString(),
+      lockers,
+      rfidUsers,
+      rfidItems,
+      activeCodes,
+      logs,
+      remoteActions: this.getRemoteActionHistory()
+    };
   }
 
   async getRfidUsers() {

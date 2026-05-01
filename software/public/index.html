@@ -55,6 +55,7 @@
 
 <div class="topbar-actions">
 <button id="themeToggle" class="theme-toggle" type="button">Motyw: system</button>
+<button id="compactToggle" class="theme-toggle compact-toggle" type="button">Widok: komfort</button>
 <div id="userChip" class="user-chip hidden">
 <strong id="userDisplayName"></strong>
 <span id="userUsername"></span>
@@ -203,6 +204,17 @@
 </div>
 
 <aside class="dashboard-side">
+<div class="card alerts-card">
+<div class="section-header">
+<div class="section-copy">
+<h2 class="card-title">Alerty operacyjne</h2>
+<p>Priorytetowe sygnały, które warto sprawdzić przed codzienną obsługą systemu.</p>
+</div>
+<span id="alertsCount" class="panel-counter">0</span>
+</div>
+<div id="alertsList" class="alerts-list"></div>
+</div>
+
 <div class="card status-summary-card">
 <div class="section-copy">
 <h2 class="card-title">Stan systemu</h2>
@@ -251,8 +263,31 @@
 </div>
 <div class="section-actions">
 <span id="logsCount" class="panel-counter">0</span>
+<button id="exportLogsButton" class="secondary-button" type="button">Eksport CSV</button>
 <button class="danger" onclick="clearLogs()">Wyczyść logi</button>
 </div>
+</div>
+<div class="log-filters">
+<label class="field mini-field">
+<span class="field-label">Typ zdarzenia</span>
+<select id="logEventFilter">
+<option value="">Wszystkie</option>
+</select>
+</label>
+<label class="field mini-field">
+<span class="field-label">Skrytka</span>
+<select id="logLockerFilter">
+<option value="">Wszystkie</option>
+<option value="1">Skrytka 1</option>
+<option value="2">Skrytka 2</option>
+<option value="3">Skrytka 3</option>
+</select>
+</label>
+<label class="field mini-field search-field">
+<span class="field-label">Szukaj</span>
+<input id="logSearchInput" type="search" placeholder="kod, tag, operator...">
+</label>
+<button id="logFilterReset" class="secondary-button" type="button">Reset</button>
 </div>
 <ul id="logs" class="stack-list"></ul>
 </div>
@@ -320,6 +355,12 @@
 <span id="rfidUsersCount" class="panel-counter">0</span>
 <button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież listę</button>
 </div>
+</div>
+<div class="list-toolbar">
+<label class="field mini-field search-field">
+<span class="field-label">Szukaj użytkownika</span>
+<input id="rfidUsersSearch" type="search" placeholder="nazwa, tag, skrytka...">
+</label>
 </div>
 <div id="rfidUsersList" class="users-list"></div>
 </div>
@@ -392,6 +433,12 @@
 <button class="secondary-button" type="button" onclick="loadRfidItems()">Odśwież listę</button>
 </div>
 </div>
+<div class="list-toolbar">
+<label class="field mini-field search-field">
+<span class="field-label">Szukaj przedmiotu</span>
+<input id="rfidItemsSearch" type="search" placeholder="nazwa, UID, typ...">
+</label>
+</div>
 <div id="rfidItemsList" class="users-list"></div>
 </div>
 </div>
@@ -461,14 +508,33 @@
 </div>
 <div class="section-actions">
 <span id="panelUsersCount" class="panel-counter">0</span>
+<button id="backupExportButton" class="secondary-button" type="button">Backup JSON</button>
 <button class="secondary-button" type="button" onclick="loadPanelUsers()">Odśwież listę</button>
 </div>
+</div>
+<div class="list-toolbar">
+<label class="field mini-field search-field">
+<span class="field-label">Szukaj konta</span>
+<input id="panelUsersSearch" type="search" placeholder="nazwa, login, rola...">
+</label>
 </div>
 <div id="panelUsersList" class="users-list"></div>
 </div>
 </div>
 </div>
 </section>
+</div>
+
+<div id="confirmOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+<div class="confirm-dialog">
+<span class="eyebrow">Potwierdzenie akcji</span>
+<h2 id="confirmTitle">Potwierdź operację</h2>
+<p id="confirmMessage">Ta akcja wymaga potwierdzenia.</p>
+<div class="confirm-actions">
+<button id="confirmCancel" class="secondary-button" type="button">Anuluj</button>
+<button id="confirmAccept" class="danger" type="button">Potwierdź</button>
+</div>
+</div>
 </div>
 
 <div id="toast" class="toast"></div>
