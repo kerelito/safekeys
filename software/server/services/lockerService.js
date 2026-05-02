@@ -466,6 +466,16 @@ class LockerService extends EventEmitter {
       });
     }
 
+    this.emit("locker-status-changed", {
+      locker,
+      hasTag,
+      tagId: nextItem?.tagId || null,
+      itemName: nextItem?.itemName || null,
+      itemType: nextItem?.itemType || null,
+      itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+      source: context.source || "rfid"
+    });
+
     return { success: true };
   }
 
@@ -495,6 +505,12 @@ class LockerService extends EventEmitter {
         actor: context.actor || null
       });
     }
+
+    this.emit("locker-status-changed", {
+      locker,
+      isDoorClosed,
+      source: context.source || "contactron"
+    });
 
     return { success: true };
   }

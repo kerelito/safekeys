@@ -87,6 +87,9 @@ static const unsigned long DEVICE_ACTIONS_LONG_POLL_WAIT_MS = 25000;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
+static const uint8_t KEYPAD_RELEASE_CONFIRM_SCANS = 3;
+static const uint8_t RFID_PRESENT_CONFIRM_SCANS = 3;
+static const uint8_t RFID_MISSING_CONFIRM_SCANS = 4;
 static const unsigned long NETWORK_QUEUE_WAIT_MS = 500;
 static const uint16_t HTTP_CONNECT_TIMEOUT_MS = 1500;
 static const uint16_t HTTP_RESPONSE_TIMEOUT_MS = 2500;
@@ -157,9 +160,12 @@ struct RfidReaderRuntime {
   bool hasCard;
   String stableUid;
   String lastTriggeredUid;
+  String candidateUid;
   unsigned long lastSeenMs;
   unsigned long lastReportMs;
   bool reportDirty;
+  uint8_t candidateSeenCount;
+  uint8_t missingSeenCount;
 };
 
 struct TagAssignmentMode {
@@ -227,9 +233,9 @@ MFRC522 lockerReader3(RFID_LOCKER_SS_PINS[2], RFID_RST_PIN);
 MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
-  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", 0, 0, true },
-  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", 0, 0, true },
-  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", 0, 0, true }
+  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", 0, 0, true, 0, 0 },
+  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", 0, 0, true, 0, 0 },
+  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", 0, 0, true, 0, 0 }
 };
 
 RfidReaderRuntime masterReaderRuntime = {
@@ -241,9 +247,12 @@ RfidReaderRuntime masterReaderRuntime = {
   false,
   "",
   "",
+  "",
   0,
   0,
-  false
+  false,
+  0,
+  0
 };
 
 WiFiClientSecure secureClient;
@@ -256,6 +265,7 @@ unsigned long lastDeviceActionsPollMs = 0;
 long lastHeartbeatPingMs = -1;
 uint8_t lastStableRawKey = I2C_KEYPAD_NOKEY;
 bool keypadPressLocked = false;
+uint8_t keypadReleaseScanCount = 0;
 bool wifiConnectInProgress = false;
 unsigned long wifiConnectStartedMs = 0;
 unsigned long lastWifiLoadingFrameMs = 0;
@@ -419,10 +429,12 @@ void reserveStringBuffers() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     lockerReaders[i].stableUid.reserve(24);
     lockerReaders[i].lastTriggeredUid.reserve(24);
+    lockerReaders[i].candidateUid.reserve(24);
   }
 
   masterReaderRuntime.stableUid.reserve(24);
   masterReaderRuntime.lastTriggeredUid.reserve(24);
+  masterReaderRuntime.candidateUid.reserve(24);
 }
 
 void initializeTaskWatchdog() {
@@ -716,15 +728,24 @@ bool maybeReportLockerStatuses(unsigned long now) {
 
 void handleKeypad() {
   const uint8_t rawKey = keypad.getKey();
-  if (rawKey == I2C_KEYPAD_NOKEY || rawKey == I2C_KEYPAD_THRESHOLD) {
-    keypadPressLocked = false;
-    lastStableRawKey = I2C_KEYPAD_NOKEY;
+  if (rawKey == I2C_KEYPAD_NOKEY) {
+    if (keypadPressLocked && keypadReleaseScanCount < KEYPAD_RELEASE_CONFIRM_SCANS) {
+      keypadReleaseScanCount += 1;
+    }
+
+    if (!keypadPressLocked || keypadReleaseScanCount >= KEYPAD_RELEASE_CONFIRM_SCANS) {
+      keypadPressLocked = false;
+      lastStableRawKey = I2C_KEYPAD_NOKEY;
+      keypadReleaseScanCount = 0;
+    }
+    return;
+  }
+
+  if (rawKey == I2C_KEYPAD_THRESHOLD) {
     return;
   }
 
   if (rawKey == I2C_KEYPAD_FAIL) {
-    lastStableRawKey = I2C_KEYPAD_NOKEY;
-    keypadPressLocked = false;
     Serial.println("Keypad read failed or multiple keys pressed.");
     blinkLed(2, 50, 50);
     return;
@@ -736,6 +757,7 @@ void handleKeypad() {
 
   lastStableRawKey = rawKey;
   keypadPressLocked = true;
+  keypadReleaseScanCount = 0;
 
   const char key = mapRawKeyToChar(rawKey);
   if (key == '\0') {
@@ -1468,22 +1490,28 @@ void printRfidSnapshot() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const RfidReaderRuntime& runtime = lockerReaders[i];
     Serial.printf(
-      "[%s] ss=%u present=%s uid=%s dirty=%s lastSeen=%lu\n",
+      "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u dirty=%s lastSeen=%lu\n",
       runtime.label,
       runtime.ssPin,
       runtime.hasCard ? "yes" : "no",
       runtime.hasCard ? runtime.stableUid.c_str() : "(none)",
+      runtime.candidateUid.length() > 0 ? runtime.candidateUid.c_str() : "(none)",
+      runtime.candidateSeenCount,
+      runtime.missingSeenCount,
       runtime.reportDirty ? "yes" : "no",
       runtime.lastSeenMs
     );
   }
 
   Serial.printf(
-    "[%s] ss=%u present=%s uid=%s armedUid=%s lastSeen=%lu\n",
+    "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u armedUid=%s lastSeen=%lu\n",
     masterReaderRuntime.label,
     masterReaderRuntime.ssPin,
     masterReaderRuntime.hasCard ? "yes" : "no",
     masterReaderRuntime.hasCard ? masterReaderRuntime.stableUid.c_str() : "(none)",
+    masterReaderRuntime.candidateUid.length() > 0 ? masterReaderRuntime.candidateUid.c_str() : "(none)",
+    masterReaderRuntime.candidateSeenCount,
+    masterReaderRuntime.missingSeenCount,
     masterReaderRuntime.lastTriggeredUid.length() > 0 ? masterReaderRuntime.lastTriggeredUid.c_str() : "(none)",
     masterReaderRuntime.lastSeenMs
   );
@@ -1842,8 +1870,22 @@ bool scanRfidReader(RfidReaderRuntime& runtime, unsigned long now) {
 void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scanResult, unsigned long now) {
   if (scanResult.present) {
     runtime.lastSeenMs = now;
+    runtime.missingSeenCount = 0;
 
     if (scanResult.logicalTagId.length() > 0) {
+      if (scanResult.logicalTagId == runtime.candidateUid) {
+        if (runtime.candidateSeenCount < RFID_PRESENT_CONFIRM_SCANS) {
+          runtime.candidateSeenCount += 1;
+        }
+      } else {
+        runtime.candidateUid = scanResult.logicalTagId;
+        runtime.candidateSeenCount = 1;
+      }
+
+      if (runtime.candidateSeenCount < RFID_PRESENT_CONFIRM_SCANS) {
+        return;
+      }
+
       const bool uidChanged = !runtime.hasCard || scanResult.logicalTagId != runtime.stableUid;
 
       if (uidChanged) {
@@ -1924,10 +1966,21 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
     return;
   }
 
+  runtime.candidateSeenCount = 0;
+  runtime.candidateUid = "";
+
   if (!runtime.hasCard) {
     if (runtime.isMaster && runtime.lastTriggeredUid.length() > 0 && now - runtime.lastSeenMs >= RFID_MASTER_REARM_DELAY_MS) {
       runtime.lastTriggeredUid = "";
     }
+    return;
+  }
+
+  if (runtime.missingSeenCount < RFID_MISSING_CONFIRM_SCANS) {
+    runtime.missingSeenCount += 1;
+  }
+
+  if (runtime.missingSeenCount < RFID_MISSING_CONFIRM_SCANS) {
     return;
   }
 
@@ -1945,6 +1998,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
   }
 
   runtime.stableUid = "";
+  runtime.missingSeenCount = 0;
   markVisualStateDirty();
 }
 

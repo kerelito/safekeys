@@ -347,6 +347,10 @@ lockerService.on("active-codes-changed", () => {
   io.emit("active-codes-changed");
 });
 
+lockerService.on("locker-status-changed", status => {
+  io.emit("locker-status-changed", status);
+});
+
 lockerService.on("rfid-tag-assignment-updated", assignment => {
   io.emit("rfid-tag-assignment-updated", assignment);
 });

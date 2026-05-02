@@ -508,6 +508,14 @@ function connectSocket() {
   socket.on("active-codes-changed", async () => {
     await loadActiveCodes();
   });
+  socket.on("locker-status-changed", async status => {
+    await loadLockers();
+    await loadAlerts();
+
+    if (selectedLockerDetailsNumber && (!status?.locker || status.locker === selectedLockerDetailsNumber)) {
+      refreshLockerDetailsFromData();
+    }
+  });
   socket.on("remote-action-queued", async () => {
     await loadRemoteActions();
   });
