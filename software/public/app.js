@@ -22,6 +22,7 @@ let alertsData = [];
 let remoteActionsData = [];
 let confirmResolver = null;
 let logSearchDebounceId = null;
+let selectedLockerDetailsNumber = null;
 
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
@@ -33,6 +34,64 @@ const STATUS_ELEMENT_IDS = {
   server: "serverStatus",
   database: "databaseStatus",
   esp32: "esp32Status"
+};
+
+const LOCKER_REFRESH_EVENTS = [
+  "KEY_REMOVED",
+  "KEY_RETURNED",
+  "LOCKER_DOOR_OPENED",
+  "LOCKER_DOOR_CLOSED",
+  "REMOTE_UNLOCK_REQUESTED",
+  "REMOTE_RELEASE_ALL_REQUESTED"
+];
+
+const RFID_USER_REFRESH_EVENTS = [
+  "RFID_USER_CREATED",
+  "RFID_USER_UPDATED",
+  "RFID_USER_DELETED"
+];
+
+const RFID_ITEM_REFRESH_EVENTS = [
+  "RFID_ITEM_CREATED",
+  "RFID_ITEM_UPDATED",
+  "RFID_ITEM_DELETED"
+];
+
+const PANEL_USER_REFRESH_EVENTS = [
+  "PANEL_USER_CREATED",
+  "PANEL_USER_UPDATED",
+  "PANEL_USER_DELETED"
+];
+
+const LOG_EVENT_PRESENTERS = {
+  LOCKER_OPENED: log => ({ text: `Odblokowano S${log.locker} kod ${log.code}`, className: "log-success" }),
+  INVALID_CODE: log => ({ text: `Błędny kod ${log.code}`, className: "log-error" }),
+  CODE_GENERATED: log => ({ text: `Wygenerowano kod ${log.code}`, className: "log-info" }),
+  CODE_EMAIL_SENT: log => ({ text: `Wysłano kod ${log.code} e-mailem`, className: "log-success" }),
+  CODE_EMAIL_FAILED: log => ({ text: `Błąd wysyłki kodu ${log.code}`, className: "log-error" }),
+  CODE_DEACTIVATED: log => ({ text: `Dezaktywowano kod ${log.code}`, className: "log-warning" }),
+  KEY_REMOVED: log => ({ text: `Wyjęty klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-warning" }),
+  KEY_RETURNED: log => ({ text: `Zwrócony klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-success" }),
+  LOCKER_DOOR_OPENED: log => ({ text: `Otwarte drzwiczki S${log.locker}`, className: "log-warning" }),
+  LOCKER_DOOR_CLOSED: log => ({ text: `Domknięte drzwiczki S${log.locker}`, className: "log-success" }),
+  REMOTE_UNLOCK_REQUESTED: log => ({ text: `Zdalne otwarcie S${log.locker}`, className: "log-info" }),
+  REMOTE_RELEASE_ALL_REQUESTED: () => ({ text: "Zwolniono blokadę wszystkich skrytek", className: "log-warning" }),
+  RFID_ACCESS_GRANTED: log => ({ text: `Autoryzowany tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
+  RFID_ACCESS_DENIED: log => ({ text: `Odrzucony tag RFID${formatLogItemLabel(log)}`, className: "log-error" }),
+  RFID_USER_CREATED: () => ({ text: "Dodano użytkownika RFID", className: "log-info" }),
+  RFID_USER_UPDATED: () => ({ text: "Zaktualizowano użytkownika RFID", className: "log-info" }),
+  RFID_USER_DELETED: () => ({ text: "Usunięto użytkownika RFID", className: "log-warning" }),
+  RFID_ITEM_CREATED: () => ({ text: "Dodano przedmiot RFID", className: "log-info" }),
+  RFID_ITEM_UPDATED: () => ({ text: "Zaktualizowano przedmiot RFID", className: "log-info" }),
+  RFID_ITEM_DELETED: () => ({ text: "Usunięto przedmiot RFID", className: "log-warning" }),
+  PANEL_USER_CREATED: () => ({ text: "Dodano użytkownika panelu", className: "log-info" }),
+  PANEL_USER_UPDATED: () => ({ text: "Zaktualizowano użytkownika panelu", className: "log-info" }),
+  PANEL_USER_DELETED: () => ({ text: "Usunięto użytkownika panelu", className: "log-warning" }),
+  AUTH_LOGIN: () => ({ text: "Zalogowano operatora", className: "log-success" }),
+  AUTH_LOGOUT: () => ({ text: "Wylogowano operatora", className: "log-info" }),
+  RFID_TAG_ASSIGNMENT_STARTED: () => ({ text: "Rozpoczęto nadawanie taga RFID", className: "log-info" }),
+  RFID_TAG_ASSIGNMENT_COMPLETED: log => ({ text: `Nadano tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
+  RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" })
 };
 
 function formatRelativeTime(value) {
@@ -349,38 +408,22 @@ function connectSocket() {
       addLog(log);
     }
 
-    if ([
-      "KEY_REMOVED",
-      "KEY_RETURNED",
-      "LOCKER_DOOR_OPENED",
-      "LOCKER_DOOR_CLOSED",
-      "REMOTE_UNLOCK_REQUESTED",
-      "REMOTE_RELEASE_ALL_REQUESTED"
-    ].includes(log.event)) {
+    if (LOCKER_REFRESH_EVENTS.includes(log.event)) {
       await loadLockers();
+      if (selectedLockerDetailsNumber && (!log.locker || log.locker === selectedLockerDetailsNumber)) {
+        refreshLockerDetailsFromData();
+      }
     }
 
-    if ([
-      "RFID_USER_CREATED",
-      "RFID_USER_UPDATED",
-      "RFID_USER_DELETED"
-    ].includes(log.event)) {
+    if (RFID_USER_REFRESH_EVENTS.includes(log.event)) {
       await loadRfidUsers();
     }
 
-    if ([
-      "RFID_ITEM_CREATED",
-      "RFID_ITEM_UPDATED",
-      "RFID_ITEM_DELETED"
-    ].includes(log.event)) {
+    if (RFID_ITEM_REFRESH_EVENTS.includes(log.event)) {
       await loadRfidItems();
     }
 
-    if ([
-      "PANEL_USER_CREATED",
-      "PANEL_USER_UPDATED",
-      "PANEL_USER_DELETED"
-    ].includes(log.event) && currentUser?.isMaster) {
+    if (PANEL_USER_REFRESH_EVENTS.includes(log.event) && currentUser?.isMaster) {
       await loadPanelUsers();
     }
 
@@ -1544,10 +1587,7 @@ async function loadLockers() {
       const statusButton = document.createElement("button");
       statusButton.className = "secondary-button";
       statusButton.textContent = "Szczegóły";
-      statusButton.addEventListener("click", () => {
-        const detectedItem = describeDetectedItem(l);
-        showToast(`S${l.locker}: ${detectedItem.title}. ${detectedItem.meta}`);
-      });
+      statusButton.addEventListener("click", () => openLockerDetails(l));
 
       actions.appendChild(openButton);
       actions.appendChild(statusButton);
@@ -1584,6 +1624,143 @@ function getLockerSeverityLabel(locker) {
   if (severity === "critical") return "Błąd";
   if (severity === "warn") return "Ostrzeżenie";
   return "Info";
+}
+
+function getLogPresentation(log) {
+  const presenter = LOG_EVENT_PRESENTERS[log.event];
+  if (presenter) {
+    return presenter(log);
+  }
+
+  return {
+    text: log.event || "Zdarzenie systemowe",
+    className: "log-info"
+  };
+}
+
+function createLogSummaryElement(log) {
+  const presentation = getLogPresentation(log);
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = `locker-history-item ${presentation.className}`;
+  item.addEventListener("click", () => openLogDetails(log, presentation.text));
+
+  const title = document.createElement("strong");
+  title.textContent = presentation.text;
+
+  const meta = document.createElement("span");
+  meta.textContent = log.timestamp ? formatDateTime(log.timestamp) : "brak daty";
+
+  item.appendChild(title);
+  item.appendChild(meta);
+  return item;
+}
+
+function renderLockerDetailsStatus(locker) {
+  const status = document.getElementById("lockerDetailsStatus");
+  const detectedItem = describeDetectedItem(locker);
+  const severity = getLockerSeverity(locker);
+
+  status.innerHTML = "";
+  [
+    ["Stan", getLockerSeverityLabel(locker), severity],
+    ["Klucz", locker.hasTag ? "Obecny" : "Brak", locker.hasTag ? "ok" : "critical"],
+    ["Drzwi", locker.isDoorClosed ? "Zamknięte" : "Otwarte", locker.isDoorClosed ? "ok" : "warn"]
+  ].forEach(([label, value, state]) => {
+    const card = document.createElement("article");
+    card.className = `locker-detail-tile state-${state}`;
+
+    const labelElement = document.createElement("span");
+    labelElement.textContent = label;
+
+    const valueElement = document.createElement("strong");
+    valueElement.textContent = value;
+
+    card.appendChild(labelElement);
+    card.appendChild(valueElement);
+    status.appendChild(card);
+  });
+
+  const item = document.getElementById("lockerDetailsItem");
+  item.innerHTML = "";
+
+  const itemTitle = document.createElement("strong");
+  itemTitle.textContent = detectedItem.title;
+
+  const itemMeta = document.createElement("span");
+  itemMeta.textContent = detectedItem.meta;
+
+  item.appendChild(itemTitle);
+  item.appendChild(itemMeta);
+
+  document.getElementById("lockerDetailsSummary").textContent = [
+    locker.hasTag ? "Klucz jest wykryty" : "Brak wykrytego klucza",
+    locker.isDoorClosed ? "drzwiczki są zamknięte" : "drzwiczki są otwarte"
+  ].join(", ");
+}
+
+function renderLockerRecentLogs(logs) {
+  const container = document.getElementById("lockerDetailsLogs");
+  container.innerHTML = "";
+
+  if (!logs.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state compact-empty";
+    empty.innerHTML = "<strong>Brak historii</strong><p>Nie ma jeszcze logów dla tej skrytki.</p>";
+    container.appendChild(empty);
+    return;
+  }
+
+  logs.forEach(log => {
+    container.appendChild(createLogSummaryElement(log));
+  });
+}
+
+async function loadLockerRecentLogs(lockerNumber) {
+  const container = document.getElementById("lockerDetailsLogs");
+  container.innerHTML = '<div class="empty-state compact-empty"><strong>Ładowanie</strong><p>Pobieram ostatnie zdarzenia skrytki.</p></div>';
+
+  try {
+    const logs = await apiFetch(`/logs${buildQueryString({ locker: lockerNumber, limit: 8 })}`);
+    renderLockerRecentLogs(logs);
+  } catch (error) {
+    container.innerHTML = "";
+    const failure = document.createElement("div");
+    failure.className = "empty-state compact-empty";
+    const title = document.createElement("strong");
+    const message = document.createElement("p");
+    title.textContent = "Nie udało się pobrać logów";
+    message.textContent = error.message;
+    failure.appendChild(title);
+    failure.appendChild(message);
+    container.appendChild(failure);
+  }
+}
+
+function openLockerDetails(locker) {
+  selectedLockerDetailsNumber = locker.locker;
+  document.getElementById("lockerDetailsTitle").textContent = `Skrytka S${locker.locker}`;
+  document.getElementById("lockerDetailsOpen").dataset.locker = String(locker.locker);
+  renderLockerDetailsStatus(locker);
+  loadLockerRecentLogs(locker.locker);
+  document.getElementById("lockerDetailsOverlay").classList.remove("hidden");
+}
+
+function closeLockerDetails() {
+  selectedLockerDetailsNumber = null;
+  document.getElementById("lockerDetailsOverlay").classList.add("hidden");
+}
+
+function refreshLockerDetailsFromData() {
+  if (!selectedLockerDetailsNumber) {
+    return;
+  }
+
+  const locker = lockersData.find(item => item.locker === selectedLockerDetailsNumber);
+  if (locker) {
+    renderLockerDetailsStatus(locker);
+    loadLockerRecentLogs(locker.locker);
+  }
 }
 
 function getRemoteActionTypeLabel(action) {
@@ -1824,119 +2001,9 @@ function addLog(log, options = {}) {
   const li = document.createElement("li");
 
   const time = new Date(log.timestamp).toLocaleString();
-  const itemLabel = formatLogItemLabel(log);
+  const { text, className } = getLogPresentation(log);
 
-  let text = "";
-  let cls = "log-info";
-
-  switch (log.event) {
-    case "LOCKER_OPENED":
-      text = `Odblokowano S${log.locker} kod ${log.code}`;
-      cls = "log-success";
-      break;
-    case "INVALID_CODE":
-      text = `Błędny kod ${log.code}`;
-      cls = "log-error";
-      break;
-    case "CODE_GENERATED":
-      text = `Wygenerowano kod ${log.code}`;
-      break;
-    case "CODE_EMAIL_SENT":
-      text = `Wysłano kod ${log.code} e-mailem`;
-      cls = "log-success";
-      break;
-    case "CODE_EMAIL_FAILED":
-      text = `Błąd wysyłki kodu ${log.code}`;
-      cls = "log-error";
-      break;
-    case "CODE_DEACTIVATED":
-      text = `Dezaktywowano kod ${log.code}`;
-      cls = "log-warning";
-      break;
-    case "KEY_REMOVED":
-      text = `Wyjęty klucz S${log.locker}${itemLabel}`;
-      cls = "log-warning";
-      break;
-    case "KEY_RETURNED":
-      text = `Zwrócony klucz S${log.locker}${itemLabel}`;
-      cls = "log-success";
-      break;
-    case "LOCKER_DOOR_OPENED":
-      text = `Otwarte drzwiczki S${log.locker}`;
-      cls = "log-warning";
-      break;
-    case "LOCKER_DOOR_CLOSED":
-      text = `Domknięte drzwiczki S${log.locker}`;
-      cls = "log-success";
-      break;
-    case "REMOTE_UNLOCK_REQUESTED":
-      text = `Zdalne otwarcie S${log.locker}`;
-      break;
-    case "REMOTE_RELEASE_ALL_REQUESTED":
-      text = "Zwolniono blokadę wszystkich skrytek";
-      cls = "log-warning";
-      break;
-    case "RFID_ACCESS_GRANTED":
-      text = `Autoryzowany tag RFID${itemLabel}`;
-      cls = "log-success";
-      break;
-    case "RFID_ACCESS_DENIED":
-      text = `Odrzucony tag RFID${itemLabel}`;
-      cls = "log-error";
-      break;
-    case "RFID_USER_CREATED":
-      text = "Dodano użytkownika RFID";
-      break;
-    case "RFID_USER_UPDATED":
-      text = "Zaktualizowano użytkownika RFID";
-      break;
-    case "RFID_USER_DELETED":
-      text = "Usunięto użytkownika RFID";
-      cls = "log-warning";
-      break;
-    case "RFID_ITEM_CREATED":
-      text = "Dodano przedmiot RFID";
-      break;
-    case "RFID_ITEM_UPDATED":
-      text = "Zaktualizowano przedmiot RFID";
-      break;
-    case "RFID_ITEM_DELETED":
-      text = "Usunięto przedmiot RFID";
-      cls = "log-warning";
-      break;
-    case "PANEL_USER_CREATED":
-      text = "Dodano użytkownika panelu";
-      break;
-    case "PANEL_USER_UPDATED":
-      text = "Zaktualizowano użytkownika panelu";
-      break;
-    case "PANEL_USER_DELETED":
-      text = "Usunięto użytkownika panelu";
-      cls = "log-warning";
-      break;
-    case "AUTH_LOGIN":
-      text = "zalogowano operatora";
-      cls = "log-success";
-      break;
-    case "AUTH_LOGOUT":
-      text = "wylogowano operatora";
-      break;
-    case "RFID_TAG_ASSIGNMENT_STARTED":
-      text = "rozpoczęto nadawanie taga RFID";
-      break;
-    case "RFID_TAG_ASSIGNMENT_COMPLETED":
-      text = `nadano tag RFID${itemLabel}`;
-      cls = "log-success";
-      break;
-    case "RFID_TAG_ASSIGNMENT_FAILED":
-      text = "nie udało się nadać taga RFID";
-      cls = "log-error";
-      break;
-    default:
-      text = log.event || "zdarzenie systemowe";
-  }
-
-  li.className = cls;
+  li.className = className;
   li.innerHTML = "";
   const content = document.createElement("div");
   content.className = "log-entry";
@@ -2170,6 +2237,20 @@ document.getElementById("logDetailsClose").addEventListener("click", closeLogDet
 document.getElementById("logDetailsOverlay").addEventListener("click", event => {
   if (event.target.id === "logDetailsOverlay") {
     closeLogDetails();
+  }
+});
+document.getElementById("lockerDetailsClose").addEventListener("click", closeLockerDetails);
+document.getElementById("lockerDetailsRefresh").addEventListener("click", refreshLockerDetailsFromData);
+document.getElementById("lockerDetailsOpen").addEventListener("click", async event => {
+  const locker = Number(event.currentTarget.dataset.locker);
+  if (Number.isInteger(locker)) {
+    await openLocker(locker);
+    refreshLockerDetailsFromData();
+  }
+});
+document.getElementById("lockerDetailsOverlay").addEventListener("click", event => {
+  if (event.target.id === "lockerDetailsOverlay") {
+    closeLockerDetails();
   }
 });
 document.getElementById("loginForm").addEventListener("submit", async event => {

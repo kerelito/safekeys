@@ -564,6 +564,27 @@
 </div>
 </div>
 
+<div id="lockerDetailsOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="lockerDetailsTitle">
+<div class="confirm-dialog locker-details-dialog">
+<span class="eyebrow">Szczegóły skrytki</span>
+<h2 id="lockerDetailsTitle">Skrytka</h2>
+<p id="lockerDetailsSummary">Aktualny stan komory i ostatnie zdarzenia.</p>
+<div id="lockerDetailsStatus" class="locker-details-status"></div>
+<div id="lockerDetailsItem" class="locker-details-item"></div>
+<div class="locker-details-history">
+<div class="locker-details-history-header">
+<strong>Ostatnie zdarzenia</strong>
+<button id="lockerDetailsRefresh" class="secondary-button" type="button">Odśwież</button>
+</div>
+<div id="lockerDetailsLogs" class="locker-details-logs"></div>
+</div>
+<div class="confirm-actions">
+<button id="lockerDetailsOpen" type="button">Otwórz skrytkę</button>
+<button id="lockerDetailsClose" class="secondary-button" type="button">Zamknij</button>
+</div>
+</div>
+</div>
+
 <div id="toast" class="toast"></div>
 
 <script src="/app.js"></script>
