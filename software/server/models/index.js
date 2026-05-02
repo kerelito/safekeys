@@ -148,7 +148,7 @@ const RfidItemSchema = new mongoose.Schema({
   itemType: {
     type: String,
     required: true,
-    enum: ["brelok", "karta", "inne"]
+    enum: ["brelok", "karta", "inne", "klucz_master", "karta_master"]
   },
   active: {
     type: Boolean,
@@ -184,7 +184,7 @@ const PanelUserSchema = new mongoose.Schema({
   role: {
     type: String,
     required: true,
-    enum: ["master", "admin"],
+    enum: ["master", "admin", "operator", "viewer"],
     default: "admin"
   },
   active: {

@@ -145,7 +145,7 @@
 
 <label class="field">
 <span class="field-label">Akcja</span>
-<button id="generateButton" type="button" onclick="generateCode()">Generuj</button>
+<button id="generateButton" type="button" onclick="generateCode()" data-operation-only>Generuj</button>
 </label>
 </div>
 
@@ -196,7 +196,7 @@
 </div>
 <div class="locker-toolbar">
 <button class="secondary-button" onclick="loadLockers()">Odśwież status</button>
-<button class="danger" onclick="releaseAllLockers()">Zwolnij wszystkie</button>
+<button class="danger" onclick="releaseAllLockers()" data-operation-only>Zwolnij wszystkie</button>
 </div>
 </div>
 <div id="lockers" class="lockers"></div>
@@ -279,7 +279,7 @@
 <div class="section-actions">
 <span id="logsCount" class="panel-counter">0</span>
 <button id="exportLogsButton" class="secondary-button" type="button">Eksport CSV</button>
-<button class="danger" onclick="clearLogs()">Wyczyść logi</button>
+<button class="danger" onclick="clearLogs()" data-rfid-admin-only>Wyczyść logi</button>
 </div>
 </div>
 <div class="log-filters">
@@ -319,7 +319,7 @@
 <p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, które skrytki mogą otwierać po przyłożeniu karty.</p>
 </div>
 
-<form id="rfidUserForm" class="auth-form">
+<form id="rfidUserForm" class="auth-form" data-rfid-admin-only>
 <input id="rfidUserId" type="hidden">
 
 <label class="field">
@@ -344,6 +344,7 @@
 <button id="rfidUserSubmit" type="submit">Dodaj użytkownika</button>
 <button id="rfidUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
 </form>
+<p class="field-help hidden" data-rfid-readonly-note>Masz dostęp do podglądu. Dodawanie i edycja użytkowników RFID są dostępne dla ról master i administrator.</p>
 </div>
 </div>
 
@@ -392,7 +393,7 @@
 <p>Dodawaj własne przedmioty rozpoznawane po UID taga RFID. System pokaże ich nazwę i typ w logach oraz w statusie skrytek.</p>
 </div>
 
-<form id="rfidItemForm" class="auth-form">
+<form id="rfidItemForm" class="auth-form" data-rfid-admin-only>
 <input id="rfidItemId" type="hidden">
 
 <label class="field">
@@ -415,12 +416,15 @@
 <option value="brelok">Brelok</option>
 <option value="karta">Karta</option>
 <option value="inne">Inne</option>
+<option value="klucz_master" data-master-option>Klucz master</option>
+<option value="karta_master" data-master-option>Karta master</option>
 </select>
 </label>
 
 <button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
 <button id="rfidItemReset" class="secondary-button" type="button">Wyczyść formularz</button>
 </form>
+<p class="field-help hidden" data-rfid-readonly-note>Masz dostęp do podglądu. Dodawanie zwykłych przedmiotów RFID wymaga roli administrator, a tagów master roli master.</p>
 </div>
 </div>
 
@@ -466,7 +470,7 @@
 <div class="card form-card">
 <div class="section-copy">
 <h2 class="card-title">Użytkownicy panelu</h2>
-<p>Tylko użytkownik master może dodawać, usuwać i edytować konta administratorów panelu.</p>
+<p>Tylko użytkownik master może dodawać, usuwać i edytować konta oraz role dostępu do panelu.</p>
 </div>
 
 <form id="panelUserForm" class="auth-form">
@@ -491,8 +495,10 @@
 <label class="field">
 <span class="field-label">Rola</span>
 <select id="panelUserRole" required>
-<option value="admin">Administrator</option>
 <option value="master">Master</option>
+<option value="admin">Administrator</option>
+<option value="operator">Operator</option>
+<option value="viewer">Podgląd</option>
 </select>
 </label>
 
@@ -579,7 +585,7 @@
 <div id="lockerDetailsLogs" class="locker-details-logs"></div>
 </div>
 <div class="confirm-actions">
-<button id="lockerDetailsOpen" type="button">Otwórz skrytkę</button>
+<button id="lockerDetailsOpen" type="button" data-operation-only>Otwórz skrytkę</button>
 <button id="lockerDetailsClose" class="secondary-button" type="button">Zamknij</button>
 </div>
 </div>

@@ -18,6 +18,12 @@ const {
   createHttpError
 } = require("./lockerValidation");
 
+const MASTER_RFID_ITEM_TYPES = new Set(["klucz_master", "karta_master"]);
+
+function isMasterRfidItemType(itemType) {
+  return MASTER_RFID_ITEM_TYPES.has(itemType);
+}
+
 function parseGenerateCodeInput(lockerOrPayload, hours) {
   if (typeof lockerOrPayload === "object" && lockerOrPayload !== null) {
     return {
@@ -820,6 +826,11 @@ class LockerService extends EventEmitter {
       throw createHttpError(409, "Uzytkownik z tym tagiem RFID juz istnieje.");
     }
 
+    const existingMasterItem = await RfidItem.findOne({ tagId, itemType: { $in: [...MASTER_RFID_ITEM_TYPES] } });
+    if (existingMasterItem) {
+      throw createHttpError(409, "Ten UID jest juz przypisany jako administracyjny tag RFID.");
+    }
+
     const user = await RfidUser.create({
       name,
       tagId,
@@ -853,6 +864,11 @@ class LockerService extends EventEmitter {
     const existingWithTag = await RfidUser.findOne({ tagId, _id: { $ne: userId } });
     if (existingWithTag) {
       throw createHttpError(409, "Inny uzytkownik ma juz ten tag RFID.");
+    }
+
+    const existingMasterItem = await RfidItem.findOne({ tagId, itemType: { $in: [...MASTER_RFID_ITEM_TYPES] } });
+    if (existingMasterItem) {
+      throw createHttpError(409, "Ten UID jest juz przypisany jako administracyjny tag RFID.");
     }
 
     user.name = name;
@@ -896,9 +912,20 @@ class LockerService extends EventEmitter {
     const tagId = assertValidTagId(payload.tagId);
     const itemType = assertValidRfidItemType(payload.itemType);
 
+    if (isMasterRfidItemType(itemType) && context.role !== "master") {
+      throw createHttpError(403, "Tylko użytkownik master może dodawać tagi administracyjne RFID.");
+    }
+
     const existing = await RfidItem.findOne({ tagId });
     if (existing) {
       throw createHttpError(409, "Przedmiot RFID z tym tagiem juz istnieje.");
+    }
+
+    if (isMasterRfidItemType(itemType)) {
+      const existingUser = await RfidUser.findOne({ tagId });
+      if (existingUser) {
+        throw createHttpError(409, "Ten UID jest juz przypisany jako zwykly uzytkownik RFID.");
+      }
     }
 
     const item = await RfidItem.create({
@@ -939,6 +966,17 @@ class LockerService extends EventEmitter {
     const existingWithTag = await RfidItem.findOne({ tagId, _id: { $ne: itemId } });
     if (existingWithTag) {
       throw createHttpError(409, "Inny przedmiot RFID ma juz ten tag.");
+    }
+
+    if ((isMasterRfidItemType(item.itemType) || isMasterRfidItemType(itemType)) && context.role !== "master") {
+      throw createHttpError(403, "Tylko użytkownik master może edytować tagi administracyjne RFID.");
+    }
+
+    if (isMasterRfidItemType(itemType)) {
+      const existingUser = await RfidUser.findOne({ tagId });
+      if (existingUser) {
+        throw createHttpError(409, "Ten UID jest juz przypisany jako zwykly uzytkownik RFID.");
+      }
     }
 
     const previousTagId = item.tagId;
@@ -984,6 +1022,10 @@ class LockerService extends EventEmitter {
       throw createHttpError(404, "Nie znaleziono przedmiotu RFID.");
     }
 
+    if (isMasterRfidItemType(item.itemType) && context.role !== "master") {
+      throw createHttpError(403, "Tylko użytkownik master może usuwać tagi administracyjne RFID.");
+    }
+
     await Locker.updateMany(
       { detectedTagId: item.tagId },
       {
@@ -1010,6 +1052,42 @@ class LockerService extends EventEmitter {
     const normalizedTagId = assertValidTagId(tagId);
     const user = await RfidUser.findOne({ tagId: normalizedTagId, active: true });
     const item = await this.describeDetectedItem(normalizedTagId);
+
+    if (!user && item.itemKnown && isMasterRfidItemType(item.itemType)) {
+      const openedLockers = [];
+
+      for (const locker of ALLOWED_LOCKERS) {
+        await this.openLocker(locker, {
+          source: context.source || "rfid-master",
+          actor: `${item.itemName || "Master RFID"} • ${item.tagId}`
+        });
+        openedLockers.push(locker);
+      }
+
+      await this.createLog({
+        event: "RFID_ACCESS_GRANTED",
+        source: context.source || "rfid-master",
+        actor: `${item.itemName || "Master RFID"} • ${item.tagId}`,
+        success: true,
+        tagId: item.tagId,
+        itemName: item.itemName,
+        itemType: item.itemType,
+        itemKnown: true
+      });
+
+      return {
+        valid: true,
+        item,
+        user: {
+          id: null,
+          name: item.itemName || "Master RFID",
+          tagId: item.tagId,
+          role: "rfid-master"
+        },
+        allowedLockers: [...ALLOWED_LOCKERS],
+        openedLockers
+      };
+    }
 
     if (!user) {
       await this.createLog({

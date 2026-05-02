@@ -99,6 +99,16 @@ function requireMaster(req, res, next) {
   return res.status(403).json({ error: "Ta sekcja jest dostępna tylko dla użytkownika master." });
 }
 
+function requireRoles(...roles) {
+  return (req, res, next) => {
+    if (roles.includes(req.session?.role)) {
+      return next();
+    }
+
+    return res.status(403).json({ error: "Brak uprawnień do tej operacji." });
+  };
+}
+
 function asyncHandler(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
@@ -445,7 +455,7 @@ app.post("/verify-tag", requireDeviceKey, asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.post("/generate-code", asyncHandler(async (req, res) => {
+app.post("/generate-code", requireRoles("master", "admin", "operator"), asyncHandler(async (req, res) => {
   const result = await lockerService.generateCode({
     locker: Number(req.body.locker),
     hours: Number(req.body.hours),
@@ -458,7 +468,7 @@ app.post("/generate-code", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.post("/deactivate-code", asyncHandler(async (req, res) => {
+app.post("/deactivate-code", requireRoles("master", "admin", "operator"), asyncHandler(async (req, res) => {
   const { code } = req.body;
 
   const result = await lockerService.deactivateCode(code, {
@@ -469,7 +479,7 @@ app.post("/deactivate-code", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.post("/open-locker", asyncHandler(async (req, res) => {
+app.post("/open-locker", requireRoles("master", "admin", "operator"), asyncHandler(async (req, res) => {
   const locker = Number(req.body.locker);
 
   const result = await lockerService.openLocker(locker, {
@@ -480,7 +490,7 @@ app.post("/open-locker", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.post("/release-all-lockers", asyncHandler(async (req, res) => {
+app.post("/release-all-lockers", requireRoles("master", "admin", "operator"), asyncHandler(async (req, res) => {
   const result = await lockerService.releaseAllLockers({
     source: "web",
     actor: getSessionActor(req)
@@ -508,7 +518,7 @@ app.get("/rfid-items/tag-assignment", asyncHandler(async (req, res) => {
   res.json({ assignment: lockerService.getCurrentTagAssignment() });
 }));
 
-app.post("/users", asyncHandler(async (req, res) => {
+app.post("/users", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.createRfidUser({
     name: req.body.name,
     tagId: req.body.tagId,
@@ -521,20 +531,21 @@ app.post("/users", asyncHandler(async (req, res) => {
   res.status(201).json(result);
 }));
 
-app.post("/rfid-items", asyncHandler(async (req, res) => {
+app.post("/rfid-items", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.createRfidItem({
     name: req.body.name,
     tagId: req.body.tagId,
     itemType: req.body.itemType
   }, {
     source: "web",
-    actor: getSessionActor(req)
+    actor: getSessionActor(req),
+    role: req.session?.role
   });
 
   res.status(201).json(result);
 }));
 
-app.post("/rfid-items/tag-assignment/start", asyncHandler(async (req, res) => {
+app.post("/rfid-items/tag-assignment/start", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const esp32Status = getEsp32Status();
   if (!esp32Status.connected) {
     return res.status(409).json({ error: "Nadawanie taga jest dostępne tylko przy aktywnym połączeniu z ESP32." });
@@ -550,7 +561,7 @@ app.post("/rfid-items/tag-assignment/start", asyncHandler(async (req, res) => {
   res.status(201).json(result);
 }));
 
-app.put("/users/:userId", asyncHandler(async (req, res) => {
+app.put("/users/:userId", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.updateRfidUser(req.params.userId, {
     name: req.body.name,
     tagId: req.body.tagId,
@@ -563,7 +574,7 @@ app.put("/users/:userId", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.delete("/users/:userId", asyncHandler(async (req, res) => {
+app.delete("/users/:userId", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.deleteRfidUser(req.params.userId, {
     source: "web",
     actor: getSessionActor(req)
@@ -572,23 +583,25 @@ app.delete("/users/:userId", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.put("/rfid-items/:itemId", asyncHandler(async (req, res) => {
+app.put("/rfid-items/:itemId", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.updateRfidItem(req.params.itemId, {
     name: req.body.name,
     tagId: req.body.tagId,
     itemType: req.body.itemType
   }, {
     source: "web",
-    actor: getSessionActor(req)
+    actor: getSessionActor(req),
+    role: req.session?.role
   });
 
   res.json(result);
 }));
 
-app.delete("/rfid-items/:itemId", asyncHandler(async (req, res) => {
+app.delete("/rfid-items/:itemId", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.deleteRfidItem(req.params.itemId, {
     source: "web",
-    actor: getSessionActor(req)
+    actor: getSessionActor(req),
+    role: req.session?.role
   });
 
   res.json(result);
@@ -765,7 +778,7 @@ app.get("/logs", asyncHandler(async (req, res) => {
   res.json(logs);
 }));
 
-app.post("/logs/clear", asyncHandler(async (req, res) => {
+app.post("/logs/clear", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.clearLogs({
     source: "web",
     actor: getSessionActor(req)

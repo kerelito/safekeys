@@ -27,7 +27,16 @@ let selectedLockerDetailsNumber = null;
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
   karta: "Karta",
-  inne: "Inne"
+  inne: "Inne",
+  klucz_master: "Klucz master",
+  karta_master: "Karta master"
+};
+
+const PANEL_ROLE_LABELS = {
+  master: "Master",
+  admin: "Administrator",
+  operator: "Operator",
+  viewer: "Podgląd"
 };
 
 const STATUS_ELEMENT_IDS = {
@@ -381,16 +390,70 @@ function updateUserChip() {
   }
 
   document.getElementById("userDisplayName").innerText = currentUser.displayName;
-  document.getElementById("userUsername").innerText = `@${currentUser.username} · ${currentUser.role === "master" ? "master" : "admin"}`;
+  document.getElementById("userUsername").innerText = `@${currentUser.username} · ${getPanelRoleLabel(currentUser.role)}`;
   chip.classList.remove("hidden");
 }
 
 function updateMasterUi() {
   const isMaster = Boolean(currentUser?.isMaster);
+  const canManageRfid = canManageRfidConfig();
+  const canOperate = canOperateLockers();
   document.getElementById("panelUsersMenuLink").classList.toggle("hidden", !isMaster);
+  document.querySelectorAll("[data-rfid-admin-only]").forEach(element => {
+    element.classList.toggle("hidden", !canManageRfid);
+  });
+  document.querySelectorAll("[data-rfid-readonly-note]").forEach(element => {
+    element.classList.toggle("hidden", canManageRfid);
+  });
+  document.querySelectorAll("[data-operation-only]").forEach(element => {
+    element.classList.toggle("hidden", !canOperate);
+  });
+  document.querySelectorAll("[data-master-only]").forEach(element => {
+    element.classList.toggle("hidden", !isMaster);
+  });
+  updateRfidItemTypeOptions();
+  renderRfidUsers();
+  renderRfidItems();
 
   if (!isMaster && currentPage === "panelUsers") {
     setPage("dashboard");
+  }
+}
+
+function getPanelRoleLabel(role) {
+  return PANEL_ROLE_LABELS[role] || "Podgląd";
+}
+
+function canOperateLockers() {
+  return ["master", "admin", "operator"].includes(currentUser?.role);
+}
+
+function canManageRfidConfig() {
+  return ["master", "admin"].includes(currentUser?.role);
+}
+
+function canManageMasterRfid() {
+  return currentUser?.role === "master";
+}
+
+function isMasterRfidItem(item) {
+  return ["klucz_master", "karta_master"].includes(item?.itemType);
+}
+
+function updateRfidItemTypeOptions() {
+  const select = document.getElementById("rfidItemType");
+  if (!select) {
+    return;
+  }
+
+  const canUseMasterTypes = canManageMasterRfid();
+  select.querySelectorAll("[data-master-option]").forEach(option => {
+    option.disabled = !canUseMasterTypes;
+    option.hidden = !canUseMasterTypes;
+  });
+
+  if (!canUseMasterTypes && isMasterRfidItem({ itemType: select.value })) {
+    select.value = "brelok";
   }
 }
 
@@ -882,6 +945,7 @@ function resetRfidItemForm() {
   document.getElementById("rfidItemId").value = "";
   document.getElementById("rfidItemName").value = "";
   document.getElementById("rfidItemTagId").value = "";
+  updateRfidItemTypeOptions();
   document.getElementById("rfidItemType").value = "brelok";
   document.getElementById("rfidItemSubmit").textContent = "Dodaj przedmiot";
   renderRfidAssignmentStatus();
@@ -903,6 +967,11 @@ function getSelectedAllowedLockers() {
 }
 
 function populateRfidUserForm(user) {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do edycji użytkowników RFID.", true);
+    return;
+  }
+
   document.getElementById("rfidUserId").value = user._id;
   document.getElementById("rfidUserName").value = user.name;
   document.getElementById("rfidUserTagId").value = user.tagId;
@@ -914,6 +983,17 @@ function populateRfidUserForm(user) {
 }
 
 function populateRfidItemForm(item) {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do edycji przedmiotów RFID.", true);
+    return;
+  }
+
+  if (isMasterRfidItem(item) && !canManageMasterRfid()) {
+    showToast("Tylko użytkownik master może edytować administracyjne tagi RFID.", true);
+    return;
+  }
+
+  updateRfidItemTypeOptions();
   document.getElementById("rfidItemId").value = item._id;
   document.getElementById("rfidItemName").value = item.name;
   document.getElementById("rfidItemTagId").value = item.tagId;
@@ -969,6 +1049,7 @@ function describeDetectedItem(data) {
 function renderRfidUsers() {
   const container = document.getElementById("rfidUsersList");
   const query = getSearchValue("rfidUsersSearch");
+  const canManage = canManageRfidConfig();
   const getAllowedLockers = user => Array.isArray(user.allowedLockers) ? user.allowedLockers : [];
   const visibleUsers = rfidUsersData.filter(user => matchesSearch([
     user.name,
@@ -1012,18 +1093,20 @@ function renderRfidUsers() {
     const actions = document.createElement("div");
     actions.className = "user-card-actions";
 
-    const editButton = document.createElement("button");
-    editButton.className = "secondary-button";
-    editButton.textContent = "Edytuj";
-    editButton.addEventListener("click", () => populateRfidUserForm(user));
+    if (canManage) {
+      const editButton = document.createElement("button");
+      editButton.className = "secondary-button";
+      editButton.textContent = "Edytuj";
+      editButton.addEventListener("click", () => populateRfidUserForm(user));
 
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "danger";
-    deleteButton.textContent = "Usuń";
-    deleteButton.addEventListener("click", () => deleteRfidUser(user._id, user.name));
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "danger";
+      deleteButton.textContent = "Usuń";
+      deleteButton.addEventListener("click", () => deleteRfidUser(user._id, user.name));
 
-    actions.appendChild(editButton);
-    actions.appendChild(deleteButton);
+      actions.appendChild(editButton);
+      actions.appendChild(deleteButton);
+    }
     header.appendChild(meta);
     header.appendChild(actions);
 
@@ -1038,7 +1121,9 @@ function renderRfidUsers() {
 
     const copy = document.createElement("p");
     copy.className = "user-card-copy";
-    copy.textContent = `Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}. UID użytkownika jest gotowe do użycia na czytniku.`;
+    copy.textContent = canManage
+      ? `Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}. UID użytkownika jest gotowe do użycia na czytniku.`
+      : `Tryb podglądu. Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}.`;
 
     card.appendChild(header);
     card.appendChild(lockers);
@@ -1050,6 +1135,7 @@ function renderRfidUsers() {
 function renderRfidItems() {
   const container = document.getElementById("rfidItemsList");
   const query = getSearchValue("rfidItemsSearch");
+  const canManage = canManageRfidConfig();
   const visibleItems = rfidItemsData.filter(item => matchesSearch([
     item.name,
     item.tagId,
@@ -1099,25 +1185,36 @@ function renderRfidItems() {
 
     const actions = document.createElement("div");
     actions.className = "user-card-actions";
+    const canEditItem = canManage && (!isMasterRfidItem(item) || canManageMasterRfid());
 
-    const editButton = document.createElement("button");
-    editButton.className = "secondary-button";
-    editButton.textContent = "Edytuj";
-    editButton.addEventListener("click", () => populateRfidItemForm(item));
+    if (canEditItem) {
+      const editButton = document.createElement("button");
+      editButton.className = "secondary-button";
+      editButton.textContent = "Edytuj";
+      editButton.addEventListener("click", () => populateRfidItemForm(item));
 
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "danger";
-    deleteButton.textContent = "Usuń";
-    deleteButton.addEventListener("click", () => deleteRfidItem(item._id, item.name));
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "danger";
+      deleteButton.textContent = "Usuń";
+      deleteButton.addEventListener("click", () => deleteRfidItem(item));
 
-    actions.appendChild(editButton);
-    actions.appendChild(deleteButton);
+      actions.appendChild(editButton);
+      actions.appendChild(deleteButton);
+    }
     header.appendChild(meta);
     header.appendChild(actions);
 
     const copy = document.createElement("p");
     copy.className = "user-card-copy";
-    copy.textContent = `Typ: ${getItemTypeLabel(item.itemType)}. UID ${item.tagId} będzie widoczne w logach i statusie skrytek jako znany przedmiot.`;
+    if (isMasterRfidItem(item)) {
+      copy.textContent = canManageMasterRfid()
+        ? `Administracyjny tag RFID. Przyłożenie UID ${item.tagId} daje dostęp master do skrytek.`
+        : "Administracyjny tag RFID. Szczegóły i edycja są dostępne tylko dla roli master.";
+    } else {
+      copy.textContent = canManage
+        ? `Typ: ${getItemTypeLabel(item.itemType)}. UID ${item.tagId} będzie widoczne w logach i statusie skrytek jako znany przedmiot.`
+        : `Tryb podglądu. Typ: ${getItemTypeLabel(item.itemType)}, UID: ${item.tagId}.`;
+    }
 
     card.appendChild(header);
     card.appendChild(chips);
@@ -1131,6 +1228,13 @@ function renderRfidAssignmentStatus() {
   const button = document.getElementById("assignRfidTagButton");
   const itemName = document.getElementById("rfidItemName").value.trim();
   const esp32Connected = Boolean(systemStatusData?.esp32?.connected);
+
+  if (!canManageRfidConfig()) {
+    status.textContent = "Nadawanie tagów RFID jest dostępne tylko dla ról master i administrator.";
+    button.disabled = true;
+    button.textContent = "Brak uprawnień";
+    return;
+  }
 
   if (!esp32Connected) {
     status.textContent = "Nadawanie taga jest dostępne tylko wtedy, gdy panel ma aktywne połączenie z ESP32.";
@@ -1173,7 +1277,7 @@ function renderPanelUsers() {
     user.displayName,
     user.username,
     user.role,
-    user.role === "master" ? "master" : "administrator"
+    getPanelRoleLabel(user.role)
   ], query));
 
   container.innerHTML = "";
@@ -1218,7 +1322,7 @@ function renderPanelUsers() {
 
     const roleChip = document.createElement("span");
     roleChip.className = "user-locker-chip";
-    roleChip.textContent = user.role === "master" ? "Master" : "Administrator";
+    roleChip.textContent = getPanelRoleLabel(user.role);
     chips.appendChild(roleChip);
 
     const actions = document.createElement("div");
@@ -1242,9 +1346,13 @@ function renderPanelUsers() {
 
     const copy = document.createElement("p");
     copy.className = "user-card-copy";
-    copy.textContent = user.role === "master"
-      ? "To konto ma pełny dostęp do zarządzania operatorami i konfiguracją panelu."
-      : "To konto ma dostęp administracyjny do codziennej obsługi systemu.";
+    const roleDescriptions = {
+      master: "Pełny dostęp: konta panelu, konfiguracja RFID, tagi master i operacje na skrytkach.",
+      admin: "Dostęp administracyjny: konfiguracja RFID, logi i codzienna obsługa skrytek.",
+      operator: "Dostęp operacyjny: generowanie kodów, otwieranie skrytek i dezaktywacja dostępów.",
+      viewer: "Tryb podglądu: bez możliwości wykonywania operacji ani zmian konfiguracji."
+    };
+    copy.textContent = roleDescriptions[user.role] || roleDescriptions.viewer;
 
     card.appendChild(header);
     card.appendChild(chips);
@@ -1299,6 +1407,11 @@ async function loadPanelUsers() {
 async function submitRfidUserForm(event) {
   event.preventDefault();
 
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do zarządzania użytkownikami RFID.", true);
+    return;
+  }
+
   const userId = document.getElementById("rfidUserId").value;
   const payload = {
     name: document.getElementById("rfidUserName").value.trim(),
@@ -1333,11 +1446,23 @@ async function submitRfidUserForm(event) {
 async function submitRfidItemForm(event) {
   event.preventDefault();
 
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do zarządzania przedmiotami RFID.", true);
+    return;
+  }
+
   const itemId = document.getElementById("rfidItemId").value;
+  const itemType = document.getElementById("rfidItemType").value;
+
+  if (isMasterRfidItem({ itemType }) && !canManageMasterRfid()) {
+    showToast("Tylko użytkownik master może dodawać administracyjne tagi RFID.", true);
+    return;
+  }
+
   const payload = {
     name: document.getElementById("rfidItemName").value.trim(),
     tagId: document.getElementById("rfidItemTagId").value.trim(),
-    itemType: document.getElementById("rfidItemType").value
+    itemType
   };
 
   try {
@@ -1367,6 +1492,11 @@ async function submitRfidItemForm(event) {
 }
 
 async function startRfidTagAssignment() {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do nadawania tagów RFID.", true);
+    return;
+  }
+
   const itemName = document.getElementById("rfidItemName").value.trim();
 
   try {
@@ -1420,6 +1550,11 @@ async function submitPanelUserForm(event) {
 }
 
 async function deleteRfidUser(userId, name) {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do usuwania użytkowników RFID.", true);
+    return;
+  }
+
   const confirmed = await confirmAction({
     title: "Usunąć użytkownika RFID?",
     message: `Użytkownik ${name} straci dostęp kartą RFID do przypisanych skrytek.`,
@@ -1442,10 +1577,20 @@ async function deleteRfidUser(userId, name) {
   }
 }
 
-async function deleteRfidItem(itemId, name) {
+async function deleteRfidItem(item) {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do usuwania przedmiotów RFID.", true);
+    return;
+  }
+
+  if (isMasterRfidItem(item) && !canManageMasterRfid()) {
+    showToast("Tylko użytkownik master może usuwać administracyjne tagi RFID.", true);
+    return;
+  }
+
   const confirmed = await confirmAction({
     title: "Usunąć przedmiot RFID?",
-    message: `Przedmiot ${name} przestanie być rozpoznawany po czytelnej nazwie w panelu i logach.`,
+    message: `Przedmiot ${item.name} przestanie być rozpoznawany po czytelnej nazwie w panelu i logach.`,
     confirmLabel: "Usuń przedmiot"
   });
 
@@ -1454,7 +1599,7 @@ async function deleteRfidItem(itemId, name) {
   }
 
   try {
-    await apiFetch(`/rfid-items/${itemId}`, {
+    await apiFetch(`/rfid-items/${item._id}`, {
       method: "DELETE"
     });
     showToast("Przedmiot RFID usunięty.");
@@ -1490,6 +1635,11 @@ async function deletePanelUser(userId, name) {
 }
 
 async function generateCode() {
+  if (!canOperateLockers()) {
+    showToast("Nie masz uprawnień do generowania kodów.", true);
+    return;
+  }
+
   if (isGeneratingCode) {
     return;
   }
@@ -1589,7 +1739,9 @@ async function loadLockers() {
       statusButton.textContent = "Szczegóły";
       statusButton.addEventListener("click", () => openLockerDetails(l));
 
-      actions.appendChild(openButton);
+      if (canOperateLockers()) {
+        actions.appendChild(openButton);
+      }
       actions.appendChild(statusButton);
       chamber.appendChild(header);
       chamber.appendChild(icons);
@@ -1844,6 +1996,11 @@ async function loadRemoteActions() {
 }
 
 async function openLocker(locker) {
+  if (!canOperateLockers()) {
+    showToast("Nie masz uprawnień do otwierania skrytek.", true);
+    return;
+  }
+
   try {
     await apiFetch("/open-locker", {
       method: "POST",
@@ -1861,6 +2018,11 @@ async function openLocker(locker) {
 }
 
 async function releaseAllLockers() {
+  if (!canOperateLockers()) {
+    showToast("Nie masz uprawnień do zwalniania skrytek.", true);
+    return;
+  }
+
   const confirmed = await confirmAction({
     title: "Zwolnić wszystkie skrytki?",
     message: "To wyśle do urządzenia polecenie zwolnienia blokady wszystkich skrytek.",
@@ -1935,7 +2097,9 @@ async function loadActiveCodes() {
       meta.appendChild(timer);
       row.appendChild(meta);
       row.appendChild(copyButton);
-      row.appendChild(button);
+      if (canOperateLockers()) {
+        row.appendChild(button);
+      }
       li.appendChild(row);
       list.appendChild(li);
     });
@@ -1975,6 +2139,11 @@ function updateCountdowns() {
 }
 
 async function deactivate(code) {
+  if (!canOperateLockers()) {
+    showToast("Nie masz uprawnień do dezaktywacji kodów.", true);
+    return;
+  }
+
   try {
     await apiFetch("/deactivate-code", {
       method: "POST",
@@ -2171,6 +2340,11 @@ function exportBackup() {
 }
 
 async function clearLogs() {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do czyszczenia logów.", true);
+    return;
+  }
+
   const confirmed = await confirmAction({
     title: "Wyczyścić logi?",
     message: "Ta operacja usunie widoczną historię zdarzeń z bazy danych.",

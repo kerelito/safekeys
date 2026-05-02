@@ -1,5 +1,7 @@
 const ALLOWED_LOCKERS = [1, 2, 3];
 const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
+const PANEL_ROLES = ["master", "admin", "operator", "viewer"];
+const RFID_ITEM_TYPES = ["brelok", "karta", "inne", "klucz_master", "karta_master"];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function createHttpError(status, message) {
@@ -71,7 +73,7 @@ function assertValidRfidItemName(name) {
 }
 
 function assertValidRfidItemType(itemType) {
-  if (!["brelok", "karta", "inne"].includes(itemType)) {
+  if (!RFID_ITEM_TYPES.includes(itemType)) {
     throw createHttpError(400, "Wybierz prawidlowy typ przedmiotu RFID.");
   }
 
@@ -99,7 +101,7 @@ function assertValidPanelDisplayName(displayName) {
 }
 
 function assertValidPanelRole(role) {
-  if (!["master", "admin"].includes(role)) {
+  if (!PANEL_ROLES.includes(role)) {
     throw createHttpError(400, "Nieprawidlowa rola uzytkownika panelu.");
   }
 
@@ -156,6 +158,8 @@ function assertValidAllowedLockers(allowedLockers) {
 module.exports = {
   ALLOWED_HOURS,
   ALLOWED_LOCKERS,
+  PANEL_ROLES,
+  RFID_ITEM_TYPES,
   assertValidAllowedLockers,
   assertValidCode,
   assertValidDoorClosed,
