@@ -2738,3 +2738,236 @@ select:focus,
     grid-template-columns: 1fr;
   }
 }
+
+/* Visual cleanup pass */
+.card {
+  overflow: hidden;
+}
+
+.logs .section-header,
+.locker-map-card .section-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+}
+
+.logs .section-copy,
+.locker-map-card .section-copy {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.logs .section-actions,
+.locker-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.logs .section-actions button,
+.locker-toolbar button,
+.log-filters button {
+  width: auto;
+  min-width: 138px;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  box-shadow: none;
+}
+
+.logs .section-actions .danger,
+.locker-toolbar .danger {
+  border-radius: 16px;
+  background: linear-gradient(135deg, #ff6f7a, #f04473);
+  border-color: rgba(255, 140, 155, 0.38);
+  box-shadow: 0 16px 34px rgba(240, 68, 115, 0.18);
+}
+
+.logs .panel-counter {
+  min-width: 72px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.log-filters {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  padding: 14px;
+  border: 1px solid var(--surface-border);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.025);
+}
+
+.log-filters .search-field {
+  grid-column: 1 / -1;
+}
+
+.log-filters button {
+  justify-self: start;
+  grid-column: 1 / -1;
+}
+
+.log-filters .field,
+.list-toolbar .field,
+.log-filters input,
+.log-filters select,
+.list-toolbar input {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.mini-field input,
+.mini-field select {
+  border-radius: 12px;
+  background: rgba(7, 16, 30, 0.72);
+}
+
+:root[data-theme="light"] .mini-field input,
+:root[data-theme="light"] .mini-field select {
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.search-field input {
+  background-image: none;
+}
+
+#logs {
+  display: grid;
+  gap: 12px;
+}
+
+#logs li {
+  padding: 0;
+  overflow: hidden;
+}
+
+.log-entry {
+  align-items: stretch;
+  padding: 14px 14px 14px 16px;
+}
+
+.log-entry-text {
+  display: flex;
+  align-items: center;
+  color: inherit;
+  font-weight: 650;
+}
+
+.log-details-trigger {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--surface-border);
+  color: var(--muted);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 15px;
+  line-height: 1;
+  box-shadow: none;
+  text-transform: uppercase;
+}
+
+.log-details-trigger:hover {
+  color: var(--text);
+  background: var(--surface-strong);
+  box-shadow: none;
+}
+
+.lockers-rack {
+  gap: 16px;
+}
+
+.locker-chamber {
+  padding: 20px;
+  border-radius: 22px;
+  background:
+    linear-gradient(145deg, rgba(255,255,255,0.045), rgba(255,255,255,0.015)),
+    rgba(10, 18, 32, 0.44);
+}
+
+.chamber-icons {
+  gap: 10px;
+}
+
+.state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.state-icon span {
+  margin-right: auto;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.state-icon strong {
+  font-size: 14px;
+  color: inherit;
+}
+
+.state-icon::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 4px rgba(107, 197, 255, 0.12);
+}
+
+.state-icon .status-glyph {
+  display: none;
+}
+
+.locker-chamber .locker-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.locker-chamber .locker-actions button {
+  min-width: 0;
+  border-radius: 14px;
+  min-height: 48px;
+  box-shadow: none;
+}
+
+@media (max-width: 1180px) {
+  .logs .section-header,
+  .locker-map-card .section-header {
+    grid-template-columns: 1fr;
+  }
+
+  .logs .section-actions,
+  .locker-toolbar {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .log-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .logs .section-actions button,
+  .locker-toolbar button {
+    width: 100%;
+  }
+}

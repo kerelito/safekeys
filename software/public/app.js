@@ -683,8 +683,8 @@ function createEmailDeliveryChip(codeData) {
 
   chip.className = `code-chip ${failedDelivery ? "is-warning" : "is-success"}`;
   chip.textContent = failedDelivery
-    ? `📭 ${codeData.recipientEmail}`
-    : `✉ ${codeData.recipientEmail}`;
+    ? `E-mail: błąd · ${codeData.recipientEmail}`
+    : `E-mail wysłany · ${codeData.recipientEmail}`;
 
   if (codeData.emailDeliveryError) {
     chip.title = codeData.emailDeliveryError;
@@ -1447,7 +1447,7 @@ async function generateCode() {
         !data.emailDelivery.sent
       );
     } else {
-      showToast("Kod wygenerowany 🚀");
+      showToast("Kod wygenerowany.");
     }
 
     await loadActiveCodes();
@@ -1490,8 +1490,8 @@ async function loadLockers() {
       const icons = document.createElement("div");
       icons.className = "chamber-icons";
       icons.innerHTML = `
-        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza"><span class="status-glyph key" aria-hidden="true"></span>${l.hasTag ? "obecny" : "brak"}</span>
-        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span class="status-glyph door" aria-hidden="true"></span>${l.isDoorClosed ? "zamknięte" : "otwarte"}</span>
+        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza"><span>Klucz</span><strong>${l.hasTag ? "obecny" : "brak"}</strong></span>
+        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span>Drzwi</span><strong>${l.isDoorClosed ? "zamknięte" : "otwarte"}</strong></span>
       `;
 
       const actions = document.createElement("div");
@@ -1503,7 +1503,7 @@ async function loadLockers() {
 
       const statusButton = document.createElement("button");
       statusButton.className = "secondary-button";
-      statusButton.textContent = "Info";
+      statusButton.textContent = "Szczegóły";
       statusButton.addEventListener("click", () => {
         const detectedItem = describeDetectedItem(l);
         showToast(`S${l.locker}: ${detectedItem.title}. ${detectedItem.meta}`);
@@ -1664,7 +1664,7 @@ function updateCountdowns() {
     const m = Math.floor((s % 3600) / 60);
     const sec = s % 60;
 
-    el.querySelector(".timer").innerText = `⏱ ${h}h ${m}m ${sec}s`;
+    el.querySelector(".timer").innerText = `Wygasa za ${h}h ${m}m ${sec}s`;
   });
 }
 
@@ -1710,18 +1710,18 @@ function addLog(log, options = {}) {
       cls = "log-error";
       break;
     case "CODE_GENERATED":
-      text = `➕ kod ${log.code}`;
+      text = `Wygenerowano kod ${log.code}`;
       break;
     case "CODE_EMAIL_SENT":
-      text = `✉️ wysłano kod ${log.code}`;
+      text = `Wysłano kod ${log.code} e-mailem`;
       cls = "log-success";
       break;
     case "CODE_EMAIL_FAILED":
-      text = `📭 błąd wysyłki kodu ${log.code}`;
+      text = `Błąd wysyłki kodu ${log.code}`;
       cls = "log-error";
       break;
     case "CODE_DEACTIVATED":
-      text = `🚫 kod ${log.code}`;
+      text = `Dezaktywowano kod ${log.code}`;
       cls = "log-warning";
       break;
     case "KEY_REMOVED":
@@ -1729,7 +1729,7 @@ function addLog(log, options = {}) {
       cls = "log-warning";
       break;
     case "KEY_RETURNED":
-      text = `📥 zwrócony S${log.locker}${itemLabel}`;
+      text = `Zwrócony klucz S${log.locker}${itemLabel}`;
       cls = "log-success";
       break;
     case "LOCKER_DOOR_OPENED":
@@ -1741,48 +1741,48 @@ function addLog(log, options = {}) {
       cls = "log-success";
       break;
     case "REMOTE_UNLOCK_REQUESTED":
-      text = `🛰️ zdalne otwarcie S${log.locker}`;
+      text = `Zdalne otwarcie S${log.locker}`;
       break;
     case "REMOTE_RELEASE_ALL_REQUESTED":
-      text = "⚠️ zwolniono blokade wszystkich skrytek";
+      text = "Zwolniono blokadę wszystkich skrytek";
       cls = "log-warning";
       break;
     case "RFID_ACCESS_GRANTED":
-      text = `🪪 autoryzowany tag RFID${itemLabel}`;
+      text = `Autoryzowany tag RFID${itemLabel}`;
       cls = "log-success";
       break;
     case "RFID_ACCESS_DENIED":
-      text = `⛔ odrzucony tag RFID${itemLabel}`;
+      text = `Odrzucony tag RFID${itemLabel}`;
       cls = "log-error";
       break;
     case "RFID_USER_CREATED":
-      text = "👤 dodano użytkownika RFID";
+      text = "Dodano użytkownika RFID";
       break;
     case "RFID_USER_UPDATED":
-      text = "🛠️ zaktualizowano użytkownika RFID";
+      text = "Zaktualizowano użytkownika RFID";
       break;
     case "RFID_USER_DELETED":
-      text = "🗑️ usunięto użytkownika RFID";
+      text = "Usunięto użytkownika RFID";
       cls = "log-warning";
       break;
     case "RFID_ITEM_CREATED":
-      text = "🏷️ dodano przedmiot RFID";
+      text = "Dodano przedmiot RFID";
       break;
     case "RFID_ITEM_UPDATED":
-      text = "🛠️ zaktualizowano przedmiot RFID";
+      text = "Zaktualizowano przedmiot RFID";
       break;
     case "RFID_ITEM_DELETED":
-      text = "🗑️ usunięto przedmiot RFID";
+      text = "Usunięto przedmiot RFID";
       cls = "log-warning";
       break;
     case "PANEL_USER_CREATED":
-      text = "🧑 dodano użytkownika panelu";
+      text = "Dodano użytkownika panelu";
       break;
     case "PANEL_USER_UPDATED":
-      text = "🛠️ zaktualizowano użytkownika panelu";
+      text = "Zaktualizowano użytkownika panelu";
       break;
     case "PANEL_USER_DELETED":
-      text = "🗑️ usunięto użytkownika panelu";
+      text = "Usunięto użytkownika panelu";
       cls = "log-warning";
       break;
     case "AUTH_LOGIN":
@@ -1819,7 +1819,7 @@ function addLog(log, options = {}) {
   const detailsButton = document.createElement("button");
   detailsButton.type = "button";
   detailsButton.className = "log-details-trigger";
-  detailsButton.textContent = "ℹ️";
+  detailsButton.textContent = "i";
   detailsButton.title = "Pokaż szczegóły logu";
   detailsButton.setAttribute("aria-label", "Pokaż szczegóły logu");
   detailsButton.addEventListener("click", () => openLogDetails(log, text));
