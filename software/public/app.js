@@ -1490,8 +1490,8 @@ async function loadLockers() {
       const icons = document.createElement("div");
       icons.className = "chamber-icons";
       icons.innerHTML = `
-        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza">🔑 ${l.hasTag ? "obecny" : "brak"}</span>
-        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi">🚪 ${l.isDoorClosed ? "zamknięte" : "otwarte"}</span>
+        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza"><span class="status-glyph key" aria-hidden="true"></span>${l.hasTag ? "obecny" : "brak"}</span>
+        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span class="status-glyph door" aria-hidden="true"></span>${l.isDoorClosed ? "zamknięte" : "otwarte"}</span>
       `;
 
       const actions = document.createElement("div");
@@ -1676,7 +1676,7 @@ async function deactivate(code) {
       body: JSON.stringify({ code })
     });
 
-    showToast("Kod dezaktywowany ❌");
+    showToast("Kod dezaktywowany");
     await loadActiveCodes();
     await loadAlerts();
   } catch (error) {
@@ -1702,11 +1702,11 @@ function addLog(log, options = {}) {
 
   switch (log.event) {
     case "LOCKER_OPENED":
-      text = `🔓 S${log.locker} kod ${log.code}`;
+      text = `Odblokowano S${log.locker} kod ${log.code}`;
       cls = "log-success";
       break;
     case "INVALID_CODE":
-      text = `❌ zły kod ${log.code}`;
+      text = `Błędny kod ${log.code}`;
       cls = "log-error";
       break;
     case "CODE_GENERATED":
@@ -1725,7 +1725,7 @@ function addLog(log, options = {}) {
       cls = "log-warning";
       break;
     case "KEY_REMOVED":
-      text = `🔑 wyjęty S${log.locker}${itemLabel}`;
+      text = `Wyjęty klucz S${log.locker}${itemLabel}`;
       cls = "log-warning";
       break;
     case "KEY_RETURNED":
@@ -1733,11 +1733,11 @@ function addLog(log, options = {}) {
       cls = "log-success";
       break;
     case "LOCKER_DOOR_OPENED":
-      text = `🚪 otwarte drzwiczki S${log.locker}`;
+      text = `Otwarte drzwiczki S${log.locker}`;
       cls = "log-warning";
       break;
     case "LOCKER_DOOR_CLOSED":
-      text = `✅ domknięte drzwiczki S${log.locker}`;
+      text = `Domknięte drzwiczki S${log.locker}`;
       cls = "log-success";
       break;
     case "REMOTE_UNLOCK_REQUESTED":

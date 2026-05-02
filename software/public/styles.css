@@ -2688,6 +2688,23 @@ select:focus,
   background: rgba(255,255,255,0.02);
 }
 
+.state-icon .status-glyph {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.state-icon .status-glyph.key {
+  background-image: url('/assets/icon-key.svg');
+}
+
+.state-icon .status-glyph.door {
+  background-image: url('/assets/icon-door.svg');
+}
+
 .state-icon.good { color: var(--status-good); }
 .state-icon.warn { color: var(--status-warn); }
 .state-icon.bad { color: var(--status-alert); }
