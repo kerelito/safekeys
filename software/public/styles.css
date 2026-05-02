@@ -3265,3 +3265,288 @@ select:focus,
     flex-direction: column;
   }
 }
+
+/* Dashboard refinement */
+.dashboard {
+  grid-template-columns: minmax(0, 1.46fr) minmax(360px, 420px);
+  gap: 22px;
+}
+
+.dashboard-logs {
+  grid-column: 1 / -1;
+}
+
+.dashboard-side {
+  gap: 18px;
+}
+
+.dashboard-side .card {
+  box-shadow: 0 18px 48px rgba(32, 56, 95, 0.1);
+}
+
+.hero-card {
+  padding: 24px;
+}
+
+.hero-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.hero-title {
+  max-width: 760px;
+  font-size: clamp(34px, 3vw, 44px);
+}
+
+.locker-map-card {
+  padding: 28px;
+  border-color: color-mix(in srgb, var(--accent-2) 18%, var(--line));
+  background:
+    radial-gradient(circle at 14% 0%, rgba(107, 197, 255, 0.13), transparent 28%),
+    radial-gradient(circle at 88% 22%, rgba(115, 224, 169, 0.12), transparent 28%),
+    linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.018)),
+    var(--panel-strong);
+}
+
+.locker-map-card .section-header {
+  margin-bottom: 18px;
+}
+
+.locker-map-card .card-title {
+  font-size: clamp(24px, 2.3vw, 32px);
+}
+
+.lockers-rack {
+  gap: 18px;
+}
+
+.locker-chamber {
+  min-height: 230px;
+  padding: 24px;
+  border-radius: 20px;
+  background:
+    linear-gradient(145deg, rgba(255,255,255,0.07), rgba(255,255,255,0.018)),
+    var(--surface-soft);
+}
+
+.locker-name {
+  font-size: 28px;
+}
+
+.state-icon {
+  min-height: 50px;
+  padding: 10px 14px;
+}
+
+.locker-chamber .locker-actions button {
+  min-height: 52px;
+}
+
+.status-summary-grid {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.status-summary-tile {
+  min-height: 78px;
+  padding: 14px 16px;
+}
+
+.alerts-list,
+.remote-actions-list {
+  margin-top: 12px;
+}
+
+.compact-card .section-header,
+.remote-actions-card .section-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.dashboard-logs {
+  min-height: 0;
+  padding: 26px;
+}
+
+.dashboard-logs .section-header {
+  grid-template-columns: minmax(280px, 1fr) auto;
+  align-items: start;
+}
+
+.dashboard-logs .section-copy h2 {
+  font-size: clamp(24px, 2vw, 30px);
+}
+
+.dashboard-logs .section-copy p {
+  max-width: 64ch;
+}
+
+.dashboard-logs .section-actions {
+  align-items: center;
+}
+
+.dashboard-logs .log-filters {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(160px, 0.65fr) minmax(260px, 1.35fr) auto;
+  gap: 12px;
+  padding: 16px;
+}
+
+.dashboard-logs .log-filters .search-field,
+.dashboard-logs .log-filters button {
+  grid-column: auto;
+}
+
+.dashboard-logs .log-filters button {
+  justify-self: end;
+}
+
+.dashboard-logs #logs {
+  max-height: 430px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  overflow-y: auto;
+}
+
+.dashboard-logs #logs li {
+  min-height: 78px;
+}
+
+.dashboard-logs .log-entry {
+  height: 100%;
+}
+
+.master-rfid-chip {
+  color: #07111f;
+  border-color: rgba(255, 207, 102, 0.55);
+  background: linear-gradient(135deg, #ffe08a, #73e0a9);
+  box-shadow: 0 12px 24px rgba(226, 161, 26, 0.16);
+}
+
+:root[data-theme="light"] .master-rfid-chip {
+  color: #0f1c2f;
+}
+
+@media (min-width: 901px) {
+  .topbar-actions .compact-toggle {
+    max-width: 172px;
+  }
+
+  .topbar-actions .logout-button {
+    max-width: 110px;
+  }
+}
+
+@media (max-width: 1180px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-side {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-side .status-summary-card,
+  .dashboard-side .logs {
+    grid-column: auto;
+  }
+
+  .dashboard-logs {
+    grid-column: auto;
+  }
+
+  .dashboard-logs #logs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar-actions {
+    grid-template-columns: 1fr auto;
+  }
+
+  .dashboard-side,
+  .status-summary-grid,
+  .compact-card .section-header,
+  .remote-actions-card .section-header {
+    grid-template-columns: 1fr;
+  }
+
+  .compact-toggle,
+  .logout-button {
+    display: none;
+  }
+
+  .user-chip,
+  .system-status {
+    grid-column: 1 / -1;
+  }
+
+  .system-status {
+    order: 4;
+  }
+
+  .menu-button {
+    grid-column: 2;
+  }
+
+  .hero-header,
+  .dashboard-logs .section-header,
+  .dashboard-logs .log-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-badge {
+    justify-self: start;
+  }
+
+  .dashboard-logs .log-filters .search-field,
+  .dashboard-logs .log-filters button {
+    grid-column: auto;
+  }
+
+  .dashboard-logs .log-filters button {
+    justify-self: stretch;
+  }
+
+  .dashboard-logs #logs {
+    grid-template-columns: 1fr;
+    max-height: none;
+  }
+
+  .locker-chamber {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar-actions {
+    gap: 8px;
+  }
+
+  .theme-toggle {
+    min-height: 42px;
+  }
+
+  .user-chip {
+    min-height: 54px;
+  }
+
+  .system-status {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .status-label {
+    font-size: 10px;
+  }
+
+  .hero-card,
+  .locker-map-card,
+  .dashboard-logs {
+    padding: 20px;
+  }
+
+  .locker-map-card .section-header {
+    margin-bottom: 8px;
+  }
+}

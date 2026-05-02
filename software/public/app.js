@@ -1180,6 +1180,9 @@ function renderRfidItems() {
 
     const typeChip = document.createElement("span");
     typeChip.className = "user-locker-chip";
+    if (isMasterRfidItem(item)) {
+      typeChip.classList.add("master-rfid-chip");
+    }
     typeChip.textContent = getItemTypeLabel(item.itemType);
     chips.appendChild(typeChip);
 
