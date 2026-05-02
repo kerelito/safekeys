@@ -1808,12 +1808,74 @@ function addLog(log, options = {}) {
   }
 
   li.className = cls;
-  li.innerText = `${time} | ${text}`;
+  li.innerHTML = "";
+  const content = document.createElement("div");
+  content.className = "log-entry";
+
+  const textNode = document.createElement("span");
+  textNode.className = "log-entry-text";
+  textNode.textContent = `${time} | ${text}`;
+
+  const detailsButton = document.createElement("button");
+  detailsButton.type = "button";
+  detailsButton.className = "log-details-trigger";
+  detailsButton.textContent = "ℹ️";
+  detailsButton.title = "Pokaż szczegóły logu";
+  detailsButton.setAttribute("aria-label", "Pokaż szczegóły logu");
+  detailsButton.addEventListener("click", () => openLogDetails(log, text));
+
+  content.appendChild(textNode);
+  content.appendChild(detailsButton);
+  li.appendChild(content);
   list.prepend(li);
   list.scrollTop = 0;
   if (options.increment !== false) {
     logsCount += 1;
     updateOverviewMetrics();
+  }
+}
+
+function openLogDetails(log, summaryText) {
+  const overlay = document.getElementById("logDetailsOverlay");
+  const summary = document.getElementById("logDetailsSummary");
+  const detailsList = document.getElementById("logDetailsList");
+  if (!overlay || !summary || !detailsList) {
+    return;
+  }
+
+  summary.textContent = summaryText;
+  detailsList.innerHTML = "";
+
+  const details = [
+    ["Data i czas", log.timestamp ? new Date(log.timestamp).toLocaleString() : "brak danych"],
+    ["Typ zdarzenia", log.event || "brak danych"],
+    ["Kto wykonał", log.actor || "nieznany"],
+    ["Źródło", log.source || "nieznane"],
+    ["Skrytka", log.locker ? `S${log.locker}` : "nie dotyczy"],
+    ["Kod", log.code || "nie dotyczy"],
+    ["Tag RFID", log.tagId || "nie dotyczy"],
+    ["Rozpoznany przedmiot", log.itemKnown ? `${log.itemName || "bez nazwy"} (${getItemTypeLabel(log.itemType || "inne")})` : "nie"],
+    ["Sukces operacji", typeof log.success === "boolean" ? (log.success ? "tak" : "nie") : "brak danych"]
+  ];
+
+  details.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = label;
+    dd.textContent = value;
+    row.appendChild(dt);
+    row.appendChild(dd);
+    detailsList.appendChild(row);
+  });
+
+  overlay.classList.remove("hidden");
+}
+
+function closeLogDetails() {
+  const overlay = document.getElementById("logDetailsOverlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
   }
 }
 
@@ -1971,6 +2033,12 @@ document.getElementById("confirmOverlay").addEventListener("click", event => {
     closeConfirmDialog(false);
   }
 });
+document.getElementById("logDetailsClose").addEventListener("click", closeLogDetails);
+document.getElementById("logDetailsOverlay").addEventListener("click", event => {
+  if (event.target.id === "logDetailsOverlay") {
+    closeLogDetails();
+  }
+});
 document.getElementById("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
 
@@ -2003,6 +2071,11 @@ document.addEventListener("click", event => {
 themeMedia.addEventListener("change", () => {
   if (getStoredTheme() === "system") {
     applyTheme("system");
+  }
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    closeLogDetails();
   }
 });
 updateGenerateButtonLabel();
