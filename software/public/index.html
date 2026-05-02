@@ -55,7 +55,7 @@
 
 <div class="topbar-actions">
 <button id="themeToggle" class="theme-toggle" type="button">Motyw: system</button>
-<button id="compactToggle" class="theme-toggle compact-toggle" type="button">Widok: komfort</button>
+<button id="compactToggle" class="theme-toggle compact-toggle" type="button">Tryb: zaawansowany</button>
 <div id="userChip" class="user-chip hidden">
 <strong id="userDisplayName"></strong>
 <span id="userUsername"></span>
@@ -96,9 +96,9 @@
 <div id="menuDrawer" class="menu-drawer hidden">
 <nav>
 <button class="menu-link active" type="button" data-page="dashboard">Dashboard</button>
-<button class="menu-link" type="button" data-page="users">Użytkownicy RFID</button>
-<button class="menu-link" type="button" data-page="items">Przedmioty RFID</button>
-<button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers">Użytkownicy panelu</button>
+<button class="menu-link" type="button" data-page="users" data-advanced-only="true">Użytkownicy RFID</button>
+<button class="menu-link" type="button" data-page="items" data-advanced-only="true">Przedmioty RFID</button>
+<button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers" data-advanced-only="true">Użytkownicy panelu</button>
 </nav>
 </div>
 
@@ -149,7 +149,7 @@
 </label>
 </div>
 
-<label class="field email-field">
+<label class="field email-field" data-advanced-only="true">
 <span class="field-label">Wyślij kod na e-mail</span>
 <input id="recipientEmail" type="email" inputmode="email" autocomplete="email" placeholder="np. operator@firma.pl">
 <small class="field-help">Opcjonalnie. Jeśli podasz adres, SafeKeys spróbuje wysłać kod automatycznie zaraz po wygenerowaniu.</small>
@@ -203,7 +203,7 @@
 
 </div>
 
-<aside class="dashboard-side">
+<aside class="dashboard-side" data-advanced-only="true">
 <div class="card alerts-card">
 <div class="section-header">
 <div class="section-copy">

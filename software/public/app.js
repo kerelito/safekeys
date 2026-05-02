@@ -486,19 +486,29 @@ function cycleTheme() {
 }
 
 function getStoredDensity() {
-  return localStorage.getItem(COMPACT_STORAGE_KEY) || "comfort";
+  const stored = localStorage.getItem(COMPACT_STORAGE_KEY);
+  if (stored === "compact" || stored === "simple") {
+    return "simple";
+  }
+  return "advanced";
 }
 
 function applyDensity(density) {
-  const normalizedDensity = density === "compact" ? "compact" : "comfort";
-  document.documentElement.dataset.density = normalizedDensity;
-  document.getElementById("compactToggle").innerText = normalizedDensity === "compact"
-    ? "Widok: kompakt"
-    : "Widok: komfort";
+  const normalizedDensity = density === "simple" ? "simple" : "advanced";
+  const legacyDensity = normalizedDensity === "simple" ? "compact" : "comfort";
+  document.documentElement.dataset.density = legacyDensity;
+  document.documentElement.dataset.viewMode = normalizedDensity;
+  document.getElementById("compactToggle").innerText = normalizedDensity === "simple"
+    ? "Tryb: prosty"
+    : "Tryb: zaawansowany";
+
+  if (normalizedDensity === "simple" && currentPage !== "dashboard") {
+    setPage("dashboard");
+  }
 }
 
 function toggleDensity() {
-  const nextDensity = getStoredDensity() === "compact" ? "comfort" : "compact";
+  const nextDensity = getStoredDensity() === "simple" ? "advanced" : "simple";
   localStorage.setItem(COMPACT_STORAGE_KEY, nextDensity);
   applyDensity(nextDensity);
 }

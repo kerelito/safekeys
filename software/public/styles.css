@@ -2418,6 +2418,10 @@ select:focus,
   min-width: 140px;
 }
 
+:root[data-view-mode="simple"] [data-advanced-only="true"] {
+  display: none !important;
+}
+
 .alerts-card {
   border-color: var(--line-strong);
 }
