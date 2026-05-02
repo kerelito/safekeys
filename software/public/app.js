@@ -1466,68 +1466,84 @@ async function loadLockers() {
     const container = document.getElementById("lockers");
     container.innerHTML = "";
 
-    lockersData.forEach(l => {
-      const div = document.createElement("div");
-      div.className = "locker " + (l.hasTag && l.isDoorClosed ? "ok" : "bad");
+    const rack = document.createElement("div");
+    rack.className = "lockers-rack";
 
-      const top = document.createElement("div");
-      top.className = "locker-top";
+    lockersData.forEach(l => {
+      const chamber = document.createElement("article");
+      chamber.className = `locker-chamber state-${getLockerSeverity(l)}`;
+
+      const header = document.createElement("div");
+      header.className = "chamber-header";
 
       const title = document.createElement("h3");
       title.className = "locker-name";
-      title.textContent = `Skrytka ${l.locker}`;
+      title.textContent = `S${l.locker}`;
 
-      const state = document.createElement("div");
-      state.className = "locker-state";
+      const severity = document.createElement("span");
+      severity.className = "chamber-severity";
+      severity.textContent = getLockerSeverityLabel(l);
 
-      const tagBadge = document.createElement("span");
-      tagBadge.className = `locker-badge ${l.hasTag ? "good" : "alert"}`;
-      tagBadge.textContent = l.hasTag ? "RFID: klucz obecny" : "RFID: brak klucza";
+      header.appendChild(title);
+      header.appendChild(severity);
 
-      const doorBadge = document.createElement("span");
-      doorBadge.className = `locker-badge ${l.isDoorClosed ? "good" : "warn"}`;
-      doorBadge.textContent = l.isDoorClosed ? "Drzwiczki: domknięte" : "Drzwiczki: otwarte";
-
-      state.appendChild(tagBadge);
-      state.appendChild(doorBadge);
-      top.appendChild(title);
-      top.appendChild(state);
-
-      const copy = document.createElement("div");
-      copy.className = "locker-copy";
-      const detectedItem = describeDetectedItem(l);
-      copy.textContent = [
-        l.hasTag && l.isDoorClosed
-          ? "Skrytka jest gotowa operacyjnie. Klucz znajduje się na miejscu, a kontrakton potwierdza zamknięcie."
-          : "Skrytka wymaga uwagi operatora. Sprawdź status RFID oraz domknięcie drzwiczek.",
-        `${detectedItem.title}.`,
-        detectedItem.meta
-      ].join(" ");
+      const icons = document.createElement("div");
+      icons.className = "chamber-icons";
+      icons.innerHTML = `
+        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza">🔑 ${l.hasTag ? "obecny" : "brak"}</span>
+        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi">🚪 ${l.isDoorClosed ? "zamknięte" : "otwarte"}</span>
+      `;
 
       const actions = document.createElement("div");
       actions.className = "locker-actions";
 
       const openButton = document.createElement("button");
-      openButton.textContent = `Otwórz S${l.locker}`;
+      openButton.textContent = `Otwórz`;
       openButton.addEventListener("click", () => openLocker(l.locker));
 
-      const refreshButton = document.createElement("button");
-      refreshButton.className = "secondary-button";
-      refreshButton.textContent = "Odśwież";
-      refreshButton.addEventListener("click", loadLockers);
+      const statusButton = document.createElement("button");
+      statusButton.className = "secondary-button";
+      statusButton.textContent = "Info";
+      statusButton.addEventListener("click", () => {
+        const detectedItem = describeDetectedItem(l);
+        showToast(`S${l.locker}: ${detectedItem.title}. ${detectedItem.meta}`);
+      });
 
       actions.appendChild(openButton);
-      actions.appendChild(refreshButton);
-      div.appendChild(top);
-      div.appendChild(copy);
-      div.appendChild(actions);
-      container.appendChild(div);
+      actions.appendChild(statusButton);
+      chamber.appendChild(header);
+      chamber.appendChild(icons);
+      chamber.appendChild(actions);
+      rack.appendChild(chamber);
     });
+
+    container.appendChild(rack);
 
     updateOverviewMetrics();
   } catch (error) {
     showToast(error.message, true);
   }
+}
+
+function getLockerSeverity(locker) {
+  if (locker.hasTag && locker.isDoorClosed) {
+    return "ok";
+  }
+  if (!locker.hasTag && !locker.isDoorClosed) {
+    return "critical";
+  }
+  if (!locker.hasTag) {
+    return "warn";
+  }
+  return "info";
+}
+
+function getLockerSeverityLabel(locker) {
+  const severity = getLockerSeverity(locker);
+  if (severity === "ok") return "OK";
+  if (severity === "critical") return "Błąd";
+  if (severity === "warn") return "Ostrzeżenie";
+  return "Info";
 }
 
 async function openLocker(locker) {
