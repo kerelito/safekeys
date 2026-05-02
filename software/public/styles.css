@@ -2971,3 +2971,142 @@ select:focus,
     width: 100%;
   }
 }
+
+/* Device command visibility */
+.inline-copy-button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--surface-strong);
+  border-color: var(--surface-border);
+  color: var(--text);
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.generated-output-header {
+  gap: 8px;
+}
+
+.remote-actions-card .section-header {
+  gap: 14px;
+}
+
+.remote-actions-card .section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.remote-actions-card .section-actions button {
+  min-width: 120px;
+  min-height: 40px;
+  padding: 9px 14px;
+  border-radius: 14px;
+  box-shadow: none;
+}
+
+.remote-actions-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.remote-action-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--surface-border);
+  border-left: 4px solid var(--accent-2);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.025);
+}
+
+.remote-action-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.remote-action-main strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.remote-action-main span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.remote-action-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-border);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.remote-action-item.is-queued {
+  border-left-color: var(--warning);
+}
+
+.remote-action-item.is-sent {
+  border-left-color: var(--accent-2);
+}
+
+.remote-action-item.is-acknowledged {
+  border-left-color: var(--status-good);
+}
+
+.remote-action-item.is-failed {
+  border-left-color: var(--danger);
+}
+
+.remote-action-item.is-acknowledged .remote-action-status {
+  color: var(--status-good);
+}
+
+.remote-action-item.is-failed .remote-action-status {
+  color: var(--danger);
+}
+
+.code-copy-button {
+  min-width: 88px;
+}
+
+.code-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+@media (max-width: 560px) {
+  .remote-action-item {
+    grid-template-columns: 1fr;
+  }
+
+  .remote-action-status {
+    justify-self: start;
+  }
+
+  .code-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .code-copy-button {
+    width: 100%;
+  }
+}

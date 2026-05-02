@@ -19,6 +19,7 @@ let currentTagAssignment = null;
 let lockersData = [];
 let logsCount = 0;
 let alertsData = [];
+let remoteActionsData = [];
 let confirmResolver = null;
 let logSearchDebounceId = null;
 
@@ -93,6 +94,7 @@ function updateOverviewMetrics() {
 
   setText("activeCodesCount", String(activeCodesData.length));
   setText("logsCount", String(logsCount));
+  setText("remoteActionsCount", String(remoteActionsData.length));
   setText("rfidUsersCount", String(rfidUsersData.length));
   setText("rfidItemsCount", String(rfidItemsData.length));
   setText("panelUsersCount", String(panelUsersData.length));
@@ -400,6 +402,12 @@ function connectSocket() {
   socket.on("active-codes-changed", async () => {
     await loadActiveCodes();
   });
+  socket.on("remote-action-queued", async () => {
+    await loadRemoteActions();
+  });
+  socket.on("remote-action-updated", async () => {
+    await loadRemoteActions();
+  });
   socket.on("logs-cleared", () => {
     logsCount = 0;
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
@@ -544,6 +552,33 @@ function downloadUrl(path) {
   window.location.href = API + path;
 }
 
+async function copyTextToClipboard(value, successMessage = "Skopiowano do schowka.") {
+  const text = String(value || "").trim();
+  if (!text) {
+    showToast("Nie ma czego skopiować.", true);
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    showToast(successMessage);
+  } catch (error) {
+    showToast("Nie udało się skopiować do schowka.", true);
+  }
+}
+
 function renderEmptyState(listId, message) {
   const container = document.getElementById(listId);
   container.innerHTML = "";
@@ -640,6 +675,9 @@ function setGeneratedDeliveryStatus(label = "", variant = "") {
 
 function renderGeneratedCodeResult(data) {
   document.getElementById("generatedCode").innerText = data.code;
+  const copyButton = document.getElementById("copyGeneratedCodeButton");
+  copyButton.classList.remove("hidden");
+  copyButton.dataset.code = data.code;
 
   const meta = document.getElementById("generatedCodeMeta");
   const expiresAt = formatDateTime(data.expiresAt);
@@ -777,6 +815,7 @@ async function initializeDashboard() {
     loadLockers(),
     loadActiveCodes(),
     loadAlerts(),
+    loadRemoteActions(),
     loadLogEvents(),
     loadLogs(),
     loadRfidUsers(),
@@ -1296,6 +1335,7 @@ async function startRfidTagAssignment() {
 
     renderRfidAssignmentStatus();
     showToast("Włączono tryb nadawania taga na master readerze.");
+    await loadRemoteActions();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1546,6 +1586,86 @@ function getLockerSeverityLabel(locker) {
   return "Info";
 }
 
+function getRemoteActionTypeLabel(action) {
+  if (action.type === "OPEN_LOCKER") {
+    return action.locker ? `Otwórz S${action.locker}` : "Otwórz skrytkę";
+  }
+
+  if (action.type === "RELEASE_ALL_LOCKERS") {
+    return "Zwolnij wszystkie";
+  }
+
+  if (action.type === "ASSIGN_RFID_TAG") {
+    return "Nadaj tag RFID";
+  }
+
+  return action.type || "Polecenie";
+}
+
+function getRemoteActionStatusLabel(status) {
+  if (status === "queued") return "W kolejce";
+  if (status === "sent") return "Wysłane";
+  if (status === "acknowledged") return "Potwierdzone";
+  if (status === "failed") return "Błąd";
+  return "Nieznany";
+}
+
+function renderRemoteActions() {
+  const container = document.getElementById("remoteActionsList");
+  if (!container) {
+    return;
+  }
+
+  container.innerHTML = "";
+  setText("remoteActionsCount", String(remoteActionsData.length));
+
+  if (remoteActionsData.length === 0) {
+    renderEmptyState("remoteActionsList", "Nie wysłano jeszcze żadnych poleceń do urządzenia.");
+    return;
+  }
+
+  remoteActionsData.slice(0, 8).forEach(action => {
+    const item = document.createElement("article");
+    item.className = `remote-action-item is-${action.status || "queued"}`;
+
+    const main = document.createElement("div");
+    main.className = "remote-action-main";
+
+    const title = document.createElement("strong");
+    title.textContent = getRemoteActionTypeLabel(action);
+
+    const meta = document.createElement("span");
+    const actor = action.actor ? ` · ${action.actor}` : "";
+    meta.textContent = `${formatRelativeTime(action.createdAt)}${actor}`;
+
+    main.appendChild(title);
+    main.appendChild(meta);
+
+    const status = document.createElement("span");
+    status.className = "remote-action-status";
+    status.textContent = getRemoteActionStatusLabel(action.status);
+
+    item.appendChild(main);
+    item.appendChild(status);
+    container.appendChild(item);
+  });
+}
+
+async function loadRemoteActions() {
+  if (!isAuthenticated) {
+    return;
+  }
+
+  try {
+    remoteActionsData = await apiFetch("/device/actions/history");
+    renderRemoteActions();
+    updateOverviewMetrics();
+  } catch (error) {
+    remoteActionsData = [];
+    renderRemoteActions();
+  }
+}
+
 async function openLocker(locker) {
   try {
     await apiFetch("/open-locker", {
@@ -1557,6 +1677,7 @@ async function openLocker(locker) {
     showToast(`Wysłano polecenie otwarcia S${locker}`);
     await loadLockers();
     await loadAlerts();
+    await loadRemoteActions();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1581,6 +1702,7 @@ async function releaseAllLockers() {
     showToast("Wysłano polecenie zwolnienia wszystkich skrytek.");
     await loadLockers();
     await loadAlerts();
+    await loadRemoteActions();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1623,12 +1745,19 @@ async function loadActiveCodes() {
       button.textContent = "Wyłącz";
       button.addEventListener("click", () => deactivate(c.code));
 
+      const copyButton = document.createElement("button");
+      copyButton.className = "secondary-button code-copy-button";
+      copyButton.type = "button";
+      copyButton.textContent = "Kopiuj";
+      copyButton.addEventListener("click", () => copyTextToClipboard(c.code, `Skopiowano kod ${c.code}.`));
+
       meta.appendChild(label);
       if (deliveryChip) {
         meta.appendChild(deliveryChip);
       }
       meta.appendChild(timer);
       row.appendChild(meta);
+      row.appendChild(copyButton);
       row.appendChild(button);
       li.appendChild(row);
       list.appendChild(li);
@@ -2004,6 +2133,9 @@ document.getElementById("themeToggle").addEventListener("click", cycleTheme);
 document.getElementById("compactToggle").addEventListener("click", toggleDensity);
 document.getElementById("menuButton").setAttribute("aria-expanded", "false");
 document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
+document.getElementById("copyGeneratedCodeButton").addEventListener("click", event => {
+  copyTextToClipboard(event.currentTarget.dataset.code, "Skopiowano wygenerowany kod.");
+});
 document.getElementById("recipientEmail").addEventListener("input", updateGenerateButtonLabel);
 document.querySelectorAll(".menu-link").forEach(link => {
   link.addEventListener("click", () => setPage(link.dataset.page));
@@ -2026,6 +2158,7 @@ document.getElementById("logSearchInput").addEventListener("input", scheduleLoad
 document.getElementById("logFilterReset").addEventListener("click", resetLogFilters);
 document.getElementById("exportLogsButton").addEventListener("click", exportLogs);
 document.getElementById("backupExportButton").addEventListener("click", exportBackup);
+document.getElementById("refreshRemoteActionsButton").addEventListener("click", loadRemoteActions);
 document.getElementById("confirmCancel").addEventListener("click", () => closeConfirmDialog(false));
 document.getElementById("confirmAccept").addEventListener("click", () => closeConfirmDialog(true));
 document.getElementById("confirmOverlay").addEventListener("click", event => {

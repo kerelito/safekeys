@@ -158,6 +158,7 @@
 <div class="generated-output">
 <div class="generated-output-header">
 <small>Ostatnio wygenerowany kod</small>
+<button id="copyGeneratedCodeButton" class="inline-copy-button hidden" type="button">Kopiuj</button>
 <span id="generatedDeliveryStatus" class="delivery-status hidden"></span>
 </div>
 <h3 id="generatedCode" class="generated-code">----</h3>
@@ -253,6 +254,20 @@
 <span id="activeCodesCount" class="panel-counter">0</span>
 </div>
 <ul id="activeCodes" class="stack-list"></ul>
+</div>
+
+<div class="card remote-actions-card">
+<div class="section-header">
+<div class="section-copy">
+<h2 class="card-title">Polecenia do ESP32</h2>
+<p>Kolejka i potwierdzenia ostatnich akcji wysłanych z panelu do urządzenia.</p>
+</div>
+<div class="section-actions">
+<span id="remoteActionsCount" class="panel-counter">0</span>
+<button id="refreshRemoteActionsButton" class="secondary-button" type="button">Odśwież</button>
+</div>
+</div>
+<div id="remoteActionsList" class="remote-actions-list"></div>
 </div>
 
 <div class="card logs">
