@@ -76,8 +76,8 @@ const LOG_EVENT_PRESENTERS = {
   LOCKER_OPENED: log => ({ text: `Odblokowano S${log.locker} kod ${log.code}`, className: "log-success" }),
   INVALID_CODE: log => ({ text: `Błędny kod ${log.code}`, className: "log-error" }),
   CODE_GENERATED: log => ({ text: `Wygenerowano kod ${log.code}`, className: "log-info" }),
-  CODE_EMAIL_SENT: log => ({ text: `Wysłano kod ${log.code} e-mailem`, className: "log-success" }),
-  CODE_EMAIL_FAILED: log => ({ text: `Błąd wysyłki kodu ${log.code}`, className: "log-error" }),
+  CODE_EMAIL_SENT: log => ({ text: `Wysłano kod ${log.code} na ${log.recipientEmail || "e-mail"}`, className: "log-success" }),
+  CODE_EMAIL_FAILED: log => ({ text: `Błąd wysyłki kodu ${log.code}${log.recipientEmail ? ` na ${log.recipientEmail}` : ""}`, className: "log-error" }),
   CODE_DEACTIVATED: log => ({ text: `Dezaktywowano kod ${log.code}`, className: "log-warning" }),
   KEY_REMOVED: log => ({ text: `Wyjęty klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-warning" }),
   KEY_RETURNED: log => ({ text: `Zwrócony klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-success" }),
@@ -98,7 +98,7 @@ const LOG_EVENT_PRESENTERS = {
   PANEL_USER_DELETED: () => ({ text: "Usunięto użytkownika panelu", className: "log-warning" }),
   AUTH_LOGIN: () => ({ text: "Zalogowano operatora", className: "log-success" }),
   AUTH_LOGOUT: () => ({ text: "Wylogowano operatora", className: "log-info" }),
-  RFID_TAG_ASSIGNMENT_STARTED: () => ({ text: "Rozpoczęto nadawanie taga RFID", className: "log-info" }),
+  RFID_TAG_ASSIGNMENT_STARTED: log => ({ text: `Rozpoczęto nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-info" }),
   RFID_TAG_ASSIGNMENT_COMPLETED: log => ({ text: `Nadano tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
   RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" })
 };
@@ -2222,17 +2222,7 @@ function openLogDetails(log, summaryText) {
   summary.textContent = summaryText;
   detailsList.innerHTML = "";
 
-  const details = [
-    ["Data i czas", log.timestamp ? new Date(log.timestamp).toLocaleString() : "brak danych"],
-    ["Typ zdarzenia", log.event || "brak danych"],
-    ["Kto wykonał", log.actor || "nieznany"],
-    ["Źródło", log.source || "nieznane"],
-    ["Skrytka", log.locker ? `S${log.locker}` : "nie dotyczy"],
-    ["Kod", log.code || "nie dotyczy"],
-    ["Tag RFID", log.tagId || "nie dotyczy"],
-    ["Rozpoznany przedmiot", log.itemKnown ? `${log.itemName || "bez nazwy"} (${getItemTypeLabel(log.itemType || "inne")})` : "nie"],
-    ["Sukces operacji", typeof log.success === "boolean" ? (log.success ? "tak" : "nie") : "brak danych"]
-  ];
+  const details = buildLogDetails(log);
 
   details.forEach(([label, value]) => {
     const row = document.createElement("div");
@@ -2246,6 +2236,171 @@ function openLogDetails(log, summaryText) {
   });
 
   overlay.classList.remove("hidden");
+}
+
+function addDetail(details, label, value, formatter = value => value) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+
+  details.push([label, formatter(value)]);
+}
+
+function formatBoolean(value) {
+  return value ? "tak" : "nie";
+}
+
+function formatIsoDateTime(value) {
+  return value ? new Date(value).toLocaleString() : "";
+}
+
+function formatLogItemDetails(log) {
+  if (log.itemKnown && log.itemName) {
+    return `${log.itemName} (${getItemTypeLabel(log.itemType || "inne")})`;
+  }
+
+  if (log.itemKnown === false && log.tagId) {
+    return "Nieznany przedmiot RFID";
+  }
+
+  return "";
+}
+
+function buildLogDetails(log) {
+  const details = [];
+  addDetail(details, "Data i czas", log.timestamp, formatIsoDateTime);
+  addDetail(details, "Typ zdarzenia", log.event);
+
+  const addCode = () => addDetail(details, "Kod", log.code);
+  const addLocker = () => addDetail(details, "Skrytka", log.locker, locker => `S${locker}`);
+  const addActor = () => addDetail(details, "Operator / źródło akcji", log.actor);
+  const addSource = () => addDetail(details, "Kanał", log.source);
+  const addTag = () => addDetail(details, "Tag RFID", log.tagId);
+  const addItem = () => addDetail(details, "Rozpoznany przedmiot", formatLogItemDetails(log));
+  const addEmail = () => addDetail(details, "Adres e-mail", log.recipientEmail);
+  const addError = () => addDetail(details, "Komunikat błędu", log.errorMessage);
+  const addSuccess = () => {
+    if (typeof log.success === "boolean") {
+      addDetail(details, "Sukces operacji", log.success, formatBoolean);
+    }
+  };
+
+  switch (log.event) {
+    case "LOCKER_OPENED":
+      addLocker();
+      addCode();
+      addEmail();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+    case "INVALID_CODE":
+      addCode();
+      addActor();
+      addSource();
+      addDetail(details, "Powód", log.details?.reason === "code_not_found_or_inactive" ? "Kod nie istnieje, wygasł albo został dezaktywowany" : log.details?.reason);
+      addSuccess();
+      break;
+    case "CODE_GENERATED":
+      addLocker();
+      addCode();
+      addEmail();
+      addDetail(details, "Ważny do", log.details?.expiresAt, formatIsoDateTime);
+      addDetail(details, "Czas aktywności", log.details?.hours, hours => `${hours} h`);
+      addActor();
+      addSource();
+      break;
+    case "CODE_EMAIL_SENT":
+      addLocker();
+      addCode();
+      addEmail();
+      addDetail(details, "Wysłano o", log.details?.sentAt, formatIsoDateTime);
+      addDetail(details, "Kod ważny do", log.details?.expiresAt, formatIsoDateTime);
+      addActor();
+      addSource();
+      break;
+    case "CODE_EMAIL_FAILED":
+      addLocker();
+      addCode();
+      addEmail();
+      addError();
+      addDetail(details, "Kod ważny do", log.details?.expiresAt, formatIsoDateTime);
+      addActor();
+      addSource();
+      break;
+    case "CODE_DEACTIVATED":
+      addLocker();
+      addCode();
+      addEmail();
+      addDetail(details, "Kod był ważny do", log.details?.expiresAt, formatIsoDateTime);
+      addActor();
+      addSource();
+      break;
+    case "KEY_REMOVED":
+    case "KEY_RETURNED":
+      addLocker();
+      addTag();
+      addItem();
+      addActor();
+      addSource();
+      break;
+    case "LOCKER_DOOR_OPENED":
+    case "LOCKER_DOOR_CLOSED":
+      addLocker();
+      addActor();
+      addSource();
+      break;
+    case "REMOTE_UNLOCK_REQUESTED":
+      addLocker();
+      addDetail(details, "ID polecenia", log.details?.actionId);
+      addActor();
+      addSource();
+      break;
+    case "REMOTE_RELEASE_ALL_REQUESTED":
+      addDetail(details, "ID polecenia", log.details?.actionId);
+      addActor();
+      addSource();
+      break;
+    case "RFID_ACCESS_GRANTED":
+    case "RFID_ACCESS_DENIED":
+      addTag();
+      addItem();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+    case "RFID_TAG_ASSIGNMENT_STARTED":
+      addTag();
+      addDetail(details, "Nazwa przedmiotu", log.itemName);
+      addDetail(details, "ID zadania", log.details?.assignmentId);
+      addActor();
+      addSource();
+      break;
+    case "RFID_TAG_ASSIGNMENT_COMPLETED":
+    case "RFID_TAG_ASSIGNMENT_FAILED":
+      addTag();
+      addDetail(details, "Fizyczny UID", log.details?.physicalUid);
+      addDetail(details, "Nazwa przedmiotu", log.itemName);
+      addDetail(details, "ID zadania", log.details?.assignmentId);
+      addDetail(details, "Zakończono o", log.details?.completedAt, formatIsoDateTime);
+      addError();
+      addActor();
+      addSource();
+      break;
+    default:
+      addLocker();
+      addCode();
+      addTag();
+      addItem();
+      addEmail();
+      addError();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+  }
+
+  return details;
 }
 
 function closeLogDetails() {

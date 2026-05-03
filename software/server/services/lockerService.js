@@ -171,6 +171,9 @@ class LockerService extends EventEmitter {
         event: "INVALID_CODE",
         code,
         success: false,
+        details: {
+          reason: "code_not_found_or_inactive"
+        },
         source: context.source || "device",
         actor: context.actor || null
       });
@@ -187,6 +190,7 @@ class LockerService extends EventEmitter {
       code,
       locker: found.locker,
       success: true,
+      recipientEmail: found.recipientEmail || null,
       source: context.source || "device",
       actor: context.actor || null
     });
@@ -228,6 +232,12 @@ class LockerService extends EventEmitter {
         event: "CODE_EMAIL_FAILED",
         code: codeRecord.code,
         locker: codeRecord.locker,
+        recipientEmail,
+        errorMessage,
+        details: {
+          reason: "email_service_disabled",
+          expiresAt: codeRecord.expiresAt
+        },
         source: context.source || "web",
         actor: context.actor || null
       });
@@ -256,6 +266,11 @@ class LockerService extends EventEmitter {
         event: "CODE_EMAIL_SENT",
         code: codeRecord.code,
         locker: codeRecord.locker,
+        recipientEmail,
+        details: {
+          sentAt: codeRecord.emailSentAt,
+          expiresAt: codeRecord.expiresAt
+        },
         source: context.source || "web",
         actor: context.actor || null
       });
@@ -295,6 +310,12 @@ class LockerService extends EventEmitter {
         event: "CODE_EMAIL_FAILED",
         code: codeRecord.code,
         locker: codeRecord.locker,
+        recipientEmail,
+        errorMessage,
+        details: {
+          reason: "email_send_failed",
+          expiresAt: codeRecord.expiresAt
+        },
         source: context.source || "web",
         actor: context.actor || null
       });
@@ -331,6 +352,11 @@ class LockerService extends EventEmitter {
       event: "CODE_GENERATED",
       code,
       locker,
+      recipientEmail,
+      details: {
+        hours,
+        expiresAt
+      },
       source: context.source || "web",
       actor: context.actor || null
     });
@@ -363,6 +389,10 @@ class LockerService extends EventEmitter {
       event: "CODE_DEACTIVATED",
       code,
       locker: found.locker,
+      recipientEmail: found.recipientEmail || null,
+      details: {
+        expiresAt: found.expiresAt
+      },
       source: context.source || "web",
       actor: context.actor || null
     });
@@ -547,6 +577,9 @@ class LockerService extends EventEmitter {
     await this.createLog({
       event: "REMOTE_UNLOCK_REQUESTED",
       locker,
+      details: {
+        actionId: action.id
+      },
       source: context.source || "web",
       actor: context.actor || null
     });
@@ -562,6 +595,9 @@ class LockerService extends EventEmitter {
     const action = this.createRemoteAction("RELEASE_ALL_LOCKERS", null, context);
     await this.createLog({
       event: "REMOTE_RELEASE_ALL_REQUESTED",
+      details: {
+        actionId: action.id
+      },
       source: context.source || "web",
       actor: context.actor || null
     });
@@ -718,7 +754,7 @@ class LockerService extends EventEmitter {
 
   async exportLogs(filters = {}) {
     const logs = await this.getLogs({ ...filters, limit: filters.limit || 500 });
-    const header = ["timestamp", "event", "locker", "code", "tagId", "itemName", "source", "actor", "success"];
+    const header = ["timestamp", "event", "locker", "code", "tagId", "itemName", "recipientEmail", "errorMessage", "source", "actor", "success"];
     const rows = logs.map(log => header.map(key => {
       const value = log[key] ?? "";
       return `"${String(value).replace(/"/g, '""')}"`;
@@ -791,7 +827,11 @@ class LockerService extends EventEmitter {
       event: "RFID_TAG_ASSIGNMENT_STARTED",
       source: context.source || "web",
       actor: `${context.actor || "system"} • ${assignment.itemName || "bez nazwy"} • ${assignment.tagId}`,
-      tagId: assignment.tagId
+      tagId: assignment.tagId,
+      itemName: assignment.itemName || null,
+      details: {
+        assignmentId: assignment.id
+      }
     });
 
     this.emit("rfid-tag-assignment-updated", this.getCurrentTagAssignment());
@@ -824,6 +864,12 @@ class LockerService extends EventEmitter {
       source: context.source || "device",
       actor: result.physicalUid || context.actor || "device",
       tagId: result.tagId,
+      errorMessage: result.error || null,
+      details: {
+        assignmentId: this.currentTagAssignment.id,
+        physicalUid: result.physicalUid,
+        completedAt: result.completedAt
+      },
       itemKnown: true,
       itemName: this.currentTagAssignment.itemName || null
     });

@@ -55,6 +55,17 @@ const LogSchema = new mongoose.Schema({
   itemName: String,
   itemType: String,
   itemKnown: Boolean,
+  recipientEmail: {
+    type: String,
+    default: null,
+    trim: true,
+    lowercase: true
+  },
+  errorMessage: String,
+  details: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
   success: Boolean,
   source: String,
   actor: String,

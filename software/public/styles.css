@@ -414,6 +414,17 @@ ul {
   justify-content: center;
 }
 
+.status-indicator::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: inherit;
+  border: 1px solid currentColor;
+  opacity: 0;
+  transform: scale(0.6);
+  pointer-events: none;
+}
+
 .status-indicator:hover,
 .status-indicator:focus,
 .status-indicator:focus-visible {
@@ -433,6 +444,7 @@ ul {
   border-radius: 50%;
   background: var(--warning);
   box-shadow: 0 0 16px rgba(255, 207, 102, 0.65);
+  animation: status-dot-breathe 2.8s ease-in-out infinite;
   transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
 }
 
@@ -441,9 +453,19 @@ ul {
   box-shadow: 0 0 16px rgba(115, 224, 169, 0.72);
 }
 
+.status-indicator.is-online::before {
+  color: var(--accent);
+  animation: status-ring-pulse 2.8s ease-out infinite;
+}
+
 .status-indicator.is-offline .status-dot {
   background: var(--danger);
   box-shadow: 0 0 16px rgba(255, 107, 107, 0.7);
+}
+
+.status-indicator.is-offline::before {
+  color: var(--danger);
+  animation: status-ring-pulse 2.1s ease-out infinite;
 }
 
 .status-indicator:hover .status-dot,
@@ -3548,5 +3570,77 @@ select:focus,
 
   .locker-map-card .section-header {
     margin-bottom: 8px;
+  }
+}
+
+@keyframes status-ring-pulse {
+  0% {
+    opacity: 0.34;
+    transform: scale(0.62);
+  }
+
+  72% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+}
+
+@keyframes status-dot-breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.16);
+  }
+}
+
+@keyframes soft-card-arrival {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes log-entry-arrival {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.page.active .card {
+  animation: soft-card-arrival 520ms ease both;
+}
+
+#logs li,
+.remote-action-item,
+.alert-item {
+  animation: log-entry-arrival 360ms ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
   }
 }
