@@ -102,7 +102,8 @@ static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
 static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
-static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 30000;
+static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
+static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_MAX_MS = 60000;
 static const unsigned long STATE_DUPLICATE_SUPPRESS_LOG_INTERVAL_MS = 10000;
@@ -353,6 +354,7 @@ bool masterTagVerificationPending = false;
 bool lockerStatusQueued[LOCKER_COUNT] = { false, false, false };
 bool deviceStateBatchQueued = false;
 bool deviceStateAckPending = false;
+bool forceNextStateBatchHttps = false;
 char pendingCode[CODE_LENGTH + 1] = "";
 char pendingMasterTagId[32] = "";
 char pendingStateMessageId[64] = "";
@@ -423,6 +425,7 @@ bool sendDeviceStateBatchWs(const NetworkJob& job);
 bool sendDeviceCommandAckWs(const NetworkJob& job);
 bool sendTagAssignmentResultWs(const NetworkJob& job);
 bool postDeviceStateBatch(const NetworkJob& job);
+bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postCommandAck(const NetworkJob& job);
 bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
 uint32_t nextDeviceSequence();
@@ -745,10 +748,19 @@ void networkTaskMain(void* parameter) {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
           result.lockerVersions[i] = job.lockerVersions[i];
         }
-        result.requestOk = sendDeviceStateBatchWs(job);
-        result.boolValue2 = result.requestOk;
-        if (!result.requestOk && shouldUseHttpsFallback(millis())) {
+        if (forceNextStateBatchHttps) {
+          result.requestOk = false;
+          result.boolValue2 = false;
+        } else {
+          result.requestOk = sendDeviceStateBatchWs(job);
+          result.boolValue2 = result.requestOk;
+        }
+        if (!result.requestOk && (forceNextStateBatchHttps || shouldUseHttpsFallback(millis()))) {
           result.requestOk = postDeviceStateBatch(job);
+          result.boolValue2 = false;
+        }
+        if (!result.requestOk && forceNextStateBatchHttps) {
+          result.requestOk = postLegacyLockerStatusBatch(job);
           result.boolValue2 = false;
         }
         shouldPublishResult = true;
@@ -1344,9 +1356,14 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
     }
 
     const bool retryFull = pendingStateWasFull;
-    Serial.printf("[WS] state batch ack timeout for %s, retry scheduled.\n", pendingStateMessageId);
+    Serial.printf("[WS] state batch ack timeout for %s, HTTPS fallback scheduled.\n", pendingStateMessageId);
     clearPendingStateBatch();
-    scheduleStateBatchRetry(now, retryFull);
+    forceNextStateBatchHttps = true;
+    if (retryFull) {
+      requestFullStateResync("state ws ack timeout");
+      markAllLockerReportsDirty(now, false);
+    }
+    nextDeviceStateBatchAttemptMs = now + DEVICE_STATE_BATCH_FALLBACK_DELAY_MS;
     return false;
   }
 
@@ -1846,6 +1863,7 @@ void handleNetworkResult(const NetworkResult& result) {
         }
         fullStateResyncPending = false;
         resetStateBatchRetry();
+        forceNextStateBatchHttps = false;
         rememberAckedStateFingerprint(static_cast<uint32_t>(result.numberValue), result.boolValue1, fullStateResyncGeneration, now);
         Serial.printf("Device state batch delivered via %s\n", isDeviceWebSocketReady() ? "WebSocket" : "HTTPS fallback");
       } else {
@@ -2332,6 +2350,7 @@ void handleDeviceStateAck(const NetworkResult& result) {
   }
 
   rememberAckedStateFingerprint(ackedFingerprint, ackedFull, ackedFullGeneration, now);
+  forceNextStateBatchHttps = false;
   if (!ackedFull || ackedFullGeneration == fullStateResyncGeneration) {
     fullStateResyncPending = false;
   }
@@ -2768,6 +2787,23 @@ bool postDeviceStateBatch(const NetworkJob& job) {
   }
 
   return postDeviceSyncMessage(messageBody, "/device/sync state.batch");
+}
+
+bool postLegacyLockerStatusBatch(const NetworkJob& job) {
+  bool allOk = true;
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const String tagId = job.lockerHasTag[i] ? String(job.lockerTags[i]) : String("");
+    const bool ok = postLockerStatus(i + 1, job.lockerHasTag[i], tagId);
+    allOk = allOk && ok;
+  }
+
+  if (allOk) {
+    Serial.println("Device state delivered via legacy /locker-status fallback.");
+  } else {
+    Serial.println("Legacy /locker-status fallback failed for at least one locker.");
+  }
+
+  return allOk;
 }
 
 bool postCommandAck(const NetworkJob& job) {

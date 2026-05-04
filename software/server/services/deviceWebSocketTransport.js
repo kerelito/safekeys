@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { WebSocket, WebSocketServer } = require("ws");
 const {
+  buildAck,
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   normalizeDeviceId
@@ -105,13 +106,46 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
         return;
       }
 
+      const context = {
+        transport: "websocket",
+        deviceId: ws.deviceId,
+        connectionId: ws.connectionId,
+        remoteAddress: req.socket?.remoteAddress || null
+      };
+
+      if (envelope.type === "state.batch") {
+        await sendJson(ws, buildAck(envelope, {
+          state: {
+            queued: true
+          }
+        }));
+
+        lockerService.processDeviceEnvelope(envelope, context)
+          .then(response => {
+            if (response?.ok === false) {
+              console.error("Asynchroniczne state.batch urzadzenia zostalo odrzucone.", {
+                deviceId: ws.deviceId,
+                connectionId: ws.connectionId,
+                messageId: envelope.messageId || null,
+                error: response.error || "unknown"
+              });
+            }
+          })
+          .catch(error => {
+            console.error("Nie udalo sie asynchronicznie zapisac state.batch urzadzenia.", {
+              deviceId: ws.deviceId,
+              connectionId: ws.connectionId,
+              messageId: envelope.messageId || null,
+              error: error.message
+            });
+          });
+
+        await sendPendingCommands(ws);
+        return;
+      }
+
       try {
-        const response = await lockerService.processDeviceEnvelope(envelope, {
-          transport: "websocket",
-          deviceId: ws.deviceId,
-          connectionId: ws.connectionId,
-          remoteAddress: req.socket?.remoteAddress || null
-        });
+        const response = await lockerService.processDeviceEnvelope(envelope, context);
 
         await sendJson(ws, response);
         await sendPendingCommands(ws);

@@ -642,8 +642,7 @@ class LockerService extends EventEmitter {
           updateOne: {
             filter: { locker },
             update: {
-              $set: set,
-              $setOnInsert: { locker }
+              $set: set
             },
             upsert: true
           }
