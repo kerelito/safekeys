@@ -348,6 +348,8 @@ unsigned long deviceActionsPollIntervalMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
 volatile bool deviceWsConnected = false;
 volatile bool deviceWsConfigured = false;
 volatile bool deviceWsReconnectRequested = true;
+volatile bool deviceWsHelloSent = false;
+volatile bool deviceWsServerHelloSeen = false;
 volatile unsigned long lastDeviceWsServiceMs = 0;
 volatile unsigned long lastDeviceWsConnectAttemptMs = 0;
 volatile unsigned long nextDeviceWsConnectAttemptMs = 0;
@@ -1028,6 +1030,8 @@ void disconnectDeviceWebSocket() {
     deviceWebSocket.disconnect();
   }
   deviceWsConnected = false;
+  deviceWsHelloSent = false;
+  deviceWsServerHelloSeen = false;
   deviceWsReconnectRequested = true;
   nextDeviceWsConnectAttemptMs = 0;
 }
@@ -1052,6 +1056,8 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
   switch (type) {
     case WStype_CONNECTED:
       deviceWsConnected = true;
+      deviceWsHelloSent = false;
+      deviceWsServerHelloSeen = false;
       deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
       lastDeviceWsConnectedMs = millis();
       lastDeviceWsHeartbeatMs = 0;
@@ -1064,9 +1070,11 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
 
     case WStype_DISCONNECTED:
       if (deviceWsConnected) {
-        Serial.println("[WS] disconnected");
+        Serial.printf("[WS] disconnected%s%.*s\n", length > 0 ? ": " : "", static_cast<int>(length), payload);
       }
       deviceWsConnected = false;
+      deviceWsHelloSent = false;
+      deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
       break;
@@ -1078,6 +1086,8 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
     case WStype_ERROR:
       Serial.printf("[WS] error: %.*s\n", static_cast<int>(length), payload);
       deviceWsConnected = false;
+      deviceWsHelloSent = false;
+      deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
       break;
 
@@ -1103,11 +1113,17 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
   }
 
   const char* type = doc["type"] | "";
-  if (strcmp(type, "hello") == 0) {
-    Serial.printf("[WS] server hello, resync=%s\n", (doc["resyncRequired"] | false) ? "true" : "false");
-    sendDeviceHello();
-    fullStateResyncPending = true;
-    deviceStateBatchQueued = false;
+  if (strcmp(type, "hello") == 0 || strcmp(type, "server.hello") == 0) {
+    const bool resyncRequired = doc["resyncRequired"] | false;
+    deviceWsServerHelloSeen = true;
+    Serial.printf("[WS] server hello, resync=%s connectionId=%s\n", resyncRequired ? "true" : "false", doc["connectionId"] | "(none)");
+    if (resyncRequired) {
+      fullStateResyncPending = true;
+      deviceStateBatchQueued = false;
+    }
+    if (!deviceWsHelloSent) {
+      sendDeviceHello();
+    }
     return;
   }
 
@@ -2216,6 +2232,9 @@ bool sendDeviceHello() {
   }
 
   const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  if (sent) {
+    deviceWsHelloSent = true;
+  }
   Serial.printf("[WS] hello %s seq=%lu\n", sent ? "sent" : "failed", static_cast<unsigned long>(sequence));
   return sent;
 }

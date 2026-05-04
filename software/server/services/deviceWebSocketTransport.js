@@ -105,15 +105,30 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
         return;
       }
 
-      const response = await lockerService.processDeviceEnvelope(envelope, {
-        transport: "websocket",
-        deviceId: ws.deviceId,
-        connectionId: ws.connectionId,
-        remoteAddress: req.socket?.remoteAddress || null
-      });
+      try {
+        const response = await lockerService.processDeviceEnvelope(envelope, {
+          transport: "websocket",
+          deviceId: ws.deviceId,
+          connectionId: ws.connectionId,
+          remoteAddress: req.socket?.remoteAddress || null
+        });
 
-      await sendJson(ws, response);
-      await sendPendingCommands(ws);
+        await sendJson(ws, response);
+        await sendPendingCommands(ws);
+      } catch (error) {
+        console.error("Nie udalo sie obsluzyc wiadomosci WebSocket urzadzenia.", {
+          deviceId: ws.deviceId,
+          connectionId: ws.connectionId,
+          error: error.message
+        });
+        await sendJson(ws, {
+          type: "ack",
+          messageId: envelope.messageId || null,
+          ok: false,
+          error: "server_message_handler_failed",
+          serverTime: new Date().toISOString()
+        });
+      }
     });
 
     ws.on("close", async (_code, reason) => {
@@ -134,7 +149,7 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
     });
 
     await sendJson(ws, {
-      type: "hello",
+      type: "server.hello",
       protocolVersion: DEVICE_PROTOCOL_VERSION,
       serverTime: new Date().toISOString(),
       connectionId: ws.connectionId,
