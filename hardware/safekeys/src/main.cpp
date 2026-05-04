@@ -51,7 +51,7 @@ static const uint16_t DEVICE_WS_PORT = 443;
 static const char* DEVICE_WS_PATH = "/device/ws?deviceId=esp32-main";
 
 static const bool ENABLE_KEYPAD = true;
-static const bool ENABLE_LOCKER_SWITCH_INPUTS = true;
+static const bool ENABLE_LOCKER_SWITCH_INPUTS = false;
 static const bool DEBUG_RFID_VERBOSE = true;
 
 #ifdef LED_BUILTIN
@@ -83,8 +83,11 @@ static const uint8_t RFID_SPI_MOSI_PIN = 13;
 static const uint8_t RFID_RST_PIN = 15;
 static const uint8_t RFID_LOCKER_SS_PINS[LOCKER_COUNT] = { 5, 16, 17 };
 static const uint8_t RFID_MASTER_SS_PIN = 32;
+static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_avg;
 
 static const unsigned long WIFI_RETRY_MS = 5000;
+static const unsigned long WIFI_RETRY_MAX_MS = 60000;
+static const unsigned long WIFI_AUTH_FAILURE_RETRY_MS = 30000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 static const unsigned long WIFI_LOADING_FRAME_MS = 120;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 60000;
@@ -99,9 +102,15 @@ static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
 static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
+static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 30000;
+static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
+static const unsigned long DEVICE_STATE_BATCH_RETRY_MAX_MS = 60000;
+static const unsigned long STATE_DUPLICATE_SUPPRESS_LOG_INTERVAL_MS = 10000;
 static const unsigned long LOCKER_STATUS_BATCH_WINDOW_MS = 1200;
 static const unsigned long LOCKER_STATUS_RETRY_BASE_MS = 5000;
 static const unsigned long LOCKER_STATUS_RETRY_MAX_MS = 120000;
+static const unsigned long LOCKER_INPUT_SCAN_INTERVAL_MS = 50;
+static const unsigned long LOCKER_INPUT_DEBOUNCE_MS = 250;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
@@ -117,7 +126,7 @@ static const uint8_t NETWORK_QUEUE_LENGTH = 12;
 static const uint16_t NETWORK_TASK_STACK_SIZE = 8192;
 static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 45;
 static const uint8_t COMMAND_DEDUP_CACHE_SIZE = 12;
-static const uint8_t NETWORK_FAILURES_BEFORE_WIFI_RESET = 3;
+static const uint8_t NETWORK_FAILURES_BEFORE_WIFI_RESET = 8;
 static const unsigned long NETWORK_FAILURE_RETRY_BASE_MS = 2000;
 static const unsigned long NETWORK_FAILURE_RETRY_MAX_MS = 30000;
 static const unsigned long NETWORK_WIFI_RECOVERY_COOLDOWN_MS = 30000;
@@ -186,6 +195,7 @@ struct RfidReaderRuntime {
   MFRC522* reader;
   bool hasCard;
   String stableUid;
+  String stablePhysicalUid;
   String lastTriggeredUid;
   String candidateUid;
   unsigned long lastSeenMs;
@@ -240,6 +250,7 @@ enum class NetworkResultType : uint8_t {
   Heartbeat,
   LockerStatus,
   DeviceStateBatch,
+  DeviceStateAck,
   DeviceCommand,
   CommandAck,
   DeviceActionsPoll,
@@ -280,9 +291,9 @@ MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
 WebSocketsClient deviceWebSocket;
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
-  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
-  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
-  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 }
+  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 }
 };
 
 RfidReaderRuntime masterReaderRuntime = {
@@ -292,6 +303,7 @@ RfidReaderRuntime masterReaderRuntime = {
   0,
   &masterReader,
   false,
+  "",
   "",
   "",
   "",
@@ -320,6 +332,8 @@ bool keypadReady = false;
 bool wifiConnectInProgress = false;
 unsigned long wifiConnectStartedMs = 0;
 unsigned long lastWifiLoadingFrameMs = 0;
+unsigned long wifiRetryIntervalMs = WIFI_RETRY_MS;
+uint8_t consecutiveWifiFailureCount = 0;
 uint8_t wifiLoadingFrame = 0;
 bool statusLedBaseEnabled = false;
 StatusLedEffect statusLedEffect = { false, false, false, 0, 0, 0, 0 };
@@ -338,8 +352,10 @@ bool codeVerificationPending = false;
 bool masterTagVerificationPending = false;
 bool lockerStatusQueued[LOCKER_COUNT] = { false, false, false };
 bool deviceStateBatchQueued = false;
+bool deviceStateAckPending = false;
 char pendingCode[CODE_LENGTH + 1] = "";
 char pendingMasterTagId[32] = "";
+char pendingStateMessageId[64] = "";
 bool taskWatchdogReady = false;
 volatile uint8_t consecutiveNetworkFailureCount = 0;
 volatile unsigned long nextBackgroundNetworkAttemptMs = 0;
@@ -357,13 +373,32 @@ volatile unsigned long lastDeviceWsConnectedMs = 0;
 unsigned long deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
 unsigned long lastDeviceWsHeartbeatMs = 0;
 unsigned long lastDeviceStateBatchMs = 0;
+unsigned long lastFullStateResyncAckMs = 0;
+unsigned long pendingStateBatchSentMs = 0;
+unsigned long nextDeviceStateBatchAttemptMs = 0;
 uint32_t deviceMessageSequence = 0;
 uint32_t lockerStateVersions[LOCKER_COUNT] = { 1, 1, 1 };
+uint32_t pendingStateVersions[LOCKER_COUNT] = { 0, 0, 0 };
 bool fullStateResyncPending = true;
+bool pendingStateWasFull = false;
+uint32_t fullStateResyncGeneration = 1;
+uint32_t pendingFullStateResyncGeneration = 0;
+uint32_t lastAckedFullStateResyncGeneration = 0;
+uint32_t pendingStateFingerprint = 0;
+uint32_t lastAckedStateFingerprint = 0;
+bool lastAckedStateFingerprintReady = false;
+uint8_t deviceStateBatchFailureCount = 0;
+uint16_t staleStateAckLogSuppressed = 0;
+unsigned long lastDuplicateStateSuppressedLogMs = 0;
 char deviceBootId[17] = "";
 bool lockerInputSnapshotReady[LOCKER_COUNT] = { false, false, false };
 bool lastLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
 bool lastLockerLockClosed[LOCKER_COUNT] = { true, true, true };
+bool lockerInputCandidateReady[LOCKER_COUNT] = { false, false, false };
+bool candidateLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
+bool candidateLockerLockClosed[LOCKER_COUNT] = { true, true, true };
+unsigned long lockerInputCandidateSinceMs[LOCKER_COUNT] = { 0, 0, 0 };
+unsigned long lastLockerInputServiceMs = 0;
 char processedCommandIds[COMMAND_DEDUP_CACHE_SIZE][32] = {};
 uint8_t nextProcessedCommandSlot = 0;
 
@@ -395,6 +430,16 @@ void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_
 void buildHeartbeatPayload(JsonObject payload);
 void buildLockerStateBatchJob(NetworkJob& job, bool full);
 void buildStateBatchMessage(const NetworkJob& job, JsonDocument& doc, uint32_t sequence, const char* messageId);
+uint32_t calculateJobStateFingerprint(const NetworkJob& job);
+void rememberAckedStateFingerprint(uint32_t fingerprint, bool full, uint32_t fullGeneration, unsigned long now);
+bool hasDirtyLockerReports();
+void clearAllLockerReportsClean(unsigned long now);
+void requestFullStateResync(const char* reason);
+void rememberPendingStateBatch(const NetworkJob& job, const char* messageId, unsigned long now);
+void clearPendingStateBatch();
+bool isPendingStateBatchTimedOut(unsigned long now);
+void scheduleStateBatchRetry(unsigned long now, bool forceFull);
+void resetStateBatchRetry();
 void handleKeypad();
 void handleSerialDebug();
 void reserveStringBuffers();
@@ -419,6 +464,7 @@ void recoverFromDroppedNetworkResult(const NetworkResult& result);
 bool enqueueNetworkJob(const NetworkJob& job);
 bool isPriorityNetworkJob(const NetworkJob& job);
 void handleRemoteCommand(const NetworkResult& result);
+void handleDeviceStateAck(const NetworkResult& result);
 void queueCommandAck(const char* actionId, bool success, const char* status, const char* message);
 bool wasCommandProcessed(const char* actionId);
 void rememberProcessedCommand(const char* actionId);
@@ -554,7 +600,7 @@ void configureWiFiRuntime() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setSleep(false);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.onEvent(handleWiFiEvent);
 }
 
@@ -567,11 +613,13 @@ void reserveStringBuffers() {
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     lockerReaders[i].stableUid.reserve(24);
+    lockerReaders[i].stablePhysicalUid.reserve(24);
     lockerReaders[i].lastTriggeredUid.reserve(24);
     lockerReaders[i].candidateUid.reserve(24);
   }
 
   masterReaderRuntime.stableUid.reserve(24);
+  masterReaderRuntime.stablePhysicalUid.reserve(24);
   masterReaderRuntime.lastTriggeredUid.reserve(24);
   masterReaderRuntime.candidateUid.reserve(24);
 }
@@ -692,14 +740,17 @@ void networkTaskMain(void* parameter) {
 
       case NetworkJobType::DeviceStateBatch: {
         result.type = NetworkResultType::DeviceStateBatch;
+        result.boolValue1 = job.boolValue;
+        result.numberValue = job.numberValue;
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
           result.lockerVersions[i] = job.lockerVersions[i];
         }
         result.requestOk = sendDeviceStateBatchWs(job);
+        result.boolValue2 = result.requestOk;
         if (!result.requestOk && shouldUseHttpsFallback(millis())) {
           result.requestOk = postDeviceStateBatch(job);
+          result.boolValue2 = false;
         }
-        result.boolValue1 = job.boolValue;
         shouldPublishResult = true;
         break;
       }
@@ -796,7 +847,7 @@ void loop() {
   updateVisualState();
 
   if (!isWifiReady()) {
-    if (!wifiConnectInProgress && now - lastWifiRetryMs >= WIFI_RETRY_MS) {
+    if (!wifiConnectInProgress && now - lastWifiRetryMs >= wifiRetryIntervalMs) {
       connectWifi();
     }
     return;
@@ -814,11 +865,19 @@ void loop() {
 }
 
 void connectWifi() {
+  if (wifiConnectInProgress) {
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
   Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   wifiConnectInProgress = true;
@@ -849,15 +908,19 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       wifiConnectInProgress = false;
+      consecutiveWifiFailureCount = 0;
+      wifiRetryIntervalMs = WIFI_RETRY_MS;
       lastHeartbeatMs = 0;
       lastDeviceActionsPollMs = 0;
       noteNetworkSuccess();
+      clearPendingStateBatch();
+      resetStateBatchRetry();
       logWiFiSnapshot("[WiFi] got IP");
       for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
         lockerStatusQueued[i] = false;
       }
       markAllLockerReportsDirty(millis(), true);
-      fullStateResyncPending = true;
+      requestFullStateResync("wifi got ip");
       deviceStateBatchQueued = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = 0;
@@ -867,45 +930,61 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:
       wifiConnectInProgress = false;
       logWiFiSnapshot("[WiFi] lost IP");
+      consecutiveWifiFailureCount = min<uint8_t>(static_cast<uint8_t>(consecutiveWifiFailureCount + 1), 20);
+      wifiRetryIntervalMs = min(WIFI_RETRY_MAX_MS, max(WIFI_RETRY_MS, wifiRetryIntervalMs * 2));
       heartbeatQueued = false;
       deviceActionsPollQueued = false;
       lastHeartbeatMs = 0;
       lastDeviceActionsPollMs = 0;
-      nextBackgroundNetworkAttemptMs = 0;
-      lastWifiRetryMs = 0;
+      nextBackgroundNetworkAttemptMs = millis() + wifiRetryIntervalMs;
+      lastWifiRetryMs = millis();
       for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
         lockerStatusQueued[i] = false;
       }
       markAllLockerReportsDirty(millis(), true);
-      fullStateResyncPending = true;
+      requestFullStateResync("wifi lost ip");
       deviceStateBatchQueued = false;
+      clearPendingStateBatch();
       disconnectDeviceWebSocket();
       resetDeviceActionsPollCadence();
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    {
       wifiConnectInProgress = false;
+      const uint8_t reason = info.wifi_sta_disconnected.reason;
       Serial.printf(
         "[WiFi] event=%s reason=%u (%s)\n",
         WiFi.eventName(event),
-        info.wifi_sta_disconnected.reason,
-        WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason))
+        reason,
+        WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason))
       );
+      consecutiveWifiFailureCount = min<uint8_t>(static_cast<uint8_t>(consecutiveWifiFailureCount + 1), 20);
+      const bool authRelatedFailure = reason == WIFI_REASON_AUTH_EXPIRE
+        || reason == WIFI_REASON_AUTH_FAIL
+        || reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT;
+      if (authRelatedFailure) {
+        wifiRetryIntervalMs = max(wifiRetryIntervalMs, WIFI_AUTH_FAILURE_RETRY_MS);
+      } else {
+        wifiRetryIntervalMs = min(WIFI_RETRY_MAX_MS, max(WIFI_RETRY_MS, wifiRetryIntervalMs * 2));
+      }
       heartbeatQueued = false;
       deviceActionsPollQueued = false;
       lastHeartbeatMs = 0;
       lastDeviceActionsPollMs = 0;
-      nextBackgroundNetworkAttemptMs = 0;
-      lastWifiRetryMs = 0;
+      nextBackgroundNetworkAttemptMs = millis() + wifiRetryIntervalMs;
+      lastWifiRetryMs = millis();
       for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
         lockerStatusQueued[i] = false;
       }
       markAllLockerReportsDirty(millis(), true);
-      fullStateResyncPending = true;
+      requestFullStateResync("wifi disconnected");
       deviceStateBatchQueued = false;
+      clearPendingStateBatch();
       disconnectDeviceWebSocket();
       resetDeviceActionsPollCadence();
       break;
+    }
 
     default:
       break;
@@ -946,8 +1025,10 @@ void serviceWifiConnection(unsigned long now) {
   if (now - wifiConnectStartedMs >= WIFI_CONNECT_TIMEOUT_MS) {
     wifiConnectInProgress = false;
     lastWifiRetryMs = now;
+    consecutiveWifiFailureCount = min<uint8_t>(static_cast<uint8_t>(consecutiveWifiFailureCount + 1), 20);
+    wifiRetryIntervalMs = min(WIFI_RETRY_MAX_MS, max(WIFI_RETRY_MS, wifiRetryIntervalMs * 2));
     Serial.println();
-    Serial.println("WiFi connection failed. ESP32 will retry automatically.");
+    Serial.printf("WiFi connection failed. Retry in %lu ms.\n", wifiRetryIntervalMs);
     blinkLed(4, 150, 120);
     markVisualStateDirty();
     updateVisualState();
@@ -1041,6 +1122,10 @@ bool isDeviceWebSocketReady() {
 }
 
 bool shouldUseHttpsFallback(unsigned long now) {
+  if (!isWifiReady() || wifiConnectInProgress || isBackgroundNetworkBackoffActive(now)) {
+    return false;
+  }
+
   if (isDeviceWebSocketReady()) {
     return false;
   }
@@ -1061,7 +1146,7 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
       lastDeviceWsConnectedMs = millis();
       lastDeviceWsHeartbeatMs = 0;
-      fullStateResyncPending = true;
+      requestFullStateResync("ws connected");
       deviceStateBatchQueued = false;
       resetDeviceActionsPollCadence();
       Serial.printf("[WS] connected: %.*s\n", static_cast<int>(length), payload);
@@ -1118,7 +1203,7 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
     deviceWsServerHelloSeen = true;
     Serial.printf("[WS] server hello, resync=%s connectionId=%s\n", resyncRequired ? "true" : "false", doc["connectionId"] | "(none)");
     if (resyncRequired) {
-      fullStateResyncPending = true;
+      requestFullStateResync("server hello");
       deviceStateBatchQueued = false;
     }
     if (!deviceWsHelloSent) {
@@ -1130,12 +1215,19 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
   if (strcmp(type, "ack") == 0) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
+    if (strncmp(messageId, "state-", 6) == 0) {
+      NetworkResult result = {};
+      result.type = NetworkResultType::DeviceStateAck;
+      result.requestOk = ok;
+      copyCStringToBuffer(messageId, result.text1, sizeof(result.text1));
+      if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+        Serial.printf("[WS] state ack queue full for %s\n", messageId);
+      }
+      return;
+    }
+
     if (!ok) {
       Serial.printf("[WS] protocol ack failed for %s: %s\n", messageId, doc["error"] | "unknown");
-      if (strncmp(messageId, "state-", 6) == 0) {
-        fullStateResyncPending = true;
-        markAllLockerReportsDirty(millis(), false);
-      }
     } else if (DEBUG_RFID_VERBOSE) {
       Serial.printf("[WS] ack ok for %s\n", messageId);
     }
@@ -1242,6 +1334,22 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
     return false;
   }
 
+  if (nextDeviceStateBatchAttemptMs != 0 && now < nextDeviceStateBatchAttemptMs) {
+    return false;
+  }
+
+  if (deviceStateAckPending) {
+    if (!isPendingStateBatchTimedOut(now)) {
+      return false;
+    }
+
+    const bool retryFull = pendingStateWasFull;
+    Serial.printf("[WS] state batch ack timeout for %s, retry scheduled.\n", pendingStateMessageId);
+    clearPendingStateBatch();
+    scheduleStateBatchRetry(now, retryFull);
+    return false;
+  }
+
   if (deviceStateBatchQueued) {
     return false;
   }
@@ -1251,17 +1359,19 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
   }
 
   bool hasDirty = fullStateResyncPending;
+  const bool periodicFullResyncDue =
+    !fullStateResyncPending &&
+    lastFullStateResyncAckMs != 0 &&
+    now - lastFullStateResyncAckMs >= LOCKER_STATUS_RESYNC_INTERVAL_MS;
+
+  if (periodicFullResyncDue) {
+    hasDirty = true;
+    requestFullStateResync("periodic full snapshot");
+  }
+
   bool allDirtyPastBatchWindow = true;
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     RfidReaderRuntime& runtime = lockerReaders[i];
-    const bool needsPeriodicResync = runtime.lastReportMs != 0
-      && now - runtime.lastReportMs >= LOCKER_STATUS_RESYNC_INTERVAL_MS;
-
-    if (needsPeriodicResync) {
-      hasDirty = true;
-      fullStateResyncPending = true;
-    }
-
     if (!runtime.reportDirty) {
       continue;
     }
@@ -1287,6 +1397,27 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
   NetworkJob job = {};
   job.type = NetworkJobType::DeviceStateBatch;
   buildLockerStateBatchJob(job, fullStateResyncPending);
+
+  const bool hasDirtyReports = hasDirtyLockerReports();
+  const bool duplicateAckedState =
+    lastAckedStateFingerprintReady &&
+    job.numberValue == lastAckedStateFingerprint;
+  const bool fullGenerationAlreadyAcked =
+    !job.boolValue ||
+    fullStateResyncGeneration == lastAckedFullStateResyncGeneration;
+
+  if (duplicateAckedState && fullGenerationAlreadyAcked) {
+    if (
+      (hasDirtyReports || fullStateResyncPending) &&
+      (lastDuplicateStateSuppressedLogMs == 0 || now - lastDuplicateStateSuppressedLogMs >= STATE_DUPLICATE_SUPPRESS_LOG_INTERVAL_MS)
+    ) {
+      Serial.println("[state] duplicate locker snapshot suppressed; no effective state change.");
+      lastDuplicateStateSuppressedLogMs = now;
+    }
+    fullStateResyncPending = false;
+    clearAllLockerReportsClean(now);
+    return false;
+  }
 
   if (!enqueueNetworkJob(job)) {
     return false;
@@ -1355,6 +1486,7 @@ void buildLockerStateBatchJob(NetworkJob& job, bool full) {
     job.lockerVersions[i] = lockerStateVersions[i];
     copyStringToBuffer(state.tagUid, job.lockerTags[i], sizeof(job.lockerTags[i]));
   }
+  job.numberValue = calculateJobStateFingerprint(job);
 }
 
 void serviceLockerInputChanges(unsigned long now) {
@@ -1362,27 +1494,56 @@ void serviceLockerInputChanges(unsigned long now) {
     return;
   }
 
+  if (lastLockerInputServiceMs != 0 && now - lastLockerInputServiceMs < LOCKER_INPUT_SCAN_INTERVAL_MS) {
+    return;
+  }
+  lastLockerInputServiceMs = now;
+
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const LockerState state = readLockerState(i);
     if (!lockerInputSnapshotReady[i]) {
       lockerInputSnapshotReady[i] = true;
       lastLockerDoorClosed[i] = state.doorClosed;
       lastLockerLockClosed[i] = state.lockClosed;
+      candidateLockerDoorClosed[i] = state.doorClosed;
+      candidateLockerLockClosed[i] = state.lockClosed;
+      lockerInputCandidateReady[i] = false;
+      lockerInputCandidateSinceMs[i] = 0;
       continue;
     }
 
     if (state.doorClosed == lastLockerDoorClosed[i] && state.lockClosed == lastLockerLockClosed[i]) {
+      lockerInputCandidateReady[i] = false;
+      lockerInputCandidateSinceMs[i] = 0;
       continue;
     }
 
-    lastLockerDoorClosed[i] = state.doorClosed;
-    lastLockerLockClosed[i] = state.lockClosed;
+    if (
+      !lockerInputCandidateReady[i] ||
+      state.doorClosed != candidateLockerDoorClosed[i] ||
+      state.lockClosed != candidateLockerLockClosed[i]
+    ) {
+      lockerInputCandidateReady[i] = true;
+      candidateLockerDoorClosed[i] = state.doorClosed;
+      candidateLockerLockClosed[i] = state.lockClosed;
+      lockerInputCandidateSinceMs[i] = now;
+      continue;
+    }
+
+    if (now - lockerInputCandidateSinceMs[i] < LOCKER_INPUT_DEBOUNCE_MS) {
+      continue;
+    }
+
+    lastLockerDoorClosed[i] = candidateLockerDoorClosed[i];
+    lastLockerLockClosed[i] = candidateLockerLockClosed[i];
+    lockerInputCandidateReady[i] = false;
+    lockerInputCandidateSinceMs[i] = 0;
     markLockerStateChanged(lockerReaders[i], now);
     Serial.printf(
       "Locker S%u input changed -> door=%s lock=%s\n",
       i + 1,
-      state.doorClosed ? "closed" : "open",
-      state.lockClosed ? "closed" : "open"
+      lastLockerDoorClosed[i] ? "closed" : "open",
+      lastLockerLockClosed[i] ? "closed" : "open"
     );
   }
 }
@@ -1490,7 +1651,9 @@ void handleKeypad() {
     Serial.println("Manual WiFi reconnect requested.");
     enteredCode = "";
     markVisualStateDirty();
-    WiFi.disconnect(true, true);
+    wifiRetryIntervalMs = WIFI_RETRY_MS;
+    consecutiveWifiFailureCount = 0;
+    WiFi.disconnect(false, false);
     connectWifi();
     return;
   }
@@ -1539,7 +1702,9 @@ void handleSerialDebug() {
       } else if (command == "rfid" || command == "r") {
         printRfidSnapshot();
       } else if (command == "wifi" || command == "w") {
-        WiFi.disconnect(true, true);
+        wifiRetryIntervalMs = WIFI_RETRY_MS;
+        consecutiveWifiFailureCount = 0;
+        WiFi.disconnect(false, false);
         connectWifi();
       } else if (command == "heartbeat" || command == "h") {
         if (isWifiReady()) {
@@ -1551,7 +1716,7 @@ void handleSerialDebug() {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
           markLockerReportDirty(lockerReaders[i], millis());
         }
-        fullStateResyncPending = true;
+        requestFullStateResync("serial lockers");
         if (isWifiReady()) {
           maybeQueueDeviceStateBatch(millis());
         } else {
@@ -1666,6 +1831,11 @@ void handleNetworkResult(const NetworkResult& result) {
     case NetworkResultType::DeviceStateBatch:
       deviceStateBatchQueued = false;
       if (result.requestOk) {
+        if (result.boolValue2) {
+          Serial.printf("Device state batch queued via WebSocket (%s), waiting for backend ack.\n", result.boolValue1 ? "full" : "delta");
+          break;
+        }
+
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
           if (lockerStateVersions[i] == result.lockerVersions[i]) {
             noteLockerReportSuccess(lockerReaders[i], now);
@@ -1675,14 +1845,20 @@ void handleNetworkResult(const NetworkResult& result) {
           lockerStatusQueued[i] = false;
         }
         fullStateResyncPending = false;
+        resetStateBatchRetry();
+        rememberAckedStateFingerprint(static_cast<uint32_t>(result.numberValue), result.boolValue1, fullStateResyncGeneration, now);
         Serial.printf("Device state batch delivered via %s\n", isDeviceWebSocketReady() ? "WebSocket" : "HTTPS fallback");
       } else {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
           noteLockerReportFailure(lockerReaders[i], now);
         }
-        fullStateResyncPending = true;
-        Serial.println("Device state batch failed, resync remains queued.");
+        scheduleStateBatchRetry(now, true);
+        Serial.println("Device state batch failed, resync retry scheduled.");
       }
+      break;
+
+    case NetworkResultType::DeviceStateAck:
+      handleDeviceStateAck(result);
       break;
 
     case NetworkResultType::DeviceCommand:
@@ -1816,10 +1992,14 @@ void recoverFromDroppedNetworkResult(const NetworkResult& result) {
 
     case NetworkResultType::DeviceStateBatch:
       deviceStateBatchQueued = false;
-      fullStateResyncPending = true;
+      clearPendingStateBatch();
       for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
         noteLockerReportFailure(lockerReaders[i], now);
       }
+      scheduleStateBatchRetry(now, true);
+      break;
+
+    case NetworkResultType::DeviceStateAck:
       break;
 
     case NetworkResultType::DeviceCommand:
@@ -1980,6 +2160,183 @@ void rememberProcessedCommand(const char* actionId) {
 
   copyCStringToBuffer(actionId, processedCommandIds[nextProcessedCommandSlot], sizeof(processedCommandIds[nextProcessedCommandSlot]));
   nextProcessedCommandSlot = static_cast<uint8_t>((nextProcessedCommandSlot + 1) % COMMAND_DEDUP_CACHE_SIZE);
+}
+
+uint32_t calculateJobStateFingerprint(const NetworkJob& job) {
+  uint32_t hash = 2166136261UL;
+
+  const auto mixByte = [&hash](uint8_t value) {
+    hash ^= value;
+    hash *= 16777619UL;
+  };
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    mixByte(i + 1);
+    mixByte(job.lockerHasTag[i] ? 1 : 0);
+    mixByte(job.lockerDoorClosed[i] ? 1 : 0);
+    mixByte(job.lockerLockClosed[i] ? 1 : 0);
+
+    if (job.lockerHasTag[i]) {
+      const char* tag = job.lockerTags[i];
+      for (size_t pos = 0; tag[pos] != '\0'; pos += 1) {
+        mixByte(static_cast<uint8_t>(tag[pos]));
+      }
+    }
+
+    mixByte(0xFF);
+  }
+
+  return hash == 0 ? 1 : hash;
+}
+
+void rememberAckedStateFingerprint(uint32_t fingerprint, bool full, uint32_t fullGeneration, unsigned long now) {
+  if (fingerprint == 0) {
+    return;
+  }
+
+  lastAckedStateFingerprint = fingerprint;
+  lastAckedStateFingerprintReady = true;
+  if (full) {
+    lastAckedFullStateResyncGeneration = fullGeneration;
+    lastFullStateResyncAckMs = now;
+  }
+}
+
+bool hasDirtyLockerReports() {
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (lockerReaders[i].reportDirty) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void clearAllLockerReportsClean(unsigned long now) {
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    noteLockerReportSuccess(lockerReaders[i], now);
+    lockerStatusQueued[i] = false;
+  }
+}
+
+void requestFullStateResync(const char* reason) {
+  const bool alreadyPending = fullStateResyncPending;
+  if (!alreadyPending) {
+    fullStateResyncGeneration += 1;
+    if (fullStateResyncGeneration == 0) {
+      fullStateResyncGeneration = 1;
+    }
+  }
+
+  fullStateResyncPending = true;
+  if (DEBUG_RFID_VERBOSE && !alreadyPending) {
+    Serial.printf("[state] full resync requested: %s gen=%lu\n", reason != nullptr ? reason : "unknown", static_cast<unsigned long>(fullStateResyncGeneration));
+  }
+}
+
+void rememberPendingStateBatch(const NetworkJob& job, const char* messageId, unsigned long now) {
+  deviceStateAckPending = true;
+  pendingStateWasFull = job.boolValue;
+  pendingStateBatchSentMs = now;
+  pendingStateFingerprint = job.numberValue;
+  pendingFullStateResyncGeneration = job.boolValue ? fullStateResyncGeneration : 0;
+  copyCStringToBuffer(messageId, pendingStateMessageId, sizeof(pendingStateMessageId));
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    pendingStateVersions[i] = job.lockerVersions[i];
+  }
+}
+
+void clearPendingStateBatch() {
+  deviceStateAckPending = false;
+  pendingStateWasFull = false;
+  pendingStateBatchSentMs = 0;
+  pendingStateFingerprint = 0;
+  pendingFullStateResyncGeneration = 0;
+  pendingStateMessageId[0] = '\0';
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    pendingStateVersions[i] = 0;
+  }
+}
+
+bool isPendingStateBatchTimedOut(unsigned long now) {
+  return deviceStateAckPending
+    && pendingStateBatchSentMs != 0
+    && now - pendingStateBatchSentMs >= DEVICE_STATE_BATCH_ACK_TIMEOUT_MS;
+}
+
+void scheduleStateBatchRetry(unsigned long now, bool forceFull) {
+  if (deviceStateBatchFailureCount < 255) {
+    deviceStateBatchFailureCount += 1;
+  }
+
+  const uint8_t failureLevel = min<uint8_t>(deviceStateBatchFailureCount, 5);
+  const unsigned long backoffMs = min(
+    DEVICE_STATE_BATCH_RETRY_MAX_MS,
+    DEVICE_STATE_BATCH_RETRY_BASE_MS * (1UL << (failureLevel - 1))
+  );
+
+  nextDeviceStateBatchAttemptMs = now + backoffMs;
+  if (forceFull) {
+    requestFullStateResync("state retry");
+    markAllLockerReportsDirty(now, false);
+  }
+
+  Serial.printf(
+    "[WS] state retry in %lu ms (failures=%u, full=%s)\n",
+    backoffMs,
+    deviceStateBatchFailureCount,
+    forceFull ? "true" : "false"
+  );
+}
+
+void resetStateBatchRetry() {
+  nextDeviceStateBatchAttemptMs = 0;
+  deviceStateBatchFailureCount = 0;
+}
+
+void handleDeviceStateAck(const NetworkResult& result) {
+  const unsigned long now = millis();
+  if (!deviceStateAckPending || strcmp(result.text1, pendingStateMessageId) != 0) {
+    if (DEBUG_RFID_VERBOSE && staleStateAckLogSuppressed == 0) {
+      Serial.printf("[WS] stale state ack ignored for %s\n", result.text1);
+    }
+    if (staleStateAckLogSuppressed < UINT16_MAX) {
+      staleStateAckLogSuppressed += 1;
+    }
+    return;
+  }
+
+  const bool ackedFull = pendingStateWasFull;
+  const uint32_t ackedFingerprint = pendingStateFingerprint;
+  const uint32_t ackedFullGeneration = pendingFullStateResyncGeneration;
+
+  if (!result.requestOk) {
+    Serial.printf("[WS] state ack failed for %s, retry queued.\n", result.text1);
+    clearPendingStateBatch();
+    scheduleStateBatchRetry(now, true);
+    return;
+  }
+
+  resetStateBatchRetry();
+  if (DEBUG_RFID_VERBOSE && staleStateAckLogSuppressed > 0) {
+    Serial.printf("[WS] ignored %u stale state ack(s)\n", staleStateAckLogSuppressed);
+  }
+  staleStateAckLogSuppressed = 0;
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (lockerStateVersions[i] == pendingStateVersions[i]) {
+      noteLockerReportSuccess(lockerReaders[i], now);
+    } else {
+      markLockerReportDirty(lockerReaders[i], now);
+    }
+    lockerStatusQueued[i] = false;
+  }
+
+  rememberAckedStateFingerprint(ackedFingerprint, ackedFull, ackedFullGeneration, now);
+  if (!ackedFull || ackedFullGeneration == fullStateResyncGeneration) {
+    fullStateResyncPending = false;
+  }
+  Serial.printf("[WS] state ack ok for %s\n", result.text1);
+  clearPendingStateBatch();
 }
 
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize) {
@@ -2302,6 +2659,10 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
     return false;
   }
 
+  if (deviceStateAckPending && !isPendingStateBatchTimedOut(millis())) {
+    return false;
+  }
+
   const uint32_t sequence = nextDeviceSequence();
   char messageId[64];
   buildMessageId(messageId, sizeof(messageId), "state", sequence);
@@ -2318,6 +2679,9 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
 
   const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
   Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
+  if (sent) {
+    rememberPendingStateBatch(job, messageId, millis());
+  }
   return sent;
 }
 
@@ -2690,6 +3054,7 @@ void printStatus() {
     Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
   }
+  Serial.printf("WiFi retry interval: %lu ms, WiFi failures: %u\n", wifiRetryIntervalMs, consecutiveWifiFailureCount);
   if (lastHeartbeatPingMs >= 0) {
     Serial.printf("Last heartbeat ping: %ld ms\n", lastHeartbeatPingMs);
   } else {
@@ -2742,11 +3107,12 @@ void printRfidSnapshot() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const RfidReaderRuntime& runtime = lockerReaders[i];
     Serial.printf(
-      "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
+      "[%s] ss=%u present=%s uid=%s physical=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
       runtime.label,
       runtime.ssPin,
       runtime.hasCard ? "yes" : "no",
       runtime.hasCard ? runtime.stableUid.c_str() : "(none)",
+      runtime.stablePhysicalUid.length() > 0 ? runtime.stablePhysicalUid.c_str() : "(none)",
       runtime.candidateUid.length() > 0 ? runtime.candidateUid.c_str() : "(none)",
       runtime.candidateSeenCount,
       runtime.missingSeenCount,
@@ -3094,12 +3460,12 @@ void initializeRfidReaders() {
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     lockerReaders[i].reader->PCD_Init();
-    lockerReaders[i].reader->PCD_SetAntennaGain(MFRC522::RxGain_max);
+    lockerReaders[i].reader->PCD_SetAntennaGain(RFID_ANTENNA_GAIN);
     debugPrintReaderChipVersion(lockerReaders[i]);
   }
 
   masterReaderRuntime.reader->PCD_Init();
-  masterReaderRuntime.reader->PCD_SetAntennaGain(MFRC522::RxGain_max);
+  masterReaderRuntime.reader->PCD_SetAntennaGain(RFID_ANTENNA_GAIN);
   debugPrintReaderChipVersion(masterReaderRuntime);
 }
 
@@ -3130,13 +3496,27 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
     runtime.lastSeenMs = now;
     runtime.missingSeenCount = 0;
 
-    if (scanResult.logicalTagId.length() > 0) {
-      if (scanResult.logicalTagId == runtime.candidateUid) {
+    String observedLogicalTagId = scanResult.logicalTagId;
+    if (
+      runtime.hasCard &&
+      scanResult.physicalUid.length() > 0 &&
+      scanResult.physicalUid == runtime.stablePhysicalUid &&
+      !scanResult.hasCustomTag &&
+      runtime.stableUid.length() > 0
+    ) {
+      // MIFARE block reads can fail intermittently while UID reads still work.
+      // Keep the last logical tag for the same physical card instead of
+      // oscillating between programmed ID and physical UID.
+      observedLogicalTagId = runtime.stableUid;
+    }
+
+    if (observedLogicalTagId.length() > 0) {
+      if (observedLogicalTagId == runtime.candidateUid) {
         if (runtime.candidateSeenCount < RFID_PRESENT_CONFIRM_SCANS) {
           runtime.candidateSeenCount += 1;
         }
       } else {
-        runtime.candidateUid = scanResult.logicalTagId;
+        runtime.candidateUid = observedLogicalTagId;
         runtime.candidateSeenCount = 1;
       }
 
@@ -3144,10 +3524,11 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         return;
       }
 
-      const bool uidChanged = !runtime.hasCard || scanResult.logicalTagId != runtime.stableUid;
+      const bool uidChanged = !runtime.hasCard || observedLogicalTagId != runtime.stableUid;
 
       if (uidChanged) {
-        runtime.stableUid = scanResult.logicalTagId;
+        runtime.stableUid = observedLogicalTagId;
+        runtime.stablePhysicalUid = scanResult.physicalUid;
         if (!runtime.isMaster) {
           markLockerStateChanged(runtime, now);
         }
@@ -3155,7 +3536,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
 
         Serial.printf("[%s] tag detected: %s (physical UID: %s)%s\n",
           runtime.label,
-          scanResult.logicalTagId.c_str(),
+          observedLogicalTagId.c_str(),
           scanResult.physicalUid.length() > 0 ? scanResult.physicalUid.c_str() : "(unknown)",
           scanResult.hasCustomTag ? " [programmed]" : ""
         );
@@ -3163,6 +3544,9 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
     }
 
     runtime.hasCard = true;
+    if (runtime.stablePhysicalUid.length() == 0 && scanResult.physicalUid.length() > 0) {
+      runtime.stablePhysicalUid = scanResult.physicalUid;
+    }
 
     if (runtime.isMaster) {
       if (tagAssignmentMode.active) {
@@ -3257,6 +3641,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
   }
 
   runtime.stableUid = "";
+  runtime.stablePhysicalUid = "";
   runtime.missingSeenCount = 0;
   markVisualStateDirty();
 }
@@ -3318,6 +3703,15 @@ void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs) {
 }
 
 bool beginSecureRequest(HTTPClient& http, WiFiClientSecure& client, const char* url, const char* requestLabel, uint16_t responseTimeoutMs) {
+  if (!isWifiReady() || wifiConnectInProgress) {
+    Serial.printf("Skipping %s: WiFi is not ready for HTTPS (status=%d, connecting=%s).\n",
+      requestLabel,
+      static_cast<int>(WiFi.status()),
+      wifiConnectInProgress ? "yes" : "no"
+    );
+    return false;
+  }
+
   client.setInsecure();
   client.setHandshakeTimeout(HTTP_TLS_HANDSHAKE_TIMEOUT_SECONDS);
 
@@ -3410,11 +3804,16 @@ void maybeRecoverWifiAfterNetworkFailures(unsigned long now) {
 
   lastWifiRecoveryAttemptMs = now;
   Serial.printf(
-    "Detected %u consecutive network failures while WiFi stayed associated. Cycling WiFi to recover TLS/TCP state.\n",
+    "Detected %u consecutive network failures while WiFi stayed associated. Scheduling a calm WiFi reconnect after backoff.\n",
     consecutiveNetworkFailureCount
   );
-  WiFi.disconnect(true, false);
-  connectWifi();
+  disconnectDeviceWebSocket();
+  WiFi.disconnect(false, false);
+  wifiConnectInProgress = false;
+  consecutiveWifiFailureCount = min<uint8_t>(static_cast<uint8_t>(consecutiveWifiFailureCount + 1), 20);
+  wifiRetryIntervalMs = min(WIFI_RETRY_MAX_MS, max(WIFI_AUTH_FAILURE_RETRY_MS, wifiRetryIntervalMs * 2));
+  lastWifiRetryMs = now;
+  nextBackgroundNetworkAttemptMs = now + wifiRetryIntervalMs;
 }
 
 void resetDeviceActionsPollCadence(bool verbose) {
@@ -3453,6 +3852,7 @@ void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now) {
       version = 1;
     }
   }
+  nextDeviceStateBatchAttemptMs = 0;
   markLockerReportDirty(runtime, now);
 }
 

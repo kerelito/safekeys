@@ -495,11 +495,41 @@ class LockerService extends EventEmitter {
     const deviceId = normalizeDeviceId(context.deviceId || payload.deviceId);
     const lockers = Array.isArray(payload.lockers) ? payload.lockers : [];
     const now = new Date();
-    const stateDoc = await DeviceState.findOne({ deviceId });
+    const startedAt = Date.now();
+    const normalizedLockers = lockers.slice(0, ALLOWED_LOCKERS.length).map(item => {
+      const locker = Number(item.locker);
+      assertValidLocker(locker);
+      assertValidHasTag(item.hasTag);
+
+      return {
+        locker,
+        hasTag: item.hasTag,
+        tagId: typeof item.tagId === "string" && item.tagId.trim()
+          ? assertValidTagId(item.tagId.trim().toUpperCase())
+          : null,
+        doorClosed: typeof item.doorClosed === "boolean" ? item.doorClosed : null,
+        lockClosed: typeof item.lockClosed === "boolean" ? item.lockClosed : null,
+        version: Number.isSafeInteger(Number(item.version))
+          ? Number(item.version)
+          : (normalizeSequence(context.sequence) || 0)
+      };
+    });
+    const tagIds = [...new Set(normalizedLockers
+      .filter(item => item.hasTag && item.tagId)
+      .map(item => item.tagId))];
+    const [stateDoc, lockerDocs, knownItems] = await Promise.all([
+      DeviceState.findOne({ deviceId }).lean(),
+      Locker.find({ locker: { $in: ALLOWED_LOCKERS } }).lean(),
+      tagIds.length > 0
+        ? RfidItem.find({ tagId: { $in: tagIds }, active: true }).lean()
+        : Promise.resolve([])
+    ]);
     const previousVersions = new Map(
       (stateDoc?.lockers || []).map(item => [Number(item.locker), Number(item.version) || 0])
     );
     const accepted = [];
+    const lockerByNumber = new Map(lockerDocs.map(item => [Number(item.locker), item]));
+    const knownItemByTagId = new Map(knownItems.map(item => [item.tagId, item]));
     const storedLockers = new Map(
       (stateDoc?.lockers || []).map(item => [Number(item.locker), {
         locker: Number(item.locker),
@@ -512,15 +542,41 @@ class LockerService extends EventEmitter {
       }])
     );
     const forceFull = payload.full === true;
+    const lockerWrites = [];
+    const logWrites = [];
+    const lockerEvents = [];
 
-    for (const item of lockers.slice(0, ALLOWED_LOCKERS.length)) {
-      const locker = Number(item.locker);
-      assertValidLocker(locker);
-      assertValidHasTag(item.hasTag);
+    const describeKnownTag = tagId => {
+      if (!tagId) {
+        return {
+          tagId: null,
+          itemName: null,
+          itemType: null,
+          itemKnown: null
+        };
+      }
 
-      const incomingVersion = Number.isSafeInteger(Number(item.version))
-        ? Number(item.version)
-        : (normalizeSequence(context.sequence) || 0);
+      const item = knownItemByTagId.get(tagId);
+      if (!item) {
+        return {
+          tagId,
+          itemName: null,
+          itemType: null,
+          itemKnown: false
+        };
+      }
+
+      return {
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true
+      };
+    };
+
+    for (const item of normalizedLockers) {
+      const locker = item.locker;
+      const incomingVersion = item.version;
       const previousVersion = previousVersions.get(locker) || 0;
       const shouldApply = forceFull || incomingVersion >= previousVersion;
 
@@ -535,31 +591,129 @@ class LockerService extends EventEmitter {
         continue;
       }
 
-      const tagId = typeof item.tagId === "string" && item.tagId.trim()
-        ? item.tagId.trim().toUpperCase()
+      const source = context.transport === "websocket" ? "device-ws" : "device-sync";
+      const existingLocker = lockerByNumber.get(locker) || null;
+      const previousItem = existingLocker
+        ? {
+            tagId: existingLocker.detectedTagId || null,
+            itemName: existingLocker.detectedItemName || null,
+            itemType: existingLocker.detectedItemType || null,
+            itemKnown: typeof existingLocker.detectedItemKnown === "boolean" ? existingLocker.detectedItemKnown : null
+          }
         : null;
+      const nextItem = item.hasTag
+        ? (item.tagId ? describeKnownTag(item.tagId) : previousItem)
+        : {
+            tagId: null,
+            itemName: null,
+            itemType: null,
+            itemKnown: null
+          };
+      const statusChanged = !existingLocker || existingLocker.hasTag !== item.hasTag;
+      const itemChanged = previousItem?.tagId !== nextItem?.tagId
+        || previousItem?.itemName !== nextItem?.itemName
+        || previousItem?.itemType !== nextItem?.itemType
+        || previousItem?.itemKnown !== nextItem?.itemKnown;
+      const hasDoorSignal = item.doorClosed !== null || item.lockClosed !== null;
+      const isDoorClosed = hasDoorSignal
+        ? item.doorClosed !== false && item.lockClosed !== false
+        : null;
+      const previousDoorClosed = existingLocker ? existingLocker.isDoorClosed !== false : null;
+      const doorChanged = hasDoorSignal && (!existingLocker || previousDoorClosed !== isDoorClosed);
 
-      await this.updateLockerStatus(locker, item.hasTag, {
-        source: context.transport === "websocket" ? "device-ws" : "device-sync",
-        tagId,
-        actor: deviceId
-      });
+      if (statusChanged || itemChanged || doorChanged) {
+        const set = {
+          locker,
+          hasTag: item.hasTag,
+          detectedTagId: nextItem?.tagId || null,
+          detectedItemName: nextItem?.itemName || null,
+          detectedItemType: nextItem?.itemType || null,
+          detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+          detectedAt: item.hasTag ? now : null
+        };
 
-      const hasDoorSignal = typeof item.doorClosed === "boolean" || typeof item.lockClosed === "boolean";
-      if (hasDoorSignal) {
-        const doorClosed = item.doorClosed !== false && item.lockClosed !== false;
-        await this.updateLockerDoorStatus(locker, doorClosed, {
-          source: context.transport === "websocket" ? "device-ws" : "device-sync",
-          actor: deviceId
+        if (hasDoorSignal) {
+          set.isDoorClosed = isDoorClosed;
+        } else if (!existingLocker) {
+          set.isDoorClosed = true;
+        }
+
+        lockerWrites.push({
+          updateOne: {
+            filter: { locker },
+            update: {
+              $set: set,
+              $setOnInsert: { locker }
+            },
+            upsert: true
+          }
+        });
+      }
+
+      if (existingLocker && existingLocker.hasTag === true && item.hasTag === false) {
+        logWrites.push({
+          event: "KEY_REMOVED",
+          locker,
+          tagId: previousItem?.tagId || null,
+          itemName: previousItem?.itemName || null,
+          itemType: previousItem?.itemType || null,
+          itemKnown: typeof previousItem?.itemKnown === "boolean" ? previousItem.itemKnown : null,
+          source,
+          actor: deviceId,
+          timestamp: now
+        });
+      }
+
+      if (existingLocker && existingLocker.hasTag === false && item.hasTag === true) {
+        logWrites.push({
+          event: "KEY_RETURNED",
+          locker,
+          tagId: nextItem?.tagId || null,
+          itemName: nextItem?.itemName || null,
+          itemType: nextItem?.itemType || null,
+          itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+          source,
+          actor: deviceId,
+          timestamp: now
+        });
+      }
+
+      if (existingLocker && doorChanged) {
+        logWrites.push({
+          event: isDoorClosed ? "LOCKER_DOOR_CLOSED" : "LOCKER_DOOR_OPENED",
+          locker,
+          source,
+          actor: deviceId,
+          timestamp: now
+        });
+      }
+
+      if (statusChanged || itemChanged) {
+        lockerEvents.push({
+          locker,
+          hasTag: item.hasTag,
+          tagId: nextItem?.tagId || null,
+          itemName: nextItem?.itemName || null,
+          itemType: nextItem?.itemType || null,
+          itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+          source
+        });
+      }
+
+      if (doorChanged) {
+        lockerEvents.push({
+          locker,
+          isDoorClosed,
+          source
         });
       }
 
       storedLockers.set(locker, {
         locker,
         hasTag: item.hasTag,
-        tagId,
-        doorClosed: typeof item.doorClosed === "boolean" ? item.doorClosed : null,
-        lockClosed: typeof item.lockClosed === "boolean" ? item.lockClosed : null,
+        tagId: item.tagId,
+        doorClosed: item.doorClosed,
+        lockClosed: item.lockClosed,
         version: incomingVersion,
         updatedAt: now
       });
@@ -570,23 +724,51 @@ class LockerService extends EventEmitter {
       });
     }
 
-    await DeviceState.findOneAndUpdate(
-      { deviceId },
-      {
-        $set: {
-          deviceId,
-          connected: true,
-          transport: context.transport || "unknown",
-          connectionId: context.connectionId || this.deviceStatus.connectionId || null,
-          bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
-          lastSeenAt: now,
-          lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
-          ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
-          lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
-        }
-      },
-      { upsert: true, new: true }
-    );
+    const [, logs] = await Promise.all([
+      lockerWrites.length > 0
+        ? Locker.bulkWrite(lockerWrites, { ordered: false })
+        : Promise.resolve(),
+      logWrites.length > 0
+        ? Log.insertMany(logWrites)
+        : Promise.resolve([]),
+      DeviceState.findOneAndUpdate(
+        { deviceId },
+        {
+          $set: {
+            deviceId,
+            connected: true,
+            transport: context.transport || "unknown",
+            connectionId: context.connectionId || this.deviceStatus.connectionId || null,
+            bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
+            lastSeenAt: now,
+            lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
+            ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
+            lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
+          }
+        },
+        { upsert: true, new: true }
+      )
+    ]);
+
+    for (const log of logs || []) {
+      this.emit("log", log);
+    }
+
+    for (const event of lockerEvents) {
+      this.emit("locker-status-changed", event);
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > 1000) {
+      console.warn("Wolne przetwarzanie state.batch urzadzenia.", {
+        deviceId,
+        messageId: context.messageId || null,
+        elapsedMs,
+        lockers: normalizedLockers.length,
+        writes: lockerWrites.length,
+        logs: logWrites.length
+      });
+    }
 
     this.deviceStatus = {
       ...this.deviceStatus,
