@@ -78,11 +78,43 @@ Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
 ## Aktualne założenia
 
 - Panel WWW i Discord korzystają z tego samego backendu.
-- Urządzenie może raportować status skrytek i pobierać zakolejkowane akcje.
+- Urządzenie komunikuje się z backendem przede wszystkim przez trwały WebSocket `wss://<host>/device/ws`.
+- Stare endpointy HTTP pozostają kompatybilne, a firmware ma batched fallback `POST /device/sync` dla stanu urządzenia.
 - RFID użytkownika jest osobnym bytem od RFID obecności klucza w skrytce.
 - Przedmioty RFID mogą być opisane własną nazwą i typem, a nieznane UID są pokazywane jako obce obiekty.
 - Frontend pozostaje prostą aplikacją statyczną bez bundlera, żeby wdrożenie na Railway było lekkie.
 - Konta panelu są przechowywane w MongoDB; zmienne `ADMIN_*` służą już jako seed startowy, gdy baza nie ma jeszcze żadnego użytkownika panelu.
+
+## Komunikacja urządzenia 24/7
+
+MQTT nie jest użyty, bo repo nie dostarcza brokera ani osobnego portu deploymentowego. Backend udostępnia natomiast WebSocket na tym samym serwerze HTTP, więc ESP32 utrzymuje jedno długie połączenie `wss://www.safekeys.pl/device/ws?deviceId=esp32-main` z nagłówkiem `x-device-key`.
+
+Kontrakt WebSocket:
+
+- backend wysyła `hello` oraz `commands`;
+- firmware wysyła `hello`, `heartbeat`, `state.batch`, `command.ack` i `tag.assignment.result`;
+- każda wiadomość firmware ma `messageId`, `seq`, `deviceId` i `bootId`;
+- backend zapisuje receipt po `messageId`, więc powtórki są idempotentne;
+- stan skrytek jest wysyłany batchowo z per-locker `version`, a po reconnect firmware wymusza pełny resync;
+- komendy są trwałe w MongoDB i przechodzą przez statusy `pending`, `delivered`, `acknowledged`, `applied` albo `failed`;
+- po reconnect backend ponownie dostarcza niezamknięte komendy, a firmware ma cache ostatnich `commandId`, żeby nie wykonać duplikatu.
+
+Endpointy kompatybilności i fallback:
+
+- `POST /verify-code` i `POST /verify-tag` pozostają dla operacji interaktywnych;
+- `POST /device/heartbeat` pozostaje dla starszego firmware i jako HTTPS fallback;
+- `POST /device/sync` przyjmuje batch `{ deviceId, messages: [...] }` z tym samym kontraktem co WebSocket;
+- `GET /device/actions` i `POST /device/actions/ack` pozostają kompatybilne, ale korzystają z trwałych komend w MongoDB;
+- `POST /locker-status` i `POST /locker-door-status` pozostają dla starego protokołu.
+
+Zmienne środowiskowe kanału urządzenia:
+
+- `DEVICE_ID` domyślnie `esp32-main`;
+- `DEVICE_WS_PATH` domyślnie `/device/ws`;
+- `DEVICE_HEARTBEAT_TIMEOUT_MS` domyślnie `180000`;
+- `DEVICE_COMMAND_REDELIVER_AFTER_MS` domyślnie `30000`;
+- `DEVICE_COMMAND_DELIVERY_LIMIT` domyślnie `20`;
+- `DEVICE_WS_PING_INTERVAL_MS` domyślnie `30000`.
 
 ## Wysyłka kodów e-mailem
 

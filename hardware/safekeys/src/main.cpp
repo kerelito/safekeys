@@ -2,10 +2,13 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <esp_idf_version.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -42,6 +45,10 @@ static const char* WIFI_PASSWORD = "13793814";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
+static const char* DEVICE_ID = "esp32-main";
+static const char* DEVICE_WS_HOST = "www.safekeys.pl";
+static const uint16_t DEVICE_WS_PORT = 443;
+static const char* DEVICE_WS_PATH = "/device/ws?deviceId=esp32-main";
 
 static const bool ENABLE_KEYPAD = true;
 static const bool ENABLE_LOCKER_SWITCH_INPUTS = true;
@@ -83,7 +90,18 @@ static const unsigned long WIFI_LOADING_FRAME_MS = 120;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 60000;
 static const unsigned long LOCKER_STATUS_RESYNC_INTERVAL_MS = 300000;
 static const unsigned long DEVICE_ACTIONS_POLL_INTERVAL_MS = 8000;
+static const unsigned long DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS = 60000;
 static const unsigned long DEVICE_ACTIONS_LONG_POLL_WAIT_MS = 3000;
+static const unsigned long DEVICE_WS_SERVICE_INTERVAL_MS = 20;
+static const unsigned long DEVICE_WS_RECONNECT_BASE_MS = 2000;
+static const unsigned long DEVICE_WS_RECONNECT_MAX_MS = 60000;
+static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
+static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
+static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
+static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
+static const unsigned long LOCKER_STATUS_BATCH_WINDOW_MS = 1200;
+static const unsigned long LOCKER_STATUS_RETRY_BASE_MS = 5000;
+static const unsigned long LOCKER_STATUS_RETRY_MAX_MS = 120000;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
@@ -92,15 +110,23 @@ static const unsigned long KEYPAD_RELEASE_DEBOUNCE_MS = 25;
 static const uint8_t RFID_PRESENT_CONFIRM_SCANS = 3;
 static const uint8_t RFID_MISSING_CONFIRM_SCANS = 4;
 static const unsigned long NETWORK_QUEUE_WAIT_MS = 500;
-static const uint16_t HTTP_CONNECT_TIMEOUT_MS = 1500;
-static const uint16_t HTTP_RESPONSE_TIMEOUT_MS = 2500;
+static const uint16_t HTTP_CONNECT_TIMEOUT_MS = 8000;
+static const uint16_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
+static const uint16_t HTTP_TLS_HANDSHAKE_TIMEOUT_SECONDS = 20;
 static const uint8_t NETWORK_QUEUE_LENGTH = 12;
 static const uint16_t NETWORK_TASK_STACK_SIZE = 8192;
 static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 45;
+static const uint8_t COMMAND_DEDUP_CACHE_SIZE = 12;
+static const uint8_t NETWORK_FAILURES_BEFORE_WIFI_RESET = 3;
+static const unsigned long NETWORK_FAILURE_RETRY_BASE_MS = 2000;
+static const unsigned long NETWORK_FAILURE_RETRY_MAX_MS = 30000;
+static const unsigned long NETWORK_WIFI_RECOVERY_COOLDOWN_MS = 30000;
 static const byte RFID_APP_BLOCK = 4;
 static const char RFID_APP_MAGIC_1 = 'S';
 static const char RFID_APP_MAGIC_2 = 'K';
 static const char RFID_APP_VERSION = '1';
+static const uint8_t RFID_AUTH_RETRY_COUNT = 3;
+static const unsigned long RFID_AUTH_RETRY_DELAY_MS = 30;
 
 static char keypadCharMap[] = {
   '1', '2', '3', 'A',
@@ -164,9 +190,12 @@ struct RfidReaderRuntime {
   String candidateUid;
   unsigned long lastSeenMs;
   unsigned long lastReportMs;
+  unsigned long dirtySinceMs;
+  unsigned long nextReportAttemptMs;
   bool reportDirty;
   uint8_t candidateSeenCount;
   uint8_t missingSeenCount;
+  uint8_t reportFailureCount;
 };
 
 struct TagAssignmentMode {
@@ -181,6 +210,8 @@ struct TagAssignmentMode {
 enum class NetworkJobType : uint8_t {
   Heartbeat,
   LockerStatus,
+  DeviceStateBatch,
+  CommandAck,
   DeviceActionsPoll,
   VerifyCode,
   VerifyMasterTag,
@@ -191,15 +222,26 @@ struct NetworkJob {
   NetworkJobType type;
   uint8_t lockerNumber;
   bool boolValue;
+  bool boolValue2;
+  bool boolValue3;
+  uint32_t numberValue;
   char text1[32];
   char text2[32];
   char text3[32];
   char text4[96];
+  bool lockerHasTag[LOCKER_COUNT];
+  bool lockerDoorClosed[LOCKER_COUNT];
+  bool lockerLockClosed[LOCKER_COUNT];
+  uint32_t lockerVersions[LOCKER_COUNT];
+  char lockerTags[LOCKER_COUNT][24];
 };
 
 enum class NetworkResultType : uint8_t {
   Heartbeat,
   LockerStatus,
+  DeviceStateBatch,
+  DeviceCommand,
+  CommandAck,
   DeviceActionsPoll,
   VerifyCode,
   VerifyMasterTag
@@ -217,7 +259,10 @@ struct NetworkResult {
   char text2[64];
   char text3[64];
   char text4[32];
+  char actionId[32];
+  char actionType[32];
   uint8_t lockers[LOCKER_COUNT];
+  uint32_t lockerVersions[LOCKER_COUNT];
 };
 
 static const LockerHardwareConfig LOCKERS[LOCKER_COUNT] = {
@@ -232,11 +277,12 @@ MFRC522 lockerReader1(RFID_LOCKER_SS_PINS[0], RFID_RST_PIN);
 MFRC522 lockerReader2(RFID_LOCKER_SS_PINS[1], RFID_RST_PIN);
 MFRC522 lockerReader3(RFID_LOCKER_SS_PINS[2], RFID_RST_PIN);
 MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
+WebSocketsClient deviceWebSocket;
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
-  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", 0, 0, true, 0, 0 },
-  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", 0, 0, true, 0, 0 },
-  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", 0, 0, true, 0, 0 }
+  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", 0, 0, 0, 0, true, 0, 0, 0 }
 };
 
 RfidReaderRuntime masterReaderRuntime = {
@@ -251,12 +297,14 @@ RfidReaderRuntime masterReaderRuntime = {
   "",
   0,
   0,
+  0,
+  0,
   false,
+  0,
   0,
   0
 };
 
-WiFiClientSecure secureClient;
 String enteredCode;
 String serialCommandBuffer;
 
@@ -289,13 +337,62 @@ bool deviceActionsPollQueued = false;
 bool codeVerificationPending = false;
 bool masterTagVerificationPending = false;
 bool lockerStatusQueued[LOCKER_COUNT] = { false, false, false };
+bool deviceStateBatchQueued = false;
 char pendingCode[CODE_LENGTH + 1] = "";
 char pendingMasterTagId[32] = "";
 bool taskWatchdogReady = false;
+volatile uint8_t consecutiveNetworkFailureCount = 0;
+volatile unsigned long nextBackgroundNetworkAttemptMs = 0;
+volatile unsigned long lastWifiRecoveryAttemptMs = 0;
+unsigned long deviceActionsPollIntervalMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
+volatile bool deviceWsConnected = false;
+volatile bool deviceWsConfigured = false;
+volatile bool deviceWsReconnectRequested = true;
+volatile unsigned long lastDeviceWsServiceMs = 0;
+volatile unsigned long lastDeviceWsConnectAttemptMs = 0;
+volatile unsigned long nextDeviceWsConnectAttemptMs = 0;
+volatile unsigned long lastDeviceWsConnectedMs = 0;
+unsigned long deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
+unsigned long lastDeviceWsHeartbeatMs = 0;
+unsigned long lastDeviceStateBatchMs = 0;
+uint32_t deviceMessageSequence = 0;
+uint32_t lockerStateVersions[LOCKER_COUNT] = { 1, 1, 1 };
+bool fullStateResyncPending = true;
+char deviceBootId[17] = "";
+bool lockerInputSnapshotReady[LOCKER_COUNT] = { false, false, false };
+bool lastLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
+bool lastLockerLockClosed[LOCKER_COUNT] = { true, true, true };
+char processedCommandIds[COMMAND_DEDUP_CACHE_SIZE][32] = {};
+uint8_t nextProcessedCommandSlot = 0;
 
+void configureWiFiRuntime();
 void connectWifi();
 void serviceWifiConnection(unsigned long now);
+void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+void logWiFiSnapshot(const char* prefix);
 bool isWifiReady();
+void initializeDeviceIdentity();
+void serviceDeviceWebSocket(unsigned long now);
+void configureDeviceWebSocket();
+void connectDeviceWebSocket(unsigned long now, bool forceNow = false);
+void disconnectDeviceWebSocket();
+bool isDeviceWebSocketReady();
+bool shouldUseHttpsFallback(unsigned long now);
+void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length);
+void handleDeviceWebSocketMessage(const char* payload, size_t length);
+bool sendDeviceHello();
+bool sendDeviceHeartbeatWs();
+bool sendDeviceStateBatchWs(const NetworkJob& job);
+bool sendDeviceCommandAckWs(const NetworkJob& job);
+bool sendTagAssignmentResultWs(const NetworkJob& job);
+bool postDeviceStateBatch(const NetworkJob& job);
+bool postCommandAck(const NetworkJob& job);
+bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
+uint32_t nextDeviceSequence();
+void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence);
+void buildHeartbeatPayload(JsonObject payload);
+void buildLockerStateBatchJob(NetworkJob& job, bool full);
+void buildStateBatchMessage(const NetworkJob& job, JsonDocument& doc, uint32_t sequence, const char* messageId);
 void handleKeypad();
 void handleSerialDebug();
 void reserveStringBuffers();
@@ -306,6 +403,8 @@ void networkTaskMain(void* parameter);
 void maybeSendHeartbeat(unsigned long now);
 void maybePollDeviceActions(unsigned long now);
 bool maybeReportLockerStatuses(unsigned long now);
+bool maybeQueueDeviceStateBatch(unsigned long now);
+void serviceLockerInputChanges(unsigned long now);
 void processEnteredCode(const String& code);
 bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber);
 bool postVerifyCode(const String& code, String& responseBody);
@@ -317,6 +416,10 @@ void handleNetworkResult(const NetworkResult& result);
 void recoverFromDroppedNetworkResult(const NetworkResult& result);
 bool enqueueNetworkJob(const NetworkJob& job);
 bool isPriorityNetworkJob(const NetworkJob& job);
+void handleRemoteCommand(const NetworkResult& result);
+void queueCommandAck(const char* actionId, bool success, const char* status, const char* message);
+bool wasCommandProcessed(const char* actionId);
+void rememberProcessedCommand(const char* actionId);
 void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize);
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize);
 void setPendingCode(const String& code);
@@ -350,17 +453,34 @@ void initializeRfidReaders();
 void serviceRfidReaders(unsigned long now);
 bool scanRfidReader(RfidReaderRuntime& runtime, unsigned long now);
 void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scanResult, unsigned long now);
-RfidScanResult readTagFromReader(MFRC522& reader);
+RfidScanResult readTagFromReader(RfidReaderRuntime& runtime);
 String uidToString(const MFRC522::Uid& uid);
 void debugPrintReaderChipVersion(const RfidReaderRuntime& runtime);
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName);
 void stopTagAssignmentMode();
 void renderTagAssignmentFrame(uint8_t frameIndex);
-bool tryProgramTag(MFRC522& reader, const String& tagId, String& error);
+bool tryProgramTag(MFRC522& reader, const String& expectedPhysicalUid, const String& tagId, String& error);
 bool tryReadProgrammedTagId(MFRC522& reader, String& tagId);
 bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key, MFRC522::StatusCode* statusOut = nullptr);
+String getPiccTypeName(MFRC522::PICC_Type piccType);
+void finishRfidSession(MFRC522& reader);
+bool selectCardForTransaction(MFRC522& reader, String& selectedUid, MFRC522::StatusCode* wakeStatusOut = nullptr);
 bool postTagAssignmentResult(const String& assignmentId, bool success, const String& tagId, const String& physicalUid, const String& error);
 void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs = HTTP_RESPONSE_TIMEOUT_MS);
+bool beginSecureRequest(HTTPClient& http, WiFiClientSecure& client, const char* url, const char* requestLabel, uint16_t responseTimeoutMs = HTTP_RESPONSE_TIMEOUT_MS);
+String describeHttpError(int httpCode);
+void logHttpFailure(const char* requestLabel, int httpCode, WiFiClientSecure& client, const String& responseBody = "");
+void noteNetworkSuccess();
+void noteNetworkFailure();
+bool isBackgroundNetworkBackoffActive(unsigned long now);
+void maybeRecoverWifiAfterNetworkFailures(unsigned long now);
+void resetDeviceActionsPollCadence(bool verbose = false);
+void relaxDeviceActionsPollCadence();
+void markLockerReportDirty(RfidReaderRuntime& runtime, unsigned long now);
+void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now);
+void noteLockerReportSuccess(RfidReaderRuntime& runtime, unsigned long now);
+void noteLockerReportFailure(RfidReaderRuntime& runtime, unsigned long now);
+void markAllLockerReportsDirty(unsigned long now, bool resetRetryTimers);
 void markVisualStateDirty();
 
 uint32_t colorGreen(uint8_t brightness = STATUS_BRIGHTNESS) {
@@ -403,10 +523,10 @@ void setup() {
   clearStrip();
 
   reserveStringBuffers();
+  initializeDeviceIdentity();
+  configureWiFiRuntime();
   configureLockerInputs();
   initializeRfidReaders();
-
-  secureClient.setInsecure();
   initializeTaskWatchdog();
   initializeNetworkTask();
 
@@ -419,12 +539,21 @@ void setup() {
   Serial.printf("ARGB strip pin: %u, leds: %u\n", STRIP_PIN, TOTAL_LEDS);
   Serial.printf("RFID SPI pins -> SCK=%u, MISO=%u, MOSI=%u, RST=%u\n", RFID_SPI_SCK_PIN, RFID_SPI_MISO_PIN, RFID_SPI_MOSI_PIN, RFID_RST_PIN);
   Serial.printf("API base URL: %s\n", API_BASE_URL);
+  Serial.printf("Device WebSocket: wss://%s:%u%s\n", DEVICE_WS_HOST, DEVICE_WS_PORT, DEVICE_WS_PATH);
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
   printUsage();
   printRfidSnapshot();
 
   updateVisualState();
   connectWifi();
+}
+
+void configureWiFiRuntime() {
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.onEvent(handleWiFiEvent);
 }
 
 void reserveStringBuffers() {
@@ -443,6 +572,17 @@ void reserveStringBuffers() {
   masterReaderRuntime.stableUid.reserve(24);
   masterReaderRuntime.lastTriggeredUid.reserve(24);
   masterReaderRuntime.candidateUid.reserve(24);
+}
+
+void initializeDeviceIdentity() {
+  snprintf(
+    deviceBootId,
+    sizeof(deviceBootId),
+    "%08lX%08lX",
+    static_cast<unsigned long>(esp_random()),
+    static_cast<unsigned long>(millis())
+  );
+  Serial.printf("Device identity: id=%s bootId=%s\n", DEVICE_ID, deviceBootId);
 }
 
 void initializeTaskWatchdog() {
@@ -495,7 +635,7 @@ void initializeNetworkTask() {
     nullptr,
     1,
     &networkTaskHandle,
-    0
+    1
   );
 
   if (created != pdPASS) {
@@ -517,8 +657,9 @@ void networkTaskMain(void* parameter) {
   NetworkJob job = {};
   for (;;) {
     resetTaskWatchdog();
+    serviceDeviceWebSocket(millis());
 
-    if (xQueueReceive(networkJobQueue, &job, pdMS_TO_TICKS(NETWORK_QUEUE_WAIT_MS)) != pdTRUE) {
+    if (xQueueReceive(networkJobQueue, &job, pdMS_TO_TICKS(DEVICE_WS_SERVICE_INTERVAL_MS)) != pdTRUE) {
       continue;
     }
 
@@ -528,7 +669,10 @@ void networkTaskMain(void* parameter) {
     switch (job.type) {
       case NetworkJobType::Heartbeat: {
         result.type = NetworkResultType::Heartbeat;
-        result.requestOk = sendHeartbeat();
+        result.requestOk = sendDeviceHeartbeatWs();
+        if (!result.requestOk && shouldUseHttpsFallback(millis())) {
+          result.requestOk = sendHeartbeat();
+        }
         result.numberValue = lastHeartbeatPingMs;
         shouldPublishResult = true;
         break;
@@ -540,6 +684,31 @@ void networkTaskMain(void* parameter) {
         result.boolValue1 = job.boolValue;
         copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
         result.requestOk = postLockerStatus(job.lockerNumber, job.boolValue, String(job.text1));
+        shouldPublishResult = true;
+        break;
+      }
+
+      case NetworkJobType::DeviceStateBatch: {
+        result.type = NetworkResultType::DeviceStateBatch;
+        for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+          result.lockerVersions[i] = job.lockerVersions[i];
+        }
+        result.requestOk = sendDeviceStateBatchWs(job);
+        if (!result.requestOk && shouldUseHttpsFallback(millis())) {
+          result.requestOk = postDeviceStateBatch(job);
+        }
+        result.boolValue1 = job.boolValue;
+        shouldPublishResult = true;
+        break;
+      }
+
+      case NetworkJobType::CommandAck: {
+        result.type = NetworkResultType::CommandAck;
+        copyCStringToBuffer(job.text1, result.actionId, sizeof(result.actionId));
+        result.requestOk = sendDeviceCommandAckWs(job);
+        if (!result.requestOk) {
+          result.requestOk = postCommandAck(job);
+        }
         shouldPublishResult = true;
         break;
       }
@@ -571,14 +740,30 @@ void networkTaskMain(void* parameter) {
       }
 
       case NetworkJobType::TagAssignmentResult: {
-        postTagAssignmentResult(
-          String(job.text1),
-          job.boolValue,
-          String(job.text2),
-          String(job.text3),
-          String(job.text4)
-        );
+        bool requestOk = sendTagAssignmentResultWs(job);
+        if (!requestOk) {
+          requestOk = postTagAssignmentResult(
+            String(job.text1),
+            job.boolValue,
+            String(job.text2),
+            String(job.text3),
+            String(job.text4)
+          );
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        } else {
+          noteNetworkFailure();
+        }
         break;
+      }
+    }
+
+    if (shouldPublishResult) {
+      if (result.requestOk) {
+        noteNetworkSuccess();
+      } else {
+        noteNetworkFailure();
       }
     }
 
@@ -604,6 +789,7 @@ void loop() {
     handleKeypad();
   }
   serviceRfidReaders(now);
+  serviceLockerInputChanges(now);
   serviceNetworkResults();
   updateVisualState();
 
@@ -614,11 +800,13 @@ void loop() {
     return;
   }
 
+  maybeRecoverWifiAfterNetworkFailures(now);
+
   if (lastHeartbeatMs == 0 || now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
     maybeSendHeartbeat(now);
-  } else if (maybeReportLockerStatuses(now)) {
+  } else if (maybeQueueDeviceStateBatch(now)) {
     // Limit background network traffic to one request per loop.
-  } else if (lastDeviceActionsPollMs == 0 || now - lastDeviceActionsPollMs >= DEVICE_ACTIONS_POLL_INTERVAL_MS) {
+  } else if (!isDeviceWebSocketReady() && (lastDeviceActionsPollMs == 0 || now - lastDeviceActionsPollMs >= deviceActionsPollIntervalMs)) {
     maybePollDeviceActions(now);
   }
 }
@@ -627,6 +815,8 @@ void connectWifi() {
   Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   wifiConnectInProgress = true;
@@ -638,6 +828,100 @@ void connectWifi() {
   pulseLed(35);
 }
 
+void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START:
+      Serial.printf("[WiFi] event=%s\n", WiFi.eventName(event));
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf(
+        "[WiFi] event=%s ssid=%.*s channel=%u auth=%u\n",
+        WiFi.eventName(event),
+        info.wifi_sta_connected.ssid_len,
+        reinterpret_cast<const char*>(info.wifi_sta_connected.ssid),
+        info.wifi_sta_connected.channel,
+        info.wifi_sta_connected.authmode
+      );
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      wifiConnectInProgress = false;
+      lastHeartbeatMs = 0;
+      lastDeviceActionsPollMs = 0;
+      noteNetworkSuccess();
+      logWiFiSnapshot("[WiFi] got IP");
+      for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+        lockerStatusQueued[i] = false;
+      }
+      markAllLockerReportsDirty(millis(), true);
+      fullStateResyncPending = true;
+      deviceStateBatchQueued = false;
+      deviceWsReconnectRequested = true;
+      nextDeviceWsConnectAttemptMs = 0;
+      resetDeviceActionsPollCadence();
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      wifiConnectInProgress = false;
+      logWiFiSnapshot("[WiFi] lost IP");
+      heartbeatQueued = false;
+      deviceActionsPollQueued = false;
+      lastHeartbeatMs = 0;
+      lastDeviceActionsPollMs = 0;
+      nextBackgroundNetworkAttemptMs = 0;
+      lastWifiRetryMs = 0;
+      for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+        lockerStatusQueued[i] = false;
+      }
+      markAllLockerReportsDirty(millis(), true);
+      fullStateResyncPending = true;
+      deviceStateBatchQueued = false;
+      disconnectDeviceWebSocket();
+      resetDeviceActionsPollCadence();
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      wifiConnectInProgress = false;
+      Serial.printf(
+        "[WiFi] event=%s reason=%u (%s)\n",
+        WiFi.eventName(event),
+        info.wifi_sta_disconnected.reason,
+        WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason))
+      );
+      heartbeatQueued = false;
+      deviceActionsPollQueued = false;
+      lastHeartbeatMs = 0;
+      lastDeviceActionsPollMs = 0;
+      nextBackgroundNetworkAttemptMs = 0;
+      lastWifiRetryMs = 0;
+      for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+        lockerStatusQueued[i] = false;
+      }
+      markAllLockerReportsDirty(millis(), true);
+      fullStateResyncPending = true;
+      deviceStateBatchQueued = false;
+      disconnectDeviceWebSocket();
+      resetDeviceActionsPollCadence();
+      break;
+
+    default:
+      break;
+  }
+}
+
+void logWiFiSnapshot(const char* prefix) {
+  Serial.printf(
+    "%s: status=%d ip=%s gw=%s mask=%s rssi=%d\n",
+    prefix,
+    static_cast<int>(WiFi.status()),
+    WiFi.localIP().toString().c_str(),
+    WiFi.gatewayIP().toString().c_str(),
+    WiFi.subnetMask().toString().c_str(),
+    WiFi.RSSI()
+  );
+}
+
 void serviceWifiConnection(unsigned long now) {
   if (!wifiConnectInProgress) {
     return;
@@ -647,6 +931,7 @@ void serviceWifiConnection(unsigned long now) {
     wifiConnectInProgress = false;
     lastHeartbeatMs = 0;
     lastDeviceActionsPollMs = 0;
+    noteNetworkSuccess();
     Serial.println();
     Serial.print("WiFi connected. IP: ");
     Serial.println(WiFi.localIP());
@@ -680,7 +965,233 @@ bool isWifiReady() {
   return WiFi.status() == WL_CONNECTED;
 }
 
+void serviceDeviceWebSocket(unsigned long now) {
+  if (!isWifiReady()) {
+    return;
+  }
+
+  if (!deviceWsConfigured) {
+    configureDeviceWebSocket();
+  }
+
+  if (!deviceWsConnected && (deviceWsReconnectRequested || now >= nextDeviceWsConnectAttemptMs)) {
+    connectDeviceWebSocket(now);
+  }
+
+  if (now - lastDeviceWsServiceMs >= DEVICE_WS_SERVICE_INTERVAL_MS) {
+    lastDeviceWsServiceMs = now;
+    deviceWebSocket.loop();
+  }
+}
+
+void configureDeviceWebSocket() {
+  static char extraHeaders[128];
+  snprintf(extraHeaders, sizeof(extraHeaders), "x-device-key: %s\r\n", DEVICE_API_KEY);
+
+  deviceWebSocket.onEvent(handleDeviceWebSocketEvent);
+  deviceWebSocket.setExtraHeaders(extraHeaders);
+  deviceWebSocket.enableHeartbeat(
+    DEVICE_WS_PING_INTERVAL_MS,
+    DEVICE_WS_PONG_TIMEOUT_MS,
+    DEVICE_WS_DISCONNECT_TIMEOUT_COUNT
+  );
+  deviceWsConfigured = true;
+}
+
+void connectDeviceWebSocket(unsigned long now, bool forceNow) {
+  if (!isWifiReady() || deviceWsConnected) {
+    return;
+  }
+
+  if (!forceNow && nextDeviceWsConnectAttemptMs != 0 && now < nextDeviceWsConnectAttemptMs) {
+    return;
+  }
+
+  lastDeviceWsConnectAttemptMs = now;
+  deviceWsReconnectRequested = false;
+  nextDeviceWsConnectAttemptMs = now + deviceWsReconnectDelayMs;
+
+  Serial.printf(
+    "[WS] connecting to wss://%s:%u%s (backoff=%lu ms)\n",
+    DEVICE_WS_HOST,
+    DEVICE_WS_PORT,
+    DEVICE_WS_PATH,
+    deviceWsReconnectDelayMs
+  );
+
+  deviceWebSocket.beginSSL(DEVICE_WS_HOST, DEVICE_WS_PORT, DEVICE_WS_PATH);
+  deviceWsReconnectDelayMs = min(DEVICE_WS_RECONNECT_MAX_MS, deviceWsReconnectDelayMs * 2);
+}
+
+void disconnectDeviceWebSocket() {
+  if (deviceWsConfigured) {
+    deviceWebSocket.disconnect();
+  }
+  deviceWsConnected = false;
+  deviceWsReconnectRequested = true;
+  nextDeviceWsConnectAttemptMs = 0;
+}
+
+bool isDeviceWebSocketReady() {
+  return isWifiReady() && deviceWsConnected;
+}
+
+bool shouldUseHttpsFallback(unsigned long now) {
+  if (isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  if (lastDeviceWsConnectAttemptMs == 0) {
+    return true;
+  }
+
+  return now - lastDeviceWsConnectAttemptMs >= DEVICE_WS_FALLBACK_AFTER_MS;
+}
+
+void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      deviceWsConnected = true;
+      deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
+      lastDeviceWsConnectedMs = millis();
+      lastDeviceWsHeartbeatMs = 0;
+      fullStateResyncPending = true;
+      deviceStateBatchQueued = false;
+      resetDeviceActionsPollCadence();
+      Serial.printf("[WS] connected: %.*s\n", static_cast<int>(length), payload);
+      sendDeviceHello();
+      break;
+
+    case WStype_DISCONNECTED:
+      if (deviceWsConnected) {
+        Serial.println("[WS] disconnected");
+      }
+      deviceWsConnected = false;
+      deviceWsReconnectRequested = true;
+      nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
+      break;
+
+    case WStype_TEXT:
+      handleDeviceWebSocketMessage(reinterpret_cast<const char*>(payload), length);
+      break;
+
+    case WStype_ERROR:
+      Serial.printf("[WS] error: %.*s\n", static_cast<int>(length), payload);
+      deviceWsConnected = false;
+      deviceWsReconnectRequested = true;
+      break;
+
+    case WStype_PONG:
+      Serial.println("[WS] pong");
+      break;
+
+    case WStype_PING:
+      Serial.println("[WS] ping");
+      break;
+
+    default:
+      break;
+  }
+}
+
+void handleDeviceWebSocketMessage(const char* payload, size_t length) {
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, payload, length);
+  if (error) {
+    Serial.printf("[WS] JSON parse failed: %s\n", error.c_str());
+    return;
+  }
+
+  const char* type = doc["type"] | "";
+  if (strcmp(type, "hello") == 0) {
+    Serial.printf("[WS] server hello, resync=%s\n", (doc["resyncRequired"] | false) ? "true" : "false");
+    sendDeviceHello();
+    fullStateResyncPending = true;
+    deviceStateBatchQueued = false;
+    return;
+  }
+
+  if (strcmp(type, "ack") == 0) {
+    const bool ok = doc["ok"] | false;
+    const char* messageId = doc["messageId"] | "(none)";
+    if (!ok) {
+      Serial.printf("[WS] protocol ack failed for %s: %s\n", messageId, doc["error"] | "unknown");
+      if (strncmp(messageId, "state-", 6) == 0) {
+        fullStateResyncPending = true;
+        markAllLockerReportsDirty(millis(), false);
+      }
+    } else if (DEBUG_RFID_VERBOSE) {
+      Serial.printf("[WS] ack ok for %s\n", messageId);
+    }
+    return;
+  }
+
+  if (strcmp(type, "commands") != 0) {
+    Serial.printf("[WS] unsupported message type: %s\n", type);
+    return;
+  }
+
+  const JsonArray commands = doc["commands"];
+  if (commands.isNull()) {
+    return;
+  }
+
+  for (JsonObject command : commands) {
+    NetworkResult result = {};
+    result.type = NetworkResultType::DeviceCommand;
+    result.requestOk = true;
+    copyCStringToBuffer(command["id"] | "", result.actionId, sizeof(result.actionId));
+    copyCStringToBuffer(command["type"] | "UNKNOWN", result.actionType, sizeof(result.actionType));
+    result.lockerNumber = static_cast<uint8_t>(command["locker"] | 0);
+
+    const JsonObject commandPayload = command["payload"];
+    if (!commandPayload.isNull()) {
+      copyCStringToBuffer(commandPayload["assignmentId"] | "", result.text1, sizeof(result.text1));
+      copyCStringToBuffer(commandPayload["tagId"] | "", result.text2, sizeof(result.text2));
+      copyCStringToBuffer(commandPayload["itemName"] | "", result.text3, sizeof(result.text3));
+    }
+
+    Serial.printf(
+      "[WS] command received id=%s type=%s locker=%u\n",
+      result.actionId,
+      result.actionType,
+      result.lockerNumber
+    );
+
+    if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+      Serial.println("[WS] command result queue full, sending failed ack.");
+      NetworkJob ack = {};
+      ack.type = NetworkJobType::CommandAck;
+      ack.boolValue = false;
+      copyCStringToBuffer(result.actionId, ack.text1, sizeof(ack.text1));
+      copyCStringToBuffer("failed", ack.text2, sizeof(ack.text2));
+      copyCStringToBuffer("Firmware command queue full.", ack.text3, sizeof(ack.text3));
+      enqueueNetworkJob(ack);
+    }
+  }
+}
+
+uint32_t nextDeviceSequence() {
+  deviceMessageSequence += 1;
+  if (deviceMessageSequence == 0) {
+    deviceMessageSequence = 1;
+  }
+  return deviceMessageSequence;
+}
+
+void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence) {
+  snprintf(buffer, bufferSize, "%s-%s-%lu", prefix, deviceBootId, static_cast<unsigned long>(sequence));
+}
+
 void maybeSendHeartbeat(unsigned long now) {
+  if (isBackgroundNetworkBackoffActive(now)) {
+    return;
+  }
+
+  if (!isDeviceWebSocketReady() && !shouldUseHttpsFallback(now)) {
+    return;
+  }
+
   if (heartbeatQueued || (lastHeartbeatMs != 0 && now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS)) {
     return;
   }
@@ -694,7 +1205,11 @@ void maybeSendHeartbeat(unsigned long now) {
 }
 
 void maybePollDeviceActions(unsigned long now) {
-  if (deviceActionsPollQueued || (lastDeviceActionsPollMs != 0 && now - lastDeviceActionsPollMs < DEVICE_ACTIONS_POLL_INTERVAL_MS)) {
+  if (isBackgroundNetworkBackoffActive(now)) {
+    return;
+  }
+
+  if (deviceActionsPollQueued || (lastDeviceActionsPollMs != 0 && now - lastDeviceActionsPollMs < deviceActionsPollIntervalMs)) {
     return;
   }
 
@@ -706,18 +1221,95 @@ void maybePollDeviceActions(unsigned long now) {
   }
 }
 
+bool maybeQueueDeviceStateBatch(unsigned long now) {
+  if (isBackgroundNetworkBackoffActive(now)) {
+    return false;
+  }
+
+  if (deviceStateBatchQueued) {
+    return false;
+  }
+
+  if (!isDeviceWebSocketReady() && !shouldUseHttpsFallback(now)) {
+    return false;
+  }
+
+  bool hasDirty = fullStateResyncPending;
+  bool allDirtyPastBatchWindow = true;
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    RfidReaderRuntime& runtime = lockerReaders[i];
+    const bool needsPeriodicResync = runtime.lastReportMs != 0
+      && now - runtime.lastReportMs >= LOCKER_STATUS_RESYNC_INTERVAL_MS;
+
+    if (needsPeriodicResync) {
+      hasDirty = true;
+      fullStateResyncPending = true;
+    }
+
+    if (!runtime.reportDirty) {
+      continue;
+    }
+
+    hasDirty = true;
+    if (runtime.nextReportAttemptMs != 0 && now < runtime.nextReportAttemptMs) {
+      return false;
+    }
+
+    if (runtime.dirtySinceMs == 0) {
+      runtime.dirtySinceMs = now;
+    }
+
+    if (now - runtime.dirtySinceMs < LOCKER_STATUS_BATCH_WINDOW_MS) {
+      allDirtyPastBatchWindow = false;
+    }
+  }
+
+  if (!hasDirty || !allDirtyPastBatchWindow) {
+    return false;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::DeviceStateBatch;
+  buildLockerStateBatchJob(job, fullStateResyncPending);
+
+  if (!enqueueNetworkJob(job)) {
+    return false;
+  }
+
+  deviceStateBatchQueued = true;
+  lastDeviceStateBatchMs = now;
+  return true;
+}
+
 bool maybeReportLockerStatuses(unsigned long now) {
+  if (isBackgroundNetworkBackoffActive(now)) {
+    return false;
+  }
+
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     RfidReaderRuntime& runtime = lockerReaders[i];
     if (lockerStatusQueued[i]) {
       continue;
     }
-    const bool needsInitialSync = runtime.lastReportMs == 0;
     const bool needsPeriodicResync = runtime.lastReportMs != 0
       && now - runtime.lastReportMs >= LOCKER_STATUS_RESYNC_INTERVAL_MS;
 
-    if (!runtime.reportDirty && !needsInitialSync && !needsPeriodicResync) {
+    if (!runtime.reportDirty && !needsPeriodicResync) {
       continue;
+    }
+
+    if (runtime.nextReportAttemptMs != 0 && now < runtime.nextReportAttemptMs) {
+      continue;
+    }
+
+    if (runtime.reportDirty) {
+      if (runtime.dirtySinceMs == 0) {
+        runtime.dirtySinceMs = now;
+      }
+
+      if (now - runtime.dirtySinceMs < LOCKER_STATUS_BATCH_WINDOW_MS) {
+        continue;
+      }
     }
 
     NetworkJob job = {};
@@ -735,6 +1327,48 @@ bool maybeReportLockerStatuses(unsigned long now) {
   }
 
   return false;
+}
+
+void buildLockerStateBatchJob(NetworkJob& job, bool full) {
+  job.boolValue = full;
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const LockerState state = readLockerState(i);
+    job.lockerHasTag[i] = state.tagPresent;
+    job.lockerDoorClosed[i] = state.doorClosed;
+    job.lockerLockClosed[i] = state.lockClosed;
+    job.lockerVersions[i] = lockerStateVersions[i];
+    copyStringToBuffer(state.tagUid, job.lockerTags[i], sizeof(job.lockerTags[i]));
+  }
+}
+
+void serviceLockerInputChanges(unsigned long now) {
+  if (!ENABLE_LOCKER_SWITCH_INPUTS) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const LockerState state = readLockerState(i);
+    if (!lockerInputSnapshotReady[i]) {
+      lockerInputSnapshotReady[i] = true;
+      lastLockerDoorClosed[i] = state.doorClosed;
+      lastLockerLockClosed[i] = state.lockClosed;
+      continue;
+    }
+
+    if (state.doorClosed == lastLockerDoorClosed[i] && state.lockClosed == lastLockerLockClosed[i]) {
+      continue;
+    }
+
+    lastLockerDoorClosed[i] = state.doorClosed;
+    lastLockerLockClosed[i] = state.lockClosed;
+    markLockerStateChanged(lockerReaders[i], now);
+    Serial.printf(
+      "Locker S%u input changed -> door=%s lock=%s\n",
+      i + 1,
+      state.doorClosed ? "closed" : "open",
+      state.lockClosed ? "closed" : "open"
+    );
+  }
 }
 
 void handleKeypad() {
@@ -899,10 +1533,11 @@ void handleSerialDebug() {
         }
       } else if (command == "lockers" || command == "l") {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
-          lockerReaders[i].reportDirty = true;
+          markLockerReportDirty(lockerReaders[i], millis());
         }
+        fullStateResyncPending = true;
         if (isWifiReady()) {
-          maybeReportLockerStatuses(millis());
+          maybeQueueDeviceStateBatch(millis());
         } else {
           Serial.println("Locker report queued, waiting for WiFi.");
         }
@@ -967,6 +1602,8 @@ void serviceNetworkResults() {
 }
 
 void handleNetworkResult(const NetworkResult& result) {
+  const unsigned long now = millis();
+
   switch (result.type) {
     case NetworkResultType::Heartbeat:
       heartbeatQueued = false;
@@ -988,14 +1625,12 @@ void handleNetworkResult(const NetworkResult& result) {
             );
 
           if (stateMatches) {
-            runtime.reportDirty = false;
-            runtime.lastReportMs = millis();
+            noteLockerReportSuccess(runtime, now);
           } else {
             // A delayed HTTP success can acknowledge an older state after the
             // tag has already been removed or replaced. Keep the locker dirty
             // so the current state is resent immediately.
-            runtime.reportDirty = true;
-            runtime.lastReportMs = 0;
+            markLockerReportDirty(runtime, now);
             Serial.printf(
               "Locker S%u state changed while report was in flight. Acked hasTag=%s uid=%s, current hasTag=%s uid=%s. Resync queued.\n",
               result.lockerNumber,
@@ -1006,12 +1641,43 @@ void handleNetworkResult(const NetworkResult& result) {
             );
           }
         } else {
-          lockerReaders[lockerIndex].reportDirty = true;
-          lockerReaders[lockerIndex].lastReportMs = 0;
+          noteLockerReportFailure(lockerReaders[lockerIndex], now);
         }
       }
       break;
     }
+
+    case NetworkResultType::DeviceStateBatch:
+      deviceStateBatchQueued = false;
+      if (result.requestOk) {
+        for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+          if (lockerStateVersions[i] == result.lockerVersions[i]) {
+            noteLockerReportSuccess(lockerReaders[i], now);
+          } else {
+            markLockerReportDirty(lockerReaders[i], now);
+          }
+          lockerStatusQueued[i] = false;
+        }
+        fullStateResyncPending = false;
+        Serial.printf("Device state batch delivered via %s\n", isDeviceWebSocketReady() ? "WebSocket" : "HTTPS fallback");
+      } else {
+        for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+          noteLockerReportFailure(lockerReaders[i], now);
+        }
+        fullStateResyncPending = true;
+        Serial.println("Device state batch failed, resync remains queued.");
+      }
+      break;
+
+    case NetworkResultType::DeviceCommand:
+      handleRemoteCommand(result);
+      break;
+
+    case NetworkResultType::CommandAck:
+      if (!result.requestOk) {
+        Serial.printf("Command ack failed for actionId=%s\n", result.actionId);
+      }
+      break;
 
     case NetworkResultType::DeviceActionsPoll:
       deviceActionsPollQueued = false;
@@ -1036,6 +1702,12 @@ void handleNetworkResult(const NetworkResult& result) {
           stopTagAssignmentMode();
           blinkLed(2, 90, 90);
         }
+      }
+
+      if (result.count > 0 || result.boolValue1 || result.boolValue2 || tagAssignmentMode.active) {
+        resetDeviceActionsPollCadence();
+      } else {
+        relaxDeviceActionsPollCadence();
       }
       break;
 
@@ -1109,6 +1781,8 @@ void handleNetworkResult(const NetworkResult& result) {
 }
 
 void recoverFromDroppedNetworkResult(const NetworkResult& result) {
+  const unsigned long now = millis();
+
   switch (result.type) {
     case NetworkResultType::Heartbeat:
       heartbeatQueued = false;
@@ -1119,11 +1793,25 @@ void recoverFromDroppedNetworkResult(const NetworkResult& result) {
       const uint8_t lockerIndex = result.lockerNumber > 0 ? result.lockerNumber - 1 : LOCKER_COUNT;
       if (lockerIndex < LOCKER_COUNT) {
         lockerStatusQueued[lockerIndex] = false;
-        lockerReaders[lockerIndex].reportDirty = true;
-        lockerReaders[lockerIndex].lastReportMs = 0;
+        noteLockerReportFailure(lockerReaders[lockerIndex], now);
       }
       break;
     }
+
+    case NetworkResultType::DeviceStateBatch:
+      deviceStateBatchQueued = false;
+      fullStateResyncPending = true;
+      for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+        noteLockerReportFailure(lockerReaders[i], now);
+      }
+      break;
+
+    case NetworkResultType::DeviceCommand:
+      queueCommandAck(result.actionId, false, "failed", "Firmware dropped command result.");
+      break;
+
+    case NetworkResultType::CommandAck:
+      break;
 
     case NetworkResultType::DeviceActionsPoll:
       deviceActionsPollQueued = false;
@@ -1162,6 +1850,8 @@ bool enqueueNetworkJob(const NetworkJob& job) {
 bool isPriorityNetworkJob(const NetworkJob& job) {
   switch (job.type) {
     case NetworkJobType::LockerStatus:
+    case NetworkJobType::DeviceStateBatch:
+    case NetworkJobType::CommandAck:
     case NetworkJobType::VerifyCode:
     case NetworkJobType::VerifyMasterTag:
       return true;
@@ -1173,6 +1863,107 @@ bool isPriorityNetworkJob(const NetworkJob& job) {
   }
 
   return false;
+}
+
+void handleRemoteCommand(const NetworkResult& result) {
+  if (strlen(result.actionId) == 0) {
+    Serial.println("Remote command missing actionId.");
+    return;
+  }
+
+  if (wasCommandProcessed(result.actionId)) {
+    Serial.printf("Duplicate remote command ignored actionId=%s type=%s\n", result.actionId, result.actionType);
+    queueCommandAck(result.actionId, true, "acknowledged", "Duplicate command already handled.");
+    return;
+  }
+
+  bool success = true;
+  const char* status = "applied";
+  const char* message = "Command applied.";
+
+  if (strcmp(result.actionType, "ASSIGN_RFID_TAG") == 0) {
+    if (strlen(result.text1) == 0 || strlen(result.text2) == 0) {
+      success = false;
+      message = "Missing tag assignment payload.";
+    } else {
+      startTagAssignmentMode(String(result.text1), String(result.text2), String(result.text3));
+      message = "Tag assignment mode started.";
+    }
+  } else if (strcmp(result.actionType, "CANCEL_RFID_TAG_ASSIGNMENT") == 0) {
+    const bool assignmentMatches = strlen(result.text1) == 0 || String(result.text1) == tagAssignmentMode.assignmentId;
+    if (tagAssignmentMode.active && assignmentMatches) {
+      Serial.printf("Cancelling tag assignment mode for assignmentId=%s\n", result.text1);
+      stopTagAssignmentMode();
+      blinkLed(2, 90, 90);
+      message = "Tag assignment mode cancelled.";
+    } else {
+      message = "No matching active tag assignment mode.";
+    }
+  } else if (strcmp(result.actionType, "OPEN_LOCKER") == 0) {
+    if (result.lockerNumber == 0 || result.lockerNumber > LOCKER_COUNT) {
+      success = false;
+      message = "Invalid locker number.";
+    } else {
+      Serial.printf("Remote open command applied for locker S%u (relay output not configured in this firmware).\n", result.lockerNumber);
+      blinkLed(2, 120, 80);
+      status = "acknowledged";
+      message = "Command acknowledged; relay output is not configured in this firmware.";
+    }
+  } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
+    Serial.println("Remote release-all command applied (relay outputs not configured in this firmware).");
+    blinkLed(3, 120, 80);
+    status = "acknowledged";
+    message = "Command acknowledged; relay outputs are not configured in this firmware.";
+  } else {
+    success = false;
+    message = "Unsupported command type.";
+    Serial.printf("Unsupported remote command type: %s\n", result.actionType);
+  }
+
+  if (success) {
+    rememberProcessedCommand(result.actionId);
+  }
+  queueCommandAck(result.actionId, success, success ? status : "failed", message);
+}
+
+void queueCommandAck(const char* actionId, bool success, const char* status, const char* message) {
+  if (actionId == nullptr || strlen(actionId) == 0) {
+    return;
+  }
+
+  NetworkJob ack = {};
+  ack.type = NetworkJobType::CommandAck;
+  ack.boolValue = success;
+  copyCStringToBuffer(actionId, ack.text1, sizeof(ack.text1));
+  copyCStringToBuffer(status != nullptr ? status : (success ? "applied" : "failed"), ack.text2, sizeof(ack.text2));
+  copyCStringToBuffer(message != nullptr ? message : "", ack.text3, sizeof(ack.text3));
+
+  if (!enqueueNetworkJob(ack)) {
+    Serial.printf("Failed to queue command ack for actionId=%s\n", actionId);
+  }
+}
+
+bool wasCommandProcessed(const char* actionId) {
+  if (actionId == nullptr || strlen(actionId) == 0) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < COMMAND_DEDUP_CACHE_SIZE; i += 1) {
+    if (strcmp(processedCommandIds[i], actionId) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void rememberProcessedCommand(const char* actionId) {
+  if (actionId == nullptr || strlen(actionId) == 0) {
+    return;
+  }
+
+  copyCStringToBuffer(actionId, processedCommandIds[nextProcessedCommandSlot], sizeof(processedCommandIds[nextProcessedCommandSlot]));
+  nextProcessedCommandSlot = static_cast<uint8_t>((nextProcessedCommandSlot + 1) % COMMAND_DEDUP_CACHE_SIZE);
 }
 
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize) {
@@ -1221,7 +2012,7 @@ bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber) {
     return false;
   }
 
-  StaticJsonDocument<192> responseDoc;
+  JsonDocument responseDoc;
   const DeserializationError error = deserializeJson(responseDoc, responseBody);
   if (error) {
     Serial.printf("verify-code JSON parse failed: %s\n", error.c_str());
@@ -1237,23 +2028,22 @@ bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber) {
 }
 
 bool postVerifyCode(const String& code, String& responseBody) {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
   snprintf(url, sizeof(url), "%s/verify-code", API_BASE_URL);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /verify-code");
+  if (!beginSecureRequest(http, secureClient, url, "/verify-code")) {
     return false;
   }
 
-  configureHttpClient(http);
   http.addHeader("Content-Type", "application/json");
 
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
 
-  StaticJsonDocument<96> payload;
+  JsonDocument payload;
   payload["code"] = code;
 
   char body[96];
@@ -1267,6 +2057,9 @@ bool postVerifyCode(const String& code, String& responseBody) {
   http.end();
 
   Serial.printf("HTTP status: %d\n", httpCode);
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/verify-code", httpCode, secureClient, responseBody);
+  }
   if (responseBody.length() > 0) {
     Serial.printf("HTTP response: %s\n", responseBody.c_str());
   }
@@ -1275,22 +2068,21 @@ bool postVerifyCode(const String& code, String& responseBody) {
 }
 
 bool postVerifyTag(const String& tagId, String& responseBody) {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
   snprintf(url, sizeof(url), "%s/verify-tag", API_BASE_URL);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /verify-tag");
+  if (!beginSecureRequest(http, secureClient, url, "/verify-tag")) {
     return false;
   }
 
-  configureHttpClient(http);
   http.addHeader("Content-Type", "application/json");
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
 
-  StaticJsonDocument<128> payload;
+  JsonDocument payload;
   payload["tagId"] = tagId;
 
   char body[128];
@@ -1304,6 +2096,9 @@ bool postVerifyTag(const String& tagId, String& responseBody) {
   http.end();
 
   Serial.printf("HTTP status: %d\n", httpCode);
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/verify-tag", httpCode, secureClient, responseBody);
+  }
   if (responseBody.length() > 0) {
     Serial.printf("HTTP response: %s\n", responseBody.c_str());
   }
@@ -1312,22 +2107,21 @@ bool postVerifyTag(const String& tagId, String& responseBody) {
 }
 
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId) {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
   snprintf(url, sizeof(url), "%s/locker-status", API_BASE_URL);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /locker-status");
+  if (!beginSecureRequest(http, secureClient, url, "/locker-status")) {
     return false;
   }
 
-  configureHttpClient(http);
   http.addHeader("Content-Type", "application/json");
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
 
-  StaticJsonDocument<160> payload;
+  JsonDocument payload;
   payload["locker"] = lockerNumber;
   payload["hasTag"] = hasTag;
   if (hasTag && tagId.length() > 0) {
@@ -1347,6 +2141,9 @@ bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId) {
     hasTag && tagId.length() > 0 ? tagId.c_str() : "(none)",
     httpCode
   );
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/locker-status", httpCode, secureClient, responseBody);
+  }
 
   if (responseBody.length() > 0 && DEBUG_RFID_VERBOSE) {
     Serial.printf("Locker report response: %s\n", responseBody.c_str());
@@ -1355,17 +2152,330 @@ bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId) {
   return httpCode >= 200 && httpCode < 300;
 }
 
+void buildHeartbeatPayload(JsonObject payload) {
+  uint8_t lockerTagsPresent = 0;
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (lockerReaders[i].hasCard) {
+      lockerTagsPresent += 1;
+    }
+  }
+
+  payload["deviceId"] = DEVICE_ID;
+  payload["bootId"] = deviceBootId;
+  payload["protocolVersion"] = 1;
+  payload["firmware"] = "safekeys-esp32-v3-test-ws";
+  payload["ip"] = WiFi.localIP().toString();
+  payload["wifiRssi"] = WiFi.RSSI();
+  payload["uptimeMs"] = millis();
+  payload["freeHeap"] = ESP.getFreeHeap();
+  payload["minFreeHeap"] = ESP.getMinFreeHeap();
+  payload["lockersWithTags"] = lockerTagsPresent;
+  payload["masterReaderPresent"] = masterReaderRuntime.hasCard;
+  payload["deviceActionsPollIntervalMs"] = deviceActionsPollIntervalMs;
+  payload["networkFailureCount"] = consecutiveNetworkFailureCount;
+  payload["wsConnected"] = deviceWsConnected;
+
+  JsonArray lockers = payload["lockers"].to<JsonArray>();
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    JsonObject locker = lockers.add<JsonObject>();
+    locker["locker"] = lockerReaders[i].lockerNumber;
+    locker["hasTag"] = lockerReaders[i].hasCard;
+    locker["tagId"] = lockerReaders[i].stableUid;
+    locker["dirty"] = lockerReaders[i].reportDirty;
+    locker["reportFailures"] = lockerReaders[i].reportFailureCount;
+    locker["version"] = lockerStateVersions[i];
+  }
+
+  if (lastHeartbeatPingMs >= 0) {
+    payload["pingMs"] = lastHeartbeatPingMs;
+  }
+}
+
+bool sendDeviceHello() {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "hello", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "hello";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  buildHeartbeatPayload(payload);
+
+  char body[1024];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] hello payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] hello %s seq=%lu\n", sent ? "sent" : "failed", static_cast<unsigned long>(sequence));
+  return sent;
+}
+
+bool sendDeviceHeartbeatWs() {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "heartbeat", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "heartbeat";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  buildHeartbeatPayload(payload);
+
+  char body[1024];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] heartbeat payload too large.");
+    return false;
+  }
+
+  const unsigned long startedAt = millis();
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  if (sent) {
+    lastHeartbeatPingMs = static_cast<long>(millis() - startedAt);
+    lastDeviceWsHeartbeatMs = millis();
+    Serial.println("[WS] heartbeat sent");
+  }
+  return sent;
+}
+
+void buildStateBatchMessage(const NetworkJob& job, JsonDocument& doc, uint32_t sequence, const char* messageId) {
+  doc["type"] = "state.batch";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  doc["bootId"] = deviceBootId;
+
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["full"] = job.boolValue;
+  payload["bootId"] = deviceBootId;
+  payload["reason"] = job.boolValue ? "resync" : "dirty-batch";
+
+  JsonArray lockers = payload["lockers"].to<JsonArray>();
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    JsonObject locker = lockers.add<JsonObject>();
+    locker["locker"] = i + 1;
+    locker["hasTag"] = job.lockerHasTag[i];
+    locker["tagId"] = job.lockerHasTag[i] ? job.lockerTags[i] : "";
+    locker["doorClosed"] = job.lockerDoorClosed[i];
+    locker["lockClosed"] = job.lockerLockClosed[i];
+    locker["version"] = job.lockerVersions[i];
+  }
+}
+
+bool sendDeviceStateBatchWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "state", sequence);
+
+  JsonDocument doc;
+  buildStateBatchMessage(job, doc, sequence, messageId);
+
+  char body[1280];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] state batch payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
+  return sent;
+}
+
+bool sendDeviceCommandAckWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "cmdack", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "command.ack";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["commandId"] = job.text1;
+  payload["status"] = job.text2;
+  payload["success"] = job.boolValue;
+  payload["message"] = job.text3;
+
+  char body[512];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] command ack payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] command ack %s actionId=%s\n", sent ? "sent" : "failed", job.text1);
+  return sent;
+}
+
+bool sendTagAssignmentResultWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "tagassign", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "tag.assignment.result";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["assignmentId"] = job.text1;
+  payload["success"] = job.boolValue;
+  payload["tagId"] = job.text2;
+  payload["physicalUid"] = job.text3;
+  if (!job.boolValue && strlen(job.text4) > 0) {
+    payload["error"] = job.text4;
+  }
+
+  char body[512];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] tag assignment result payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] tag assignment result %s assignmentId=%s\n", sent ? "sent" : "failed", job.text1);
+  return sent;
+}
+
+bool postDeviceStateBatch(const NetworkJob& job) {
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "state", sequence);
+
+  JsonDocument doc;
+  buildStateBatchMessage(job, doc, sequence, messageId);
+
+  char messageBody[1280];
+  const size_t messageLen = serializeJson(doc, messageBody, sizeof(messageBody));
+  if (messageLen == 0 || messageLen >= sizeof(messageBody)) {
+    Serial.println("HTTPS state batch payload too large.");
+    return false;
+  }
+
+  return postDeviceSyncMessage(messageBody, "/device/sync state.batch");
+}
+
+bool postCommandAck(const NetworkJob& job) {
+  WiFiClientSecure secureClient;
+  HTTPClient http;
+  char url[160];
+  snprintf(url, sizeof(url), "%s/device/actions/ack", API_BASE_URL);
+
+  if (!beginSecureRequest(http, secureClient, url, "/device/actions/ack")) {
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  if (strlen(DEVICE_API_KEY) > 0) {
+    http.addHeader("x-device-key", DEVICE_API_KEY);
+  }
+
+  JsonDocument payload;
+  payload["actionId"] = job.text1;
+  payload["status"] = job.text2;
+  payload["success"] = job.boolValue;
+  payload["message"] = job.text3;
+
+  char body[384];
+  const size_t bodyLen = serializeJson(payload, body, sizeof(body));
+  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), bodyLen);
+  const String responseBody = http.getString();
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/device/actions/ack", httpCode, secureClient, responseBody);
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
+bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel) {
+  WiFiClientSecure secureClient;
+  HTTPClient http;
+  char url[128];
+  snprintf(url, sizeof(url), "%s/device/sync", API_BASE_URL);
+
+  if (!beginSecureRequest(http, secureClient, url, requestLabel)) {
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  if (strlen(DEVICE_API_KEY) > 0) {
+    http.addHeader("x-device-key", DEVICE_API_KEY);
+  }
+
+  char body[1536];
+  const int bodyLen = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"messages\":[%s]}", DEVICE_ID, messageJson);
+  if (bodyLen <= 0 || static_cast<size_t>(bodyLen) >= sizeof(body)) {
+    Serial.printf("%s body too large.\n", requestLabel);
+    http.end();
+    return false;
+  }
+
+  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), static_cast<size_t>(bodyLen));
+  const String responseBody = http.getString();
+  http.end();
+
+  Serial.printf("%s HTTPS fallback HTTP=%d\n", requestLabel, httpCode);
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure(requestLabel, httpCode, secureClient, responseBody);
+  }
+
+  if (responseBody.length() > 0 && DEBUG_RFID_VERBOSE) {
+    Serial.printf("%s response: %s\n", requestLabel, responseBody.c_str());
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
 bool fetchDeviceActionsForTask(NetworkResult& result) {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[192];
   snprintf(url, sizeof(url), "%s/device/actions?waitMs=%lu", API_BASE_URL, DEVICE_ACTIONS_LONG_POLL_WAIT_MS);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /device/actions");
+  if (!beginSecureRequest(
+    http,
+    secureClient,
+    url,
+    "/device/actions",
+    static_cast<uint16_t>(DEVICE_ACTIONS_LONG_POLL_WAIT_MS + HTTP_RESPONSE_TIMEOUT_MS)
+  )) {
     return false;
   }
 
-  configureHttpClient(http, static_cast<uint16_t>(DEVICE_ACTIONS_LONG_POLL_WAIT_MS + HTTP_RESPONSE_TIMEOUT_MS));
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
@@ -1376,13 +2486,11 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
 
   if (httpCode < 200 || httpCode >= 300) {
     Serial.printf("Device actions poll failed, HTTP=%d\n", httpCode);
-    if (responseBody.length() > 0) {
-      Serial.printf("Device actions response: %s\n", responseBody.c_str());
-    }
+    logHttpFailure("/device/actions", httpCode, secureClient, responseBody);
     return false;
   }
 
-  StaticJsonDocument<1024> responseDoc;
+  JsonDocument responseDoc;
   const DeserializationError error = deserializeJson(responseDoc, responseBody);
   if (error) {
     Serial.printf("device/actions JSON parse failed: %s\n", error.c_str());
@@ -1403,23 +2511,31 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
     const char* actor = action["actor"] | "unknown";
     Serial.printf("Remote action -> type=%s locker=%d actor=%s\n", type, locker, actor);
 
-    if (strcmp(type, "ASSIGN_RFID_TAG") == 0 && !result.boolValue1) {
-      const JsonObject payload = action["payload"];
-      const char* assignmentId = payload["assignmentId"] | "";
-      const char* tagId = payload["tagId"] | "";
-      const char* itemName = payload["itemName"] | "";
+    NetworkResult commandResult = {};
+    commandResult.type = NetworkResultType::DeviceCommand;
+    commandResult.requestOk = true;
+    commandResult.lockerNumber = static_cast<uint8_t>(locker);
+    copyCStringToBuffer(action["id"] | "", commandResult.actionId, sizeof(commandResult.actionId));
+    copyCStringToBuffer(type, commandResult.actionType, sizeof(commandResult.actionType));
 
-      if (strlen(assignmentId) > 0 && strlen(tagId) > 0) {
-        result.boolValue1 = true;
-        copyCStringToBuffer(assignmentId, result.text1, sizeof(result.text1));
-        copyCStringToBuffer(tagId, result.text2, sizeof(result.text2));
-        copyCStringToBuffer(itemName, result.text3, sizeof(result.text3));
+    const JsonObject payload = action["payload"];
+    if (!payload.isNull()) {
+      copyCStringToBuffer(payload["assignmentId"] | "", commandResult.text1, sizeof(commandResult.text1));
+      copyCStringToBuffer(payload["tagId"] | "", commandResult.text2, sizeof(commandResult.text2));
+      copyCStringToBuffer(payload["itemName"] | "", commandResult.text3, sizeof(commandResult.text3));
+    }
+
+    if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &commandResult, 0) != pdTRUE) {
+      Serial.println("Failed to queue HTTP-polled remote command result.");
+      if (strlen(commandResult.actionId) > 0) {
+        NetworkJob ack = {};
+        ack.type = NetworkJobType::CommandAck;
+        ack.boolValue = false;
+        copyCStringToBuffer(commandResult.actionId, ack.text1, sizeof(ack.text1));
+        copyCStringToBuffer("failed", ack.text2, sizeof(ack.text2));
+        copyCStringToBuffer("Firmware command queue full.", ack.text3, sizeof(ack.text3));
+        enqueueNetworkJob(ack);
       }
-    } else if (strcmp(type, "CANCEL_RFID_TAG_ASSIGNMENT") == 0 && !result.boolValue2) {
-      const JsonObject payload = action["payload"];
-      const char* assignmentId = payload["assignmentId"] | "";
-      result.boolValue2 = true;
-      copyCStringToBuffer(assignmentId, result.text4, sizeof(result.text4));
     }
   }
 
@@ -1427,43 +2543,26 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
 }
 
 bool sendHeartbeat() {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
   snprintf(url, sizeof(url), "%s/device/heartbeat", API_BASE_URL);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /device/heartbeat");
+  if (!beginSecureRequest(http, secureClient, url, "/device/heartbeat")) {
     return false;
   }
 
-  configureHttpClient(http);
   http.addHeader("Content-Type", "application/json");
 
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
 
-  uint8_t lockerTagsPresent = 0;
-  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
-    if (lockerReaders[i].hasCard) {
-      lockerTagsPresent += 1;
-    }
-  }
+  JsonDocument payload;
+  JsonObject payloadObject = payload.to<JsonObject>();
+  buildHeartbeatPayload(payloadObject);
 
-  StaticJsonDocument<384> payload;
-  payload["firmware"] = "safekeys-esp32-v3-test";
-  payload["ip"] = WiFi.localIP().toString();
-  payload["wifiRssi"] = WiFi.RSSI();
-  payload["uptimeMs"] = millis();
-  payload["freeHeap"] = ESP.getFreeHeap();
-  payload["lockersWithTags"] = lockerTagsPresent;
-  payload["masterReaderPresent"] = masterReaderRuntime.hasCard;
-
-  if (lastHeartbeatPingMs >= 0) {
-    payload["pingMs"] = lastHeartbeatPingMs;
-  }
-
-  char body[384];
+  char body[1024];
   const size_t bodyLen = serializeJson(payload, body, sizeof(body));
 
   const unsigned long startedAt = millis();
@@ -1479,9 +2578,7 @@ bool sendHeartbeat() {
   }
 
   Serial.printf("Heartbeat failed, HTTP status: %d\n", httpCode);
-  if (responseBody.length() > 0) {
-    Serial.printf("Heartbeat response: %s\n", responseBody.c_str());
-  }
+  logHttpFailure("/device/heartbeat", httpCode, secureClient, responseBody);
 
   return false;
 }
@@ -1495,7 +2592,7 @@ bool verifyMasterTagForTask(const char* tagId, NetworkResult& result) {
     return false;
   }
 
-  StaticJsonDocument<512> responseDoc;
+  JsonDocument responseDoc;
   const DeserializationError error = deserializeJson(responseDoc, responseBody);
   if (error) {
     Serial.printf("verify-tag JSON parse failed: %s\n", error.c_str());
@@ -1555,6 +2652,9 @@ void printUsage() {
   Serial.println("  lockers/l -> force locker RFID report");
   Serial.println("  actions/a -> poll remote actions");
   Serial.println("  clear/c   -> clear code buffer");
+  Serial.println("Network:");
+  Serial.println("  - primary transport: persistent WebSocket /device/ws");
+  Serial.println("  - fallback: batched HTTPS /device/sync plus legacy verify endpoints");
   Serial.println("LED visuals:");
   Serial.println("  - green  -> locker ready / tag present");
   Serial.println("  - red    -> locker without tag");
@@ -1576,6 +2676,14 @@ void printStatus() {
   } else {
     Serial.println("Last heartbeat ping: n/a");
   }
+  Serial.printf("Device actions poll interval: %lu ms\n", deviceActionsPollIntervalMs);
+  Serial.printf("Consecutive network failures: %u\n", consecutiveNetworkFailureCount);
+  Serial.printf("Device WebSocket: %s, reconnectDelay=%lu ms, fullResync=%s\n",
+    isDeviceWebSocketReady() ? "connected" : "disconnected",
+    deviceWsReconnectDelayMs,
+    fullStateResyncPending ? "yes" : "no"
+  );
+  Serial.printf("Device bootId: %s, next message seq=%lu\n", deviceBootId, static_cast<unsigned long>(deviceMessageSequence + 1));
 
   Serial.printf("Current code buffer: %s\n", enteredCode.length() > 0 ? enteredCode.c_str() : "(empty)");
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
@@ -1584,14 +2692,18 @@ void printStatus() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const LockerState state = readLockerState(i);
     Serial.printf(
-      "Locker S%u -> tag=%s uid=%s door=%s lock=%s ready=%s lastReport=%lu ms ago\n",
+      "Locker S%u -> tag=%s uid=%s door=%s lock=%s ready=%s version=%lu lastReport=%lu ms ago dirty=%s retryIn=%lu failCount=%u\n",
       i + 1,
       state.tagPresent ? "yes" : "no",
       state.tagPresent ? state.tagUid.c_str() : "(none)",
       ENABLE_LOCKER_SWITCH_INPUTS ? (state.doorClosed ? "closed" : "open") : "n/a",
       ENABLE_LOCKER_SWITCH_INPUTS ? (state.lockClosed ? "closed" : "open") : "n/a",
       isLockerComplete(state) ? "yes" : "no",
-      lockerReaders[i].lastReportMs == 0 ? 0UL : millis() - lockerReaders[i].lastReportMs
+      static_cast<unsigned long>(lockerStateVersions[i]),
+      lockerReaders[i].lastReportMs == 0 ? 0UL : millis() - lockerReaders[i].lastReportMs,
+      lockerReaders[i].reportDirty ? "yes" : "no",
+      lockerReaders[i].nextReportAttemptMs > millis() ? lockerReaders[i].nextReportAttemptMs - millis() : 0UL,
+      lockerReaders[i].reportFailureCount
     );
   }
 }
@@ -1611,7 +2723,7 @@ void printRfidSnapshot() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const RfidReaderRuntime& runtime = lockerReaders[i];
     Serial.printf(
-      "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u dirty=%s lastSeen=%lu\n",
+      "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
       runtime.label,
       runtime.ssPin,
       runtime.hasCard ? "yes" : "no",
@@ -1620,6 +2732,9 @@ void printRfidSnapshot() {
       runtime.candidateSeenCount,
       runtime.missingSeenCount,
       runtime.reportDirty ? "yes" : "no",
+      runtime.dirtySinceMs,
+      runtime.nextReportAttemptMs,
+      runtime.reportFailureCount,
       runtime.lastSeenMs
     );
   }
@@ -1646,6 +2761,8 @@ void startTagAssignmentMode(const String& assignmentId, const String& tagId, con
   tagAssignmentMode.startedMs = millis();
   tagAssignmentMode.animationFrame = 0;
   lastTagAssignmentFrame = 0xFF;
+  masterReaderRuntime.lastTriggeredUid = "";
+  resetDeviceActionsPollCadence();
   markVisualStateDirty();
 
   Serial.printf("Tag assignment mode enabled. assignmentId=%s tagId=%s item=%s\n",
@@ -1663,6 +2780,7 @@ void stopTagAssignmentMode() {
   tagAssignmentMode.startedMs = 0;
   tagAssignmentMode.animationFrame = 0;
   lastTagAssignmentFrame = 0xFF;
+  resetDeviceActionsPollCadence();
   markVisualStateDirty();
   updateVisualState();
 }
@@ -1983,7 +3101,7 @@ void serviceRfidReaders(unsigned long now) {
 }
 
 bool scanRfidReader(RfidReaderRuntime& runtime, unsigned long now) {
-  const RfidScanResult scanResult = readTagFromReader(*runtime.reader);
+  const RfidScanResult scanResult = readTagFromReader(runtime);
   updateReaderPresence(runtime, scanResult, now);
   return scanResult.present;
 }
@@ -2012,7 +3130,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
       if (uidChanged) {
         runtime.stableUid = scanResult.logicalTagId;
         if (!runtime.isMaster) {
-          runtime.reportDirty = true;
+          markLockerStateChanged(runtime, now);
         }
         markVisualStateDirty();
 
@@ -2033,8 +3151,9 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
           runtime.lastTriggeredUid = scanResult.physicalUid;
 
           String error;
-          const bool writeOk = tryProgramTag(*runtime.reader, tagAssignmentMode.tagId, error);
+          const bool writeOk = tryProgramTag(*runtime.reader, scanResult.physicalUid, tagAssignmentMode.tagId, error);
           if (writeOk) {
+            runtime.lastTriggeredUid = tagAssignmentMode.tagId;
             Serial.printf("Tag programming success. physical UID=%s logical tag=%s\n",
               scanResult.physicalUid.c_str(),
               tagAssignmentMode.tagId.c_str()
@@ -2113,7 +3232,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
   runtime.hasCard = false;
 
   if (!runtime.isMaster) {
-    runtime.reportDirty = true;
+    markLockerStateChanged(runtime, now);
   } else {
     runtime.lastTriggeredUid = "";
   }
@@ -2123,36 +3242,32 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
   markVisualStateDirty();
 }
 
-RfidScanResult readTagFromReader(MFRC522& reader) {
+RfidScanResult readTagFromReader(RfidReaderRuntime& runtime) {
+  MFRC522& reader = *runtime.reader;
   RfidScanResult result = { false, "", "", false };
 
-  byte atqa[2];
-  byte atqaSize = sizeof(atqa);
-  const MFRC522::StatusCode wakeStatus = reader.PICC_WakeupA(atqa, &atqaSize);
-
-  if (wakeStatus != MFRC522::STATUS_OK && wakeStatus != MFRC522::STATUS_COLLISION) {
-    return result;
-  }
-
-  if (!reader.PICC_ReadCardSerial()) {
-    reader.PICC_HaltA();
-    reader.PCD_StopCrypto1();
+  String selectedUid;
+  if (!selectCardForTransaction(reader, selectedUid)) {
     return result;
   }
 
   result.present = true;
-  result.physicalUid = uidToString(reader.uid);
+  result.physicalUid = selectedUid;
 
-  String programmedTagId;
-  if (tryReadProgrammedTagId(reader, programmedTagId)) {
-    result.logicalTagId = programmedTagId;
-    result.hasCustomTag = true;
+  const bool skipCustomTagRead = runtime.isMaster && tagAssignmentMode.active;
+  if (!skipCustomTagRead) {
+    String programmedTagId;
+    if (tryReadProgrammedTagId(reader, programmedTagId)) {
+      result.logicalTagId = programmedTagId;
+      result.hasCustomTag = true;
+    } else {
+      result.logicalTagId = result.physicalUid;
+    }
   } else {
     result.logicalTagId = result.physicalUid;
   }
 
-  reader.PICC_HaltA();
-  reader.PCD_StopCrypto1();
+  finishRfidSession(reader);
   return result;
 }
 
@@ -2179,6 +3294,220 @@ void debugPrintReaderChipVersion(const RfidReaderRuntime& runtime) {
 void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs) {
   http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
   http.setTimeout(responseTimeoutMs);
+  http.useHTTP10(true);
+  http.setReuse(false);
+}
+
+bool beginSecureRequest(HTTPClient& http, WiFiClientSecure& client, const char* url, const char* requestLabel, uint16_t responseTimeoutMs) {
+  client.setInsecure();
+  client.setHandshakeTimeout(HTTP_TLS_HANDSHAKE_TIMEOUT_SECONDS);
+
+  if (!http.begin(client, url)) {
+    Serial.printf("HTTP begin failed for %s\n", requestLabel);
+    return false;
+  }
+
+  configureHttpClient(http, responseTimeoutMs);
+  return true;
+}
+
+String describeHttpError(int httpCode) {
+  switch (httpCode) {
+    case HTTPC_ERROR_CONNECTION_REFUSED:
+      return "connect failed";
+    case HTTPC_ERROR_READ_TIMEOUT:
+      return "read timeout";
+    default:
+      return HTTPClient::errorToString(httpCode);
+  }
+}
+
+void logHttpFailure(const char* requestLabel, int httpCode, WiFiClientSecure& client, const String& responseBody) {
+  Serial.printf("%s request failed: HTTP=%d", requestLabel, httpCode);
+  if (httpCode < 0) {
+    Serial.printf(" (%s)", describeHttpError(httpCode).c_str());
+  }
+
+  char tlsError[128];
+  const int tlsCode = client.lastError(tlsError, sizeof(tlsError));
+  if (tlsCode < 0) {
+    Serial.printf(", TLS=%d (%s)", tlsCode, tlsError);
+  }
+
+  Serial.printf(
+    ", WiFi=%s RSSI=%d ip=%s gateway=%s freeHeap=%u minFreeHeap=%u largestBlock=%u failures=%u\n",
+    isWifiReady() ? "connected" : "disconnected",
+    isWifiReady() ? WiFi.RSSI() : 0,
+    isWifiReady() ? WiFi.localIP().toString().c_str() : "0.0.0.0",
+    isWifiReady() ? WiFi.gatewayIP().toString().c_str() : "0.0.0.0",
+    ESP.getFreeHeap(),
+    ESP.getMinFreeHeap(),
+    heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+    consecutiveNetworkFailureCount
+  );
+
+  if (responseBody.length() > 0) {
+    Serial.printf("%s response: %s\n", requestLabel, responseBody.c_str());
+  }
+}
+
+void noteNetworkSuccess() {
+  consecutiveNetworkFailureCount = 0;
+  nextBackgroundNetworkAttemptMs = 0;
+}
+
+void noteNetworkFailure() {
+  if (consecutiveNetworkFailureCount < 255) {
+    consecutiveNetworkFailureCount += 1;
+  }
+
+  const uint8_t failureLevel = min<uint8_t>(static_cast<uint8_t>(consecutiveNetworkFailureCount), 5);
+  const unsigned long backoffMs = min(
+    NETWORK_FAILURE_RETRY_MAX_MS,
+    NETWORK_FAILURE_RETRY_BASE_MS * (1UL << (failureLevel - 1))
+  );
+  nextBackgroundNetworkAttemptMs = millis() + backoffMs;
+}
+
+bool isBackgroundNetworkBackoffActive(unsigned long now) {
+  return nextBackgroundNetworkAttemptMs != 0 && now < nextBackgroundNetworkAttemptMs;
+}
+
+void maybeRecoverWifiAfterNetworkFailures(unsigned long now) {
+  if (consecutiveNetworkFailureCount < NETWORK_FAILURES_BEFORE_WIFI_RESET) {
+    return;
+  }
+
+  if (wifiConnectInProgress || !isWifiReady()) {
+    return;
+  }
+
+  if (
+    lastWifiRecoveryAttemptMs != 0 &&
+    now - lastWifiRecoveryAttemptMs < NETWORK_WIFI_RECOVERY_COOLDOWN_MS
+  ) {
+    return;
+  }
+
+  lastWifiRecoveryAttemptMs = now;
+  Serial.printf(
+    "Detected %u consecutive network failures while WiFi stayed associated. Cycling WiFi to recover TLS/TCP state.\n",
+    consecutiveNetworkFailureCount
+  );
+  WiFi.disconnect(true, false);
+  connectWifi();
+}
+
+void resetDeviceActionsPollCadence(bool verbose) {
+  const unsigned long previousIntervalMs = deviceActionsPollIntervalMs;
+  deviceActionsPollIntervalMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
+  if (verbose && previousIntervalMs != deviceActionsPollIntervalMs) {
+    Serial.printf("Device actions poll interval reset to %lu ms\n", deviceActionsPollIntervalMs);
+  }
+}
+
+void relaxDeviceActionsPollCadence() {
+  const unsigned long previousIntervalMs = deviceActionsPollIntervalMs;
+  deviceActionsPollIntervalMs = min(
+    DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS,
+    max(DEVICE_ACTIONS_POLL_INTERVAL_MS, previousIntervalMs * 2)
+  );
+
+  if (deviceActionsPollIntervalMs != previousIntervalMs) {
+    Serial.printf("Device actions poll interval relaxed to %lu ms\n", deviceActionsPollIntervalMs);
+  }
+}
+
+void markLockerReportDirty(RfidReaderRuntime& runtime, unsigned long now) {
+  runtime.reportDirty = true;
+  runtime.lastReportMs = 0;
+  runtime.dirtySinceMs = now;
+  runtime.nextReportAttemptMs = 0;
+  runtime.reportFailureCount = 0;
+}
+
+void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now) {
+  if (runtime.lockerNumber > 0 && runtime.lockerNumber <= LOCKER_COUNT) {
+    uint32_t& version = lockerStateVersions[runtime.lockerNumber - 1];
+    version += 1;
+    if (version == 0) {
+      version = 1;
+    }
+  }
+  markLockerReportDirty(runtime, now);
+}
+
+void noteLockerReportSuccess(RfidReaderRuntime& runtime, unsigned long now) {
+  runtime.reportDirty = false;
+  runtime.lastReportMs = now;
+  runtime.dirtySinceMs = 0;
+  runtime.nextReportAttemptMs = 0;
+  runtime.reportFailureCount = 0;
+}
+
+void noteLockerReportFailure(RfidReaderRuntime& runtime, unsigned long now) {
+  runtime.reportDirty = true;
+  runtime.lastReportMs = 0;
+
+  if (runtime.dirtySinceMs == 0) {
+    runtime.dirtySinceMs = now;
+  }
+
+  if (runtime.reportFailureCount < 255) {
+    runtime.reportFailureCount += 1;
+  }
+
+  const uint8_t failureLevel = min<uint8_t>(runtime.reportFailureCount, 5);
+  const unsigned long backoffMs = min(
+    LOCKER_STATUS_RETRY_MAX_MS,
+    LOCKER_STATUS_RETRY_BASE_MS * (1UL << (failureLevel - 1))
+  );
+  runtime.nextReportAttemptMs = now + backoffMs;
+}
+
+void markAllLockerReportsDirty(unsigned long now, bool resetRetryTimers) {
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    lockerReaders[i].reportDirty = true;
+    lockerReaders[i].lastReportMs = 0;
+    lockerReaders[i].dirtySinceMs = now;
+    if (resetRetryTimers) {
+      lockerReaders[i].nextReportAttemptMs = 0;
+      lockerReaders[i].reportFailureCount = 0;
+    }
+  }
+}
+
+String getPiccTypeName(MFRC522::PICC_Type piccType) {
+  return String(MFRC522::PICC_GetTypeName(piccType));
+}
+
+void finishRfidSession(MFRC522& reader) {
+  reader.PICC_HaltA();
+  reader.PCD_StopCrypto1();
+}
+
+bool selectCardForTransaction(MFRC522& reader, String& selectedUid, MFRC522::StatusCode* wakeStatusOut) {
+  selectedUid = "";
+
+  byte atqa[2];
+  byte atqaSize = sizeof(atqa);
+  const MFRC522::StatusCode wakeStatus = reader.PICC_WakeupA(atqa, &atqaSize);
+
+  if (wakeStatusOut != nullptr) {
+    *wakeStatusOut = wakeStatus;
+  }
+
+  if (wakeStatus != MFRC522::STATUS_OK && wakeStatus != MFRC522::STATUS_COLLISION) {
+    return false;
+  }
+
+  if (!reader.PICC_ReadCardSerial()) {
+    reader.PCD_StopCrypto1();
+    return false;
+  }
+
+  selectedUid = uidToString(reader.uid);
+  return true;
 }
 
 bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key, MFRC522::StatusCode* statusOut) {
@@ -2246,33 +3575,36 @@ bool tryReadProgrammedTagId(MFRC522& reader, String& tagId) {
   return tagId.length() > 0;
 }
 
-bool tryProgramTag(MFRC522& reader, const String& tagId, String& error) {
+bool tryProgramTag(MFRC522& reader, const String& expectedPhysicalUid, const String& tagId, String& error) {
   error = "";
 
   const MFRC522::PICC_Type piccType = reader.PICC_GetType(reader.uid.sak);
+  const String piccTypeName = getPiccTypeName(piccType);
+  if (DEBUG_RFID_VERBOSE) {
+    Serial.printf(
+      "Tag assignment candidate -> physical UID=%s, PICC type=%s, target block=%u, logical tag=%s\n",
+      expectedPhysicalUid.length() > 0 ? expectedPhysicalUid.c_str() : uidToString(reader.uid).c_str(),
+      piccTypeName.c_str(),
+      RFID_APP_BLOCK,
+      tagId.c_str()
+    );
+  }
+
   if (
     piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&
     piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
     piccType != MFRC522::PICC_TYPE_MIFARE_4K
   ) {
-    error = "Tag nie wspiera zapisu MIFARE Classic.";
+    error = String("Tag nie wspiera zapisu MIFARE Classic. Wykryty typ: ")
+      + piccTypeName;
     return false;
   }
 
-  const String normalizedTagId = tagId.substring(0, 12);
+  String normalizedTagId = tagId.substring(0, 12);
+  normalizedTagId.trim();
+  normalizedTagId.toUpperCase();
   if (normalizedTagId.length() == 0) {
     error = "Brak logicznego ID do zapisu.";
-    return false;
-  }
-
-  MFRC522::MIFARE_Key key;
-  MFRC522::StatusCode authStatus = MFRC522::STATUS_ERROR;
-  if (!authenticateClassicBlock(reader, RFID_APP_BLOCK, key, &authStatus)) {
-    error = String("Nie udalo sie uwierzytelnic bloku RFID: ")
-      + reader.GetStatusCodeName(authStatus)
-      + " (kod="
-      + static_cast<int>(authStatus)
-      + ")";
     return false;
   }
 
@@ -2287,32 +3619,120 @@ bool tryProgramTag(MFRC522& reader, const String& tagId, String& error) {
     buffer[4 + i] = static_cast<byte>(normalizedTagId.charAt(i));
   }
 
-  const MFRC522::StatusCode status = reader.MIFARE_Write(RFID_APP_BLOCK, buffer, 16);
-  if (status != MFRC522::STATUS_OK) {
-    error = String("Zapis MIFARE nie powiodl sie: ") + reader.GetStatusCodeName(status);
-    return false;
+  for (uint8_t attempt = 1; attempt <= RFID_AUTH_RETRY_COUNT; attempt += 1) {
+    String selectedUid;
+    MFRC522::StatusCode wakeStatus = MFRC522::STATUS_ERROR;
+    if (!selectCardForTransaction(reader, selectedUid, &wakeStatus)) {
+      if (wakeStatus == MFRC522::STATUS_OK || wakeStatus == MFRC522::STATUS_COLLISION) {
+        error = "Nie udalo sie ponownie wybrac karty RFID po wybudzeniu.";
+      } else {
+        error = String("Nie udalo sie wybudzic karty RFID: ")
+          + reader.GetStatusCodeName(wakeStatus)
+          + " (kod="
+          + static_cast<int>(wakeStatus)
+          + ")";
+      }
+
+      if (DEBUG_RFID_VERBOSE) {
+        Serial.printf(
+          "RFID select attempt %u/%u failed for block %u, expected UID=%s: %s\n",
+          attempt,
+          RFID_AUTH_RETRY_COUNT,
+          RFID_APP_BLOCK,
+          expectedPhysicalUid.length() > 0 ? expectedPhysicalUid.c_str() : "(unknown)",
+          error.c_str()
+        );
+      }
+
+      if (attempt < RFID_AUTH_RETRY_COUNT) {
+        delay(RFID_AUTH_RETRY_DELAY_MS);
+      }
+      continue;
+    }
+
+    if (expectedPhysicalUid.length() > 0 && selectedUid != expectedPhysicalUid) {
+      finishRfidSession(reader);
+      error = String("Po ponownym wyborze wykryto inny UID RFID. Oczekiwano ")
+        + expectedPhysicalUid
+        + ", odczytano "
+        + selectedUid
+        + ".";
+      return false;
+    }
+
+    MFRC522::MIFARE_Key key;
+    MFRC522::StatusCode authStatus = MFRC522::STATUS_ERROR;
+    if (!authenticateClassicBlock(reader, RFID_APP_BLOCK, key, &authStatus)) {
+      error = String("Nie udalo sie uwierzytelnic bloku RFID: ")
+        + reader.GetStatusCodeName(authStatus)
+        + " (kod="
+        + static_cast<int>(authStatus)
+        + ")";
+
+      if (DEBUG_RFID_VERBOSE) {
+        Serial.printf(
+          "RFID auth attempt %u/%u failed for block %u, UID=%s: %s\n",
+          attempt,
+          RFID_AUTH_RETRY_COUNT,
+          RFID_APP_BLOCK,
+          selectedUid.c_str(),
+          error.c_str()
+        );
+      }
+
+      finishRfidSession(reader);
+
+      if (attempt < RFID_AUTH_RETRY_COUNT) {
+        delay(RFID_AUTH_RETRY_DELAY_MS);
+      }
+      continue;
+    }
+
+    const MFRC522::StatusCode writeStatus = reader.MIFARE_Write(RFID_APP_BLOCK, buffer, 16);
+    if (writeStatus != MFRC522::STATUS_OK) {
+      finishRfidSession(reader);
+      error = String("Zapis MIFARE nie powiodl sie: ") + reader.GetStatusCodeName(writeStatus);
+      return false;
+    }
+
+    byte verifyBuffer[18];
+    byte verifySize = sizeof(verifyBuffer);
+    const MFRC522::StatusCode verifyStatus = reader.MIFARE_Read(RFID_APP_BLOCK, verifyBuffer, &verifySize);
+    if (verifyStatus != MFRC522::STATUS_OK) {
+      finishRfidSession(reader);
+      error = String("Weryfikacja odczytem po zapisie nie powiodla sie: ") + reader.GetStatusCodeName(verifyStatus);
+      return false;
+    }
+
+    finishRfidSession(reader);
+
+    if (memcmp(buffer, verifyBuffer, sizeof(buffer)) != 0) {
+      error = "Weryfikacja zapisu RFID nie powiodla sie: odczytany blok rozni sie od zapisanego.";
+      return false;
+    }
+
+    return true;
   }
 
-  return true;
+  return false;
 }
 
 bool postTagAssignmentResult(const String& assignmentId, bool success, const String& tagId, const String& physicalUid, const String& error) {
+  WiFiClientSecure secureClient;
   HTTPClient http;
   char url[160];
   snprintf(url, sizeof(url), "%s/device/tag-assignment-result", API_BASE_URL);
 
-  if (!http.begin(secureClient, url)) {
-    Serial.println("HTTP begin failed for /device/tag-assignment-result");
+  if (!beginSecureRequest(http, secureClient, url, "/device/tag-assignment-result")) {
     return false;
   }
 
-  configureHttpClient(http);
   http.addHeader("Content-Type", "application/json");
   if (strlen(DEVICE_API_KEY) > 0) {
     http.addHeader("x-device-key", DEVICE_API_KEY);
   }
 
-  StaticJsonDocument<256> payload;
+  JsonDocument payload;
   payload["assignmentId"] = assignmentId;
   payload["success"] = success;
   payload["tagId"] = tagId;
@@ -2334,6 +3754,9 @@ bool postTagAssignmentResult(const String& assignmentId, bool success, const Str
     physicalUid.c_str(),
     httpCode
   );
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/device/tag-assignment-result", httpCode, secureClient, responseBody);
+  }
 
   if (responseBody.length() > 0 && DEBUG_RFID_VERBOSE) {
     Serial.printf("Tag assignment response: %s\n", responseBody.c_str());

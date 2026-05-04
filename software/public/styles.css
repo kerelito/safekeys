@@ -3086,15 +3086,18 @@ select:focus,
   white-space: nowrap;
 }
 
-.remote-action-item.is-queued {
+.remote-action-item.is-queued,
+.remote-action-item.is-pending {
   border-left-color: var(--warning);
 }
 
-.remote-action-item.is-sent {
+.remote-action-item.is-sent,
+.remote-action-item.is-delivered {
   border-left-color: var(--accent-2);
 }
 
-.remote-action-item.is-acknowledged {
+.remote-action-item.is-acknowledged,
+.remote-action-item.is-applied {
   border-left-color: var(--status-good);
 }
 
@@ -3102,7 +3105,8 @@ select:focus,
   border-left-color: var(--danger);
 }
 
-.remote-action-item.is-acknowledged .remote-action-status {
+.remote-action-item.is-acknowledged .remote-action-status,
+.remote-action-item.is-applied .remote-action-status {
   color: var(--status-good);
 }
 

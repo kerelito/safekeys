@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-const { Code, Log, Locker, RfidUser, RfidItem } = require("../models");
+const { Code, DeviceCommand, DeviceMessageReceipt, DeviceState, Log, Locker, RfidUser, RfidItem } = require("../models");
 const {
   ALLOWED_LOCKERS,
   assertValidAllowedLockers,
@@ -17,8 +17,24 @@ const {
   assertValidUserName,
   createHttpError
 } = require("./lockerValidation");
+const {
+  COMMAND_DELIVERABLE_STATUSES,
+  COMMAND_TERMINAL_STATUSES,
+  DEFAULT_DEVICE_ID,
+  DEVICE_PROTOCOL_VERSION,
+  buildAck,
+  mapCommandForDevice,
+  mapCommandForHistory,
+  normalizeCommandAckPayload,
+  normalizeDeviceId,
+  normalizeMessageId,
+  normalizeSequence
+} = require("./deviceProtocol");
 
 const MASTER_RFID_ITEM_TYPES = new Set(["klucz_master", "karta_master"]);
+const DEVICE_HEARTBEAT_TIMEOUT_MS = Number(process.env.DEVICE_HEARTBEAT_TIMEOUT_MS) || 180 * 1000;
+const DEVICE_COMMAND_REDELIVER_AFTER_MS = Number(process.env.DEVICE_COMMAND_REDELIVER_AFTER_MS) || 30 * 1000;
+const DEVICE_COMMAND_DELIVERY_LIMIT = Number(process.env.DEVICE_COMMAND_DELIVERY_LIMIT) || 20;
 
 function isMasterRfidItemType(itemType) {
   return MASTER_RFID_ITEM_TYPES.has(itemType);
@@ -90,10 +106,507 @@ class LockerService extends EventEmitter {
     this.pendingRemoteActionWaiters = [];
     this.emailService = null;
     this.currentTagAssignment = null;
+    this.deviceStatus = {
+      deviceId: DEFAULT_DEVICE_ID,
+      connected: false,
+      lastSeenAt: null,
+      pingMs: null,
+      wifiRssi: null,
+      ip: null,
+      firmware: null,
+      uptimeMs: null,
+      freeHeap: null,
+      minFreeHeap: null,
+      transport: null,
+      connectionId: null,
+      bootId: null,
+      protocolVersion: DEVICE_PROTOCOL_VERSION,
+      networkFailureCount: null
+    };
   }
 
   setEmailService(emailService) {
     this.emailService = emailService;
+  }
+
+  async hydrateRuntimeState() {
+    const [deviceState, latestAssignmentCommand] = await Promise.all([
+      DeviceState.findOne({ deviceId: DEFAULT_DEVICE_ID }).lean(),
+      DeviceCommand.findOne({
+        type: "ASSIGN_RFID_TAG",
+        status: { $in: COMMAND_DELIVERABLE_STATUSES }
+      }).sort({ createdAt: -1 }).lean()
+    ]);
+
+    if (deviceState) {
+      this.deviceStatus = {
+        ...this.deviceStatus,
+        deviceId: deviceState.deviceId,
+        connected: false,
+        lastSeenAt: deviceState.lastSeenAt ? deviceState.lastSeenAt.toISOString() : null,
+        pingMs: deviceState.pingMs ?? null,
+        wifiRssi: deviceState.wifiRssi ?? null,
+        ip: deviceState.ip || null,
+        firmware: deviceState.firmware || null,
+        uptimeMs: deviceState.uptimeMs ?? null,
+        freeHeap: deviceState.freeHeap ?? null,
+        minFreeHeap: deviceState.minFreeHeap ?? null,
+        transport: deviceState.transport || null,
+        connectionId: null,
+        bootId: deviceState.bootId || null,
+        protocolVersion: deviceState.protocolVersion || DEVICE_PROTOCOL_VERSION,
+        networkFailureCount: deviceState.networkFailureCount ?? null
+      };
+    }
+
+    if (latestAssignmentCommand?.payload?.assignmentId && latestAssignmentCommand?.payload?.tagId) {
+      this.currentTagAssignment = {
+        id: latestAssignmentCommand.payload.assignmentId,
+        itemName: latestAssignmentCommand.payload.itemName || null,
+        tagId: latestAssignmentCommand.payload.tagId,
+        status: "pending",
+        createdAt: latestAssignmentCommand.createdAt?.toISOString?.() || new Date().toISOString(),
+        startedBy: latestAssignmentCommand.actor || "system",
+        result: null
+      };
+    }
+  }
+
+  getDeviceStatusSnapshot() {
+    const lastSeenAt = this.deviceStatus.lastSeenAt
+      ? new Date(this.deviceStatus.lastSeenAt)
+      : null;
+    const connected = Boolean(lastSeenAt)
+      && this.deviceStatus.connected !== false
+      && (Date.now() - lastSeenAt.getTime()) <= DEVICE_HEARTBEAT_TIMEOUT_MS;
+
+    return {
+      connected,
+      deviceId: this.deviceStatus.deviceId || DEFAULT_DEVICE_ID,
+      lastSeenAt: this.deviceStatus.lastSeenAt,
+      pingMs: this.deviceStatus.pingMs,
+      wifiRssi: this.deviceStatus.wifiRssi,
+      ip: this.deviceStatus.ip,
+      firmware: this.deviceStatus.firmware,
+      uptimeMs: this.deviceStatus.uptimeMs,
+      freeHeap: this.deviceStatus.freeHeap,
+      minFreeHeap: this.deviceStatus.minFreeHeap,
+      transport: this.deviceStatus.transport,
+      connectionId: this.deviceStatus.connectionId,
+      bootId: this.deviceStatus.bootId,
+      protocolVersion: this.deviceStatus.protocolVersion,
+      networkFailureCount: this.deviceStatus.networkFailureCount
+    };
+  }
+
+  async markDeviceConnected(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(payload.deviceId || context.deviceId);
+    const now = new Date();
+    const previousConnected = this.getDeviceStatusSnapshot().connected;
+    const update = {
+      connected: true,
+      transport: context.transport || "websocket",
+      connectionId: context.connectionId || null,
+      bootId: payload.bootId || this.deviceStatus.bootId || null,
+      protocolVersion: Number(payload.protocolVersion) || DEVICE_PROTOCOL_VERSION,
+      lastSeenAt: now,
+      lastConnectedAt: now,
+      disconnectReason: null,
+      firmware: payload.firmware || this.deviceStatus.firmware || null,
+      ip: payload.ip || this.deviceStatus.ip || null,
+      wifiRssi: typeof payload.wifiRssi === "number" ? payload.wifiRssi : this.deviceStatus.wifiRssi,
+      uptimeMs: typeof payload.uptimeMs === "number" ? payload.uptimeMs : this.deviceStatus.uptimeMs,
+      freeHeap: typeof payload.freeHeap === "number" ? payload.freeHeap : this.deviceStatus.freeHeap,
+      minFreeHeap: typeof payload.minFreeHeap === "number" ? payload.minFreeHeap : this.deviceStatus.minFreeHeap,
+      networkFailureCount: typeof payload.networkFailureCount === "number"
+        ? payload.networkFailureCount
+        : this.deviceStatus.networkFailureCount
+    };
+
+    await DeviceState.findOneAndUpdate(
+      { deviceId },
+      { $set: update, $setOnInsert: { deviceId } },
+      { upsert: true, new: true }
+    );
+
+    this.deviceStatus = {
+      ...this.deviceStatus,
+      ...update,
+      deviceId,
+      lastSeenAt: now.toISOString(),
+      lastConnectedAt: now.toISOString()
+    };
+
+    this.emit("device-status-changed", {
+      status: this.getDeviceStatusSnapshot(),
+      wasConnected: previousConnected
+    });
+
+    return this.getDeviceStatusSnapshot();
+  }
+
+  async markDeviceDisconnected(deviceId = DEFAULT_DEVICE_ID, reason = "transport_closed", context = {}) {
+    const normalizedDeviceId = normalizeDeviceId(deviceId);
+    if (context.connectionId && this.deviceStatus.connectionId && context.connectionId !== this.deviceStatus.connectionId) {
+      return;
+    }
+
+    const now = new Date();
+
+    await DeviceState.findOneAndUpdate(
+      {
+        deviceId: normalizedDeviceId,
+        ...(context.connectionId ? { connectionId: context.connectionId } : {})
+      },
+      {
+        $set: {
+          connected: false,
+          connectionId: null,
+          lastDisconnectedAt: now,
+          disconnectReason: String(reason || "transport_closed").slice(0, 120)
+        }
+      },
+      { new: true }
+    );
+
+    this.deviceStatus = {
+      ...this.deviceStatus,
+      deviceId: normalizedDeviceId,
+      connected: false,
+      connectionId: null,
+      lastDisconnectedAt: now.toISOString(),
+      disconnectReason: String(reason || "transport_closed").slice(0, 120)
+    };
+
+    this.emit("device-status-changed", {
+      status: this.getDeviceStatusSnapshot(),
+      wasConnected: true
+    });
+  }
+
+  async updateDeviceHeartbeat(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(payload.deviceId || context.deviceId);
+    const now = new Date();
+    const previousConnected = this.getDeviceStatusSnapshot().connected;
+    const sequence = normalizeSequence(context.sequence ?? payload.seq);
+    const update = {
+      connected: true,
+      transport: context.transport || payload.transport || this.deviceStatus.transport || "https",
+      connectionId: context.connectionId || this.deviceStatus.connectionId || null,
+      bootId: payload.bootId || this.deviceStatus.bootId || null,
+      protocolVersion: Number(payload.protocolVersion) || this.deviceStatus.protocolVersion || DEVICE_PROTOCOL_VERSION,
+      lastSeenAt: now,
+      pingMs: typeof payload.pingMs === "number" ? payload.pingMs : null,
+      wifiRssi: typeof payload.wifiRssi === "number" ? payload.wifiRssi : null,
+      ip: typeof payload.ip === "string" ? payload.ip : null,
+      firmware: typeof payload.firmware === "string" ? payload.firmware : null,
+      uptimeMs: typeof payload.uptimeMs === "number" ? payload.uptimeMs : null,
+      freeHeap: typeof payload.freeHeap === "number" ? payload.freeHeap : null,
+      minFreeHeap: typeof payload.minFreeHeap === "number" ? payload.minFreeHeap : null,
+      lockersWithTags: typeof payload.lockersWithTags === "number" ? payload.lockersWithTags : null,
+      masterReaderPresent: typeof payload.masterReaderPresent === "boolean" ? payload.masterReaderPresent : null,
+      networkFailureCount: typeof payload.networkFailureCount === "number" ? payload.networkFailureCount : null,
+      lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null
+    };
+
+    if (sequence !== null) {
+      update.lastSequence = sequence;
+    }
+
+    await DeviceState.findOneAndUpdate(
+      { deviceId },
+      { $set: update, $setOnInsert: { deviceId } },
+      { upsert: true, new: true }
+    );
+
+    this.deviceStatus = {
+      ...this.deviceStatus,
+      ...update,
+      deviceId,
+      lastSeenAt: now.toISOString()
+    };
+
+    this.emit("device-status-changed", {
+      status: this.getDeviceStatusSnapshot(),
+      wasConnected: previousConnected
+    });
+
+    return this.getDeviceStatusSnapshot();
+  }
+
+  async processDeviceEnvelope(envelope = {}, context = {}) {
+    const type = typeof envelope.type === "string" ? envelope.type.trim() : "";
+    const deviceId = normalizeDeviceId(envelope.deviceId || context.deviceId);
+    const messageId = normalizeMessageId(envelope.messageId);
+    const sequence = normalizeSequence(envelope.seq ?? envelope.sequence);
+
+    if (!type) {
+      return buildAck(envelope, {
+        ok: false,
+        error: "missing_message_type"
+      });
+    }
+
+    if (messageId) {
+      const existingReceipt = await DeviceMessageReceipt.findOne({ messageId }).lean();
+      if (existingReceipt) {
+        return {
+          ...existingReceipt.response,
+          duplicate: true
+        };
+      }
+    }
+
+    let response;
+    try {
+      switch (type) {
+        case "hello": {
+          await this.markDeviceConnected(envelope.payload || envelope, {
+            ...context,
+            deviceId,
+            sequence,
+            messageId
+          });
+          response = buildAck(envelope, {
+            protocolVersion: DEVICE_PROTOCOL_VERSION,
+            resyncRequired: true
+          });
+          break;
+        }
+
+        case "heartbeat": {
+          await this.updateDeviceHeartbeat(envelope.payload || {}, {
+            ...context,
+            deviceId,
+            sequence,
+            messageId
+          });
+          response = buildAck(envelope);
+          break;
+        }
+
+        case "state.batch": {
+          const result = await this.processDeviceStateBatch(envelope.payload || {}, {
+            ...context,
+            deviceId,
+            sequence,
+            messageId,
+            bootId: envelope.bootId || envelope.payload?.bootId || null
+          });
+          response = buildAck(envelope, {
+            state: result
+          });
+          break;
+        }
+
+        case "command.ack": {
+          const ackPayload = normalizeCommandAckPayload(envelope.payload || {});
+          if (!ackPayload.commandId) {
+            response = buildAck(envelope, {
+              ok: false,
+              error: "missing_command_id"
+            });
+            break;
+          }
+
+          const action = await this.acknowledgeRemoteAction(ackPayload.commandId, ackPayload, {
+            ...context,
+            deviceId
+          });
+          response = buildAck(envelope, {
+            command: action
+          });
+          break;
+        }
+
+        case "tag.assignment.result": {
+          const result = await this.completeTagAssignment(envelope.payload || {}, {
+            source: "device",
+            actor: envelope.payload?.physicalUid || deviceId
+          });
+          response = buildAck(envelope, {
+            assignment: result
+          });
+          break;
+        }
+
+        default:
+          response = buildAck(envelope, {
+            ok: false,
+            error: "unsupported_message_type"
+          });
+      }
+    } catch (error) {
+      response = buildAck(envelope, {
+        ok: false,
+        error: error.message || "device_message_failed"
+      });
+    }
+
+    if (messageId) {
+      try {
+        await DeviceMessageReceipt.create({
+          messageId,
+          deviceId,
+          type,
+          sequence,
+          status: response.ok === false ? "rejected" : "processed",
+          response
+        });
+      } catch (error) {
+        if (error?.code === 11000) {
+          const existingReceipt = await DeviceMessageReceipt.findOne({ messageId }).lean();
+          if (existingReceipt) {
+            return {
+              ...existingReceipt.response,
+              duplicate: true
+            };
+          }
+        }
+
+        throw error;
+      }
+    }
+
+    return response;
+  }
+
+  async processDeviceSync(messages = [], context = {}) {
+    if (!Array.isArray(messages)) {
+      throw createHttpError(400, "Pole messages musi byc tablica.");
+    }
+
+    const responses = [];
+    for (const message of messages.slice(0, 25)) {
+      responses.push(await this.processDeviceEnvelope(message, {
+        ...context,
+        transport: context.transport || "https-batch"
+      }));
+    }
+
+    return {
+      ok: responses.every(response => response.ok !== false),
+      serverTime: new Date().toISOString(),
+      responses
+    };
+  }
+
+  async processDeviceStateBatch(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(context.deviceId || payload.deviceId);
+    const lockers = Array.isArray(payload.lockers) ? payload.lockers : [];
+    const now = new Date();
+    const stateDoc = await DeviceState.findOne({ deviceId });
+    const previousVersions = new Map(
+      (stateDoc?.lockers || []).map(item => [Number(item.locker), Number(item.version) || 0])
+    );
+    const accepted = [];
+    const storedLockers = new Map(
+      (stateDoc?.lockers || []).map(item => [Number(item.locker), {
+        locker: Number(item.locker),
+        hasTag: item.hasTag === true,
+        tagId: item.tagId || null,
+        doorClosed: typeof item.doorClosed === "boolean" ? item.doorClosed : null,
+        lockClosed: typeof item.lockClosed === "boolean" ? item.lockClosed : null,
+        version: Number(item.version) || 0,
+        updatedAt: item.updatedAt || now
+      }])
+    );
+    const forceFull = payload.full === true;
+
+    for (const item of lockers.slice(0, ALLOWED_LOCKERS.length)) {
+      const locker = Number(item.locker);
+      assertValidLocker(locker);
+      assertValidHasTag(item.hasTag);
+
+      const incomingVersion = Number.isSafeInteger(Number(item.version))
+        ? Number(item.version)
+        : (normalizeSequence(context.sequence) || 0);
+      const previousVersion = previousVersions.get(locker) || 0;
+      const shouldApply = forceFull || incomingVersion >= previousVersion;
+
+      if (!shouldApply) {
+        accepted.push({
+          locker,
+          accepted: false,
+          reason: "stale_version",
+          version: incomingVersion,
+          currentVersion: previousVersion
+        });
+        continue;
+      }
+
+      const tagId = typeof item.tagId === "string" && item.tagId.trim()
+        ? item.tagId.trim().toUpperCase()
+        : null;
+
+      await this.updateLockerStatus(locker, item.hasTag, {
+        source: context.transport === "websocket" ? "device-ws" : "device-sync",
+        tagId,
+        actor: deviceId
+      });
+
+      const hasDoorSignal = typeof item.doorClosed === "boolean" || typeof item.lockClosed === "boolean";
+      if (hasDoorSignal) {
+        const doorClosed = item.doorClosed !== false && item.lockClosed !== false;
+        await this.updateLockerDoorStatus(locker, doorClosed, {
+          source: context.transport === "websocket" ? "device-ws" : "device-sync",
+          actor: deviceId
+        });
+      }
+
+      storedLockers.set(locker, {
+        locker,
+        hasTag: item.hasTag,
+        tagId,
+        doorClosed: typeof item.doorClosed === "boolean" ? item.doorClosed : null,
+        lockClosed: typeof item.lockClosed === "boolean" ? item.lockClosed : null,
+        version: incomingVersion,
+        updatedAt: now
+      });
+      accepted.push({
+        locker,
+        accepted: true,
+        version: incomingVersion
+      });
+    }
+
+    await DeviceState.findOneAndUpdate(
+      { deviceId },
+      {
+        $set: {
+          deviceId,
+          connected: true,
+          transport: context.transport || "unknown",
+          connectionId: context.connectionId || this.deviceStatus.connectionId || null,
+          bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
+          lastSeenAt: now,
+          lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
+          ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
+          lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    this.deviceStatus = {
+      ...this.deviceStatus,
+      deviceId,
+      connected: true,
+      transport: context.transport || this.deviceStatus.transport,
+      connectionId: context.connectionId || this.deviceStatus.connectionId,
+      bootId: context.bootId || payload.bootId || this.deviceStatus.bootId,
+      lastSeenAt: now.toISOString()
+    };
+
+    this.emit("device-status-changed", {
+      status: this.getDeviceStatusSnapshot(),
+      wasConnected: true
+    });
+
+    return {
+      full: forceFull,
+      accepted
+    };
   }
 
   async createLog(payload) {
@@ -545,27 +1058,31 @@ class LockerService extends EventEmitter {
     return { success: true };
   }
 
-  createRemoteAction(type, locker, context = {}) {
-    const action = {
-      id: new mongoose.Types.ObjectId().toString(),
+  async createRemoteAction(type, locker, context = {}) {
+    const payload = {
       type,
       locker: locker ?? null,
-      createdAt: new Date(),
       source: context.source || "web",
       actor: context.actor || null,
       payload: context.payload || null
     };
 
-    this.pendingRemoteActions.push(action);
-    this.remoteActionHistory.unshift({
-      ...action,
-      status: "queued",
-      sentAt: null,
-      acknowledgedAt: null,
-      result: null
+    if (context.idempotencyKey) {
+      payload.idempotencyKey = String(context.idempotencyKey).trim();
+    }
+
+    const command = payload.idempotencyKey
+      ? await DeviceCommand.findOneAndUpdate(
+          { idempotencyKey: payload.idempotencyKey },
+          { $setOnInsert: payload },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        )
+      : await DeviceCommand.create(payload);
+    const action = mapCommandForHistory(command);
+
+    this.flushRemoteActionWaiters().catch(error => {
+      console.error("Nie udalo sie przekazac oczekujacych polecen urzadzenia.", error);
     });
-    this.remoteActionHistory = this.remoteActionHistory.slice(0, 50);
-    this.flushRemoteActionWaiters();
     this.emit("remote-action-queued", action);
     return action;
   }
@@ -573,7 +1090,7 @@ class LockerService extends EventEmitter {
   async openLocker(locker, context = {}) {
     assertValidLocker(locker);
 
-    const action = this.createRemoteAction("OPEN_LOCKER", locker, context);
+    const action = await this.createRemoteAction("OPEN_LOCKER", locker, context);
     await this.createLog({
       event: "REMOTE_UNLOCK_REQUESTED",
       locker,
@@ -592,7 +1109,7 @@ class LockerService extends EventEmitter {
   }
 
   async releaseAllLockers(context = {}) {
-    const action = this.createRemoteAction("RELEASE_ALL_LOCKERS", null, context);
+    const action = await this.createRemoteAction("RELEASE_ALL_LOCKERS", null, context);
     await this.createLog({
       event: "REMOTE_RELEASE_ALL_REQUESTED",
       details: {
@@ -608,54 +1125,145 @@ class LockerService extends EventEmitter {
     };
   }
 
-  async consumeRemoteActions() {
-    const actions = [...this.pendingRemoteActions];
-    this.pendingRemoteActions = [];
-    this.markRemoteActionsSent(actions);
-    return actions;
-  }
-
-  markRemoteActionsSent(actions) {
-    const sentAt = new Date();
-    actions.forEach(action => {
-      const tracked = this.remoteActionHistory.find(item => item.id === action.id);
-      if (tracked && tracked.status === "queued") {
-        tracked.status = "sent";
-        tracked.sentAt = sentAt;
-      }
+  async consumeRemoteActions(context = {}) {
+    return this.deliverPendingRemoteActions({
+      ...context,
+      transport: context.transport || "https-poll",
+      forceRedelivery: context.forceRedelivery === true
     });
   }
 
-  acknowledgeRemoteAction(actionId, payload = {}, context = {}) {
-    const tracked = this.remoteActionHistory.find(item => item.id === actionId);
-    if (!tracked) {
-      throw createHttpError(404, "Nie znaleziono akcji urzadzenia.");
+  async deliverPendingRemoteActions(context = {}) {
+    const now = new Date();
+    const staleBefore = new Date(now.getTime() - DEVICE_COMMAND_REDELIVER_AFTER_MS);
+    const statusFilter = context.forceRedelivery
+      ? { status: { $in: COMMAND_DELIVERABLE_STATUSES } }
+      : {
+          $or: [
+            { status: "pending" },
+            {
+              status: "delivered",
+              $or: [
+                { lastDeliveryAt: null },
+                { lastDeliveryAt: { $lte: staleBefore } }
+              ]
+            }
+          ]
+        };
+    const commands = await DeviceCommand.find(statusFilter)
+      .sort({ createdAt: 1 })
+      .limit(Math.max(1, Math.min(Number(context.limit) || DEVICE_COMMAND_DELIVERY_LIMIT, 50)));
+
+    if (commands.length === 0) {
+      return [];
     }
 
-    tracked.status = payload.success === false ? "failed" : "acknowledged";
-    tracked.acknowledgedAt = new Date();
-    tracked.result = {
-      success: payload.success !== false,
-      message: typeof payload.message === "string" ? payload.message.slice(0, 240) : null,
-      source: context.source || "device"
-    };
+    await this.markRemoteActionsDelivered(commands, {
+      transport: context.transport || "unknown",
+      deviceId: normalizeDeviceId(context.deviceId)
+    });
 
-    this.emit("remote-action-updated", { ...tracked });
-    return { ...tracked };
+    return commands.map(mapCommandForDevice);
   }
 
-  getRemoteActionHistory() {
-    return this.remoteActionHistory.map(action => ({ ...action }));
-  }
-
-  flushRemoteActionWaiters() {
-    if (this.pendingRemoteActionWaiters.length === 0 || this.pendingRemoteActions.length === 0) {
+  async markRemoteActionsDelivered(actions, context = {}) {
+    const sentAt = new Date();
+    const ids = actions.map(action => action._id || action.id).filter(Boolean);
+    if (ids.length === 0) {
       return;
     }
 
-    const actions = [...this.pendingRemoteActions];
-    this.pendingRemoteActions = [];
-    this.markRemoteActionsSent(actions);
+    await DeviceCommand.updateMany(
+      {
+        _id: { $in: ids },
+        status: { $in: COMMAND_DELIVERABLE_STATUSES }
+      },
+      {
+        $set: {
+          status: "delivered",
+          deliveredAt: sentAt,
+          lastDeliveryAt: sentAt
+        },
+        $inc: {
+          deliveryCount: 1
+        },
+        $push: {
+          deliveries: {
+            at: sentAt,
+            transport: context.transport || "unknown",
+            deviceId: context.deviceId || DEFAULT_DEVICE_ID
+          }
+        }
+      }
+    );
+
+    actions.forEach(action => {
+      this.emit("remote-action-updated", {
+        ...mapCommandForHistory(action),
+        status: "delivered",
+        deliveredAt: sentAt,
+        lastDeliveryAt: sentAt,
+        deliveryCount: (action.deliveryCount || 0) + 1
+      });
+    });
+  }
+
+  async acknowledgeRemoteAction(actionId, payload = {}, context = {}) {
+    const command = await DeviceCommand.findById(actionId);
+    if (!command) {
+      throw createHttpError(404, "Nie znaleziono akcji urzadzenia.");
+    }
+
+    if (COMMAND_TERMINAL_STATUSES.has(command.status)) {
+      return mapCommandForHistory(command);
+    }
+
+    const ack = normalizeCommandAckPayload({
+      ...payload,
+      commandId: actionId
+    });
+    const now = new Date();
+    const nextStatus = ack.success
+      ? (ack.status === "acknowledged" ? "acknowledged" : "applied")
+      : "failed";
+
+    command.status = nextStatus;
+    command.acknowledgedAt = command.acknowledgedAt || now;
+    if (nextStatus === "applied") {
+      command.appliedAt = now;
+    }
+    if (nextStatus === "failed") {
+      command.failedAt = now;
+    }
+    command.result = {
+      success: ack.success,
+      message: typeof payload.message === "string" ? payload.message.slice(0, 240) : null,
+      source: context.source || "device",
+      transport: context.transport || null,
+      deviceId: normalizeDeviceId(context.deviceId)
+    };
+    await command.save();
+
+    const action = mapCommandForHistory(command);
+    this.emit("remote-action-updated", action);
+    return action;
+  }
+
+  async getRemoteActionHistory(limit = 50) {
+    const commands = await DeviceCommand.find()
+      .sort({ createdAt: -1 })
+      .limit(Math.max(1, Math.min(Number(limit) || 50, 200)))
+      .lean();
+
+    return commands.map(mapCommandForHistory);
+  }
+
+  async flushRemoteActionWaiters() {
+    if (this.pendingRemoteActionWaiters.length === 0) {
+      return;
+    }
+
+    const actions = await this.consumeRemoteActions({ forceRedelivery: true });
     const waiters = [...this.pendingRemoteActionWaiters];
     this.pendingRemoteActionWaiters = [];
 
@@ -666,8 +1274,9 @@ class LockerService extends EventEmitter {
   }
 
   async waitForRemoteActions(timeoutMs = 0) {
-    if (this.pendingRemoteActions.length > 0) {
-      return this.consumeRemoteActions();
+    const readyActions = await this.consumeRemoteActions();
+    if (readyActions.length > 0) {
+      return readyActions;
     }
 
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -764,12 +1373,13 @@ class LockerService extends EventEmitter {
   }
 
   async getBackupSnapshot() {
-    const [lockers, rfidUsers, rfidItems, activeCodes, logs] = await Promise.all([
+    const [lockers, rfidUsers, rfidItems, activeCodes, logs, remoteActions] = await Promise.all([
       this.getLockers(),
       this.getRfidUsers(),
       this.getRfidItems(),
       this.getActiveCodes(),
-      this.getLogs({ limit: 500 })
+      this.getLogs({ limit: 500 }),
+      this.getRemoteActionHistory()
     ]);
 
     return {
@@ -779,7 +1389,7 @@ class LockerService extends EventEmitter {
       rfidItems,
       activeCodes,
       logs,
-      remoteActions: this.getRemoteActionHistory()
+      remoteActions
     };
   }
 
@@ -814,7 +1424,7 @@ class LockerService extends EventEmitter {
     };
 
     this.currentTagAssignment = assignment;
-    this.createRemoteAction("ASSIGN_RFID_TAG", null, {
+    await this.createRemoteAction("ASSIGN_RFID_TAG", null, {
       ...context,
       payload: {
         assignmentId: assignment.id,
@@ -847,7 +1457,7 @@ class LockerService extends EventEmitter {
     const shouldStopDevice = assignment.status === "pending";
 
     if (shouldStopDevice) {
-      this.createRemoteAction("CANCEL_RFID_TAG_ASSIGNMENT", null, {
+      await this.createRemoteAction("CANCEL_RFID_TAG_ASSIGNMENT", null, {
         ...context,
         payload: {
           assignmentId: assignment.id

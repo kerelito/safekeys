@@ -2009,9 +2009,12 @@ function getRemoteActionTypeLabel(action) {
 }
 
 function getRemoteActionStatusLabel(status) {
+  if (status === "pending") return "Oczekuje";
+  if (status === "delivered") return "Dostarczone";
   if (status === "queued") return "W kolejce";
   if (status === "sent") return "Wysłane";
   if (status === "acknowledged") return "Potwierdzone";
+  if (status === "applied") return "Wykonane";
   if (status === "failed") return "Błąd";
   return "Nieznany";
 }

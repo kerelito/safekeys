@@ -9,6 +9,7 @@ const session = require("express-session");
 const { Server } = require("socket.io");
 
 const { createDiscordBot } = require("./bot/discordBot");
+const { attachDeviceWebSocketTransport } = require("./services/deviceWebSocketTransport");
 const { createEmailService } = require("./services/emailService");
 const { lockerService } = require("./services/lockerService");
 const { panelUserService } = require("./services/panelUserService");
@@ -38,7 +39,6 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
-const DEVICE_HEARTBEAT_TIMEOUT_MS = 180 * 1000;
 const DEVICE_STATUS_BROADCAST_INTERVAL_MS = 30000;
 
 if (!MONGODB_URI) {
@@ -70,6 +70,9 @@ app.use(sessionMiddleware);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" }
+});
+const deviceTransport = attachDeviceWebSocketTransport(server, lockerService, {
+  deviceApiKey: DEVICE_API_KEY
 });
 
 const wrap = middleware => (socket, next) => middleware(socket.request, {}, next);
@@ -168,15 +171,6 @@ const MONGOOSE_STATES = {
   3: "disconnecting"
 };
 
-const deviceStatus = {
-  lastSeenAt: null,
-  pingMs: null,
-  wifiRssi: null,
-  ip: null,
-  firmware: null,
-  uptimeMs: null,
-  freeHeap: null
-};
 let lastDeviceStatusBroadcastMs = 0;
 
 function getDatabaseStatus() {
@@ -188,19 +182,7 @@ function getDatabaseStatus() {
 }
 
 function getEsp32Status() {
-  const lastSeenAt = deviceStatus.lastSeenAt ? new Date(deviceStatus.lastSeenAt) : null;
-  const connected = Boolean(lastSeenAt) && (Date.now() - lastSeenAt.getTime()) <= DEVICE_HEARTBEAT_TIMEOUT_MS;
-
-  return {
-    connected,
-    lastSeenAt: deviceStatus.lastSeenAt,
-    pingMs: deviceStatus.pingMs,
-    wifiRssi: deviceStatus.wifiRssi,
-    ip: deviceStatus.ip,
-    firmware: deviceStatus.firmware,
-    uptimeMs: deviceStatus.uptimeMs,
-    freeHeap: deviceStatus.freeHeap
-  };
+  return lockerService.getDeviceStatusSnapshot();
 }
 
 function buildSystemStatus() {
@@ -353,6 +335,14 @@ lockerService.on("locker-status-changed", status => {
 
 lockerService.on("rfid-tag-assignment-updated", assignment => {
   io.emit("rfid-tag-assignment-updated", assignment);
+});
+
+lockerService.on("device-status-changed", ({ status, wasConnected }) => {
+  const now = Date.now();
+  if (!status.connected || !wasConnected || now - lastDeviceStatusBroadcastMs >= DEVICE_STATUS_BROADCAST_INTERVAL_MS) {
+    io.emit("system-status", buildSystemStatus());
+    lastDeviceStatusBroadcastMs = now;
+  }
 });
 
 app.use(express.static(PUBLIC_DIR));
@@ -699,24 +689,28 @@ app.post("/locker-door-status", requireDeviceKey, asyncHandler(async (req, res) 
   res.json(result);
 }));
 
-app.post("/device/heartbeat", requireDeviceKey, (req, res) => {
-  const wasConnected = getEsp32Status().connected;
-  deviceStatus.lastSeenAt = new Date().toISOString();
-  deviceStatus.pingMs = typeof req.body.pingMs === "number" ? req.body.pingMs : null;
-  deviceStatus.wifiRssi = typeof req.body.wifiRssi === "number" ? req.body.wifiRssi : null;
-  deviceStatus.ip = typeof req.body.ip === "string" ? req.body.ip : null;
-  deviceStatus.firmware = typeof req.body.firmware === "string" ? req.body.firmware : null;
-  deviceStatus.uptimeMs = typeof req.body.uptimeMs === "number" ? req.body.uptimeMs : null;
-  deviceStatus.freeHeap = typeof req.body.freeHeap === "number" ? req.body.freeHeap : null;
+app.post("/device/heartbeat", requireDeviceKey, asyncHandler(async (req, res) => {
+  await lockerService.updateDeviceHeartbeat(req.body, {
+    transport: "https",
+    deviceId: req.body.deviceId
+  });
 
-  const now = Date.now();
-  if (!wasConnected || now - lastDeviceStatusBroadcastMs >= DEVICE_STATUS_BROADCAST_INTERVAL_MS) {
-    io.emit("system-status", buildSystemStatus());
-    lastDeviceStatusBroadcastMs = now;
-  }
+  res.json({
+    ok: true,
+    serverTime: new Date().toISOString(),
+    protocolVersion: 1,
+    websocketPath: deviceTransport.path
+  });
+}));
 
-  res.json({ ok: true, serverTime: new Date().toISOString() });
-});
+app.post("/device/sync", requireDeviceKey, asyncHandler(async (req, res) => {
+  const result = await lockerService.processDeviceSync(req.body.messages, {
+    transport: "https-batch",
+    deviceId: req.body.deviceId
+  });
+
+  res.json(result);
+}));
 
 app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (req, res) => {
   const result = await lockerService.completeTagAssignment({
@@ -733,16 +727,18 @@ app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (
   res.json(result);
 }));
 
-app.post("/device/actions/ack", requireDeviceKey, (req, res) => {
-  const result = lockerService.acknowledgeRemoteAction(req.body.actionId, {
+app.post("/device/actions/ack", requireDeviceKey, asyncHandler(async (req, res) => {
+  const result = await lockerService.acknowledgeRemoteAction(req.body.actionId || req.body.commandId, {
     success: req.body.success,
-    message: req.body.message
+    message: req.body.message,
+    status: req.body.status
   }, {
-    source: "device"
+    source: "device",
+    transport: "https"
   });
 
   res.json(result);
-});
+}));
 
 app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
   const requestedWaitMs = Number(req.query.waitMs);
@@ -751,13 +747,13 @@ app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
     : 0;
   const actions = waitMs > 0
     ? await lockerService.waitForRemoteActions(waitMs)
-    : await lockerService.consumeRemoteActions();
+    : await lockerService.consumeRemoteActions({ transport: "https-poll" });
   res.json({ actions });
 }));
 
-app.get("/device/actions/history", (req, res) => {
-  res.json(lockerService.getRemoteActionHistory());
-});
+app.get("/device/actions/history", asyncHandler(async (req, res) => {
+  res.json(await lockerService.getRemoteActionHistory());
+}));
 
 app.get("/system-status", (req, res) => {
   res.json(buildSystemStatus());
@@ -831,10 +827,12 @@ async function startServer() {
   try {
     await mongoose.connect(MONGODB_URI);
     console.log("Połączono z MongoDB ✅");
+    await lockerService.hydrateRuntimeState();
     await panelUserService.ensureSeededFromEnv();
 
     server.listen(PORT, HOST, () => {
       console.log(`Server działa na ${HOST}:${PORT}`);
+      console.log(`Device WebSocket aktywny na ${deviceTransport.path}`);
     });
   } catch (error) {
     console.error("Błąd startu serwera ❌", error);
