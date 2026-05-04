@@ -37,8 +37,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "NETIASPOT-2.4GHz-U2ut";
-static const char* WIFI_PASSWORD = "nqdrusJ9hYST";
+static const char* WIFI_SSID = "TP-Link_70FC";
+static const char* WIFI_PASSWORD = "13793814";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -83,7 +83,7 @@ static const unsigned long WIFI_LOADING_FRAME_MS = 120;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 60000;
 static const unsigned long LOCKER_STATUS_RESYNC_INTERVAL_MS = 300000;
 static const unsigned long DEVICE_ACTIONS_POLL_INTERVAL_MS = 8000;
-static const unsigned long DEVICE_ACTIONS_LONG_POLL_WAIT_MS = 25000;
+static const unsigned long DEVICE_ACTIONS_LONG_POLL_WAIT_MS = 3000;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
@@ -316,6 +316,7 @@ void serviceNetworkResults();
 void handleNetworkResult(const NetworkResult& result);
 void recoverFromDroppedNetworkResult(const NetworkResult& result);
 bool enqueueNetworkJob(const NetworkJob& job);
+bool isPriorityNetworkJob(const NetworkJob& job);
 void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize);
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize);
 void setPendingCode(const String& code);
@@ -357,7 +358,7 @@ void stopTagAssignmentMode();
 void renderTagAssignmentFrame(uint8_t frameIndex);
 bool tryProgramTag(MFRC522& reader, const String& tagId, String& error);
 bool tryReadProgrammedTagId(MFRC522& reader, String& tagId);
-bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key);
+bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key, MFRC522::StatusCode* statusOut = nullptr);
 bool postTagAssignmentResult(const String& assignmentId, bool success, const String& tagId, const String& physicalUid, const String& error);
 void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs = HTTP_RESPONSE_TIMEOUT_MS);
 void markVisualStateDirty();
@@ -536,6 +537,8 @@ void networkTaskMain(void* parameter) {
       case NetworkJobType::LockerStatus: {
         result.type = NetworkResultType::LockerStatus;
         result.lockerNumber = job.lockerNumber;
+        result.boolValue1 = job.boolValue;
+        copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
         result.requestOk = postLockerStatus(job.lockerNumber, job.boolValue, String(job.text1));
         shouldPublishResult = true;
         break;
@@ -737,7 +740,12 @@ bool maybeReportLockerStatuses(unsigned long now) {
 void handleKeypad() {
   const unsigned long now = millis();
   const uint8_t rawKey = keypad.getKey();
-  if (rawKey == I2C_KEYPAD_NOKEY) {
+  const bool noStableKey =
+    rawKey == I2C_KEYPAD_NOKEY ||
+    rawKey == I2C_KEYPAD_THRESHOLD ||
+    rawKey == I2C_KEYPAD_FAIL;
+
+  if (noStableKey) {
     if (keypadPressLocked) {
       if (keypadReleaseStartedMs == 0) {
         keypadReleaseStartedMs = now;
@@ -761,20 +769,15 @@ void handleKeypad() {
       keypadReleaseScanCount = 0;
       keypadReleaseStartedMs = 0;
     }
+
+    if (rawKey == I2C_KEYPAD_FAIL && !keypadPressLocked) {
+      Serial.println("Keypad read failed or multiple keys pressed.");
+      blinkLed(2, 50, 50);
+    }
     return;
   }
 
   keypadReleaseStartedMs = 0;
-
-  if (rawKey == I2C_KEYPAD_THRESHOLD) {
-    return;
-  }
-
-  if (rawKey == I2C_KEYPAD_FAIL) {
-    Serial.println("Keypad read failed or multiple keys pressed.");
-    blinkLed(2, 50, 50);
-    return;
-  }
 
   if (keypadPressLocked || rawKey == lastStableRawKey) {
     return;
@@ -977,8 +980,34 @@ void handleNetworkResult(const NetworkResult& result) {
       if (lockerIndex < LOCKER_COUNT) {
         lockerStatusQueued[lockerIndex] = false;
         if (result.requestOk) {
-          lockerReaders[lockerIndex].reportDirty = false;
-          lockerReaders[lockerIndex].lastReportMs = millis();
+          RfidReaderRuntime& runtime = lockerReaders[lockerIndex];
+          const bool stateMatches = result.boolValue1 == runtime.hasCard
+            && (
+              !result.boolValue1 ||
+              String(result.text1) == runtime.stableUid
+            );
+
+          if (stateMatches) {
+            runtime.reportDirty = false;
+            runtime.lastReportMs = millis();
+          } else {
+            // A delayed HTTP success can acknowledge an older state after the
+            // tag has already been removed or replaced. Keep the locker dirty
+            // so the current state is resent immediately.
+            runtime.reportDirty = true;
+            runtime.lastReportMs = 0;
+            Serial.printf(
+              "Locker S%u state changed while report was in flight. Acked hasTag=%s uid=%s, current hasTag=%s uid=%s. Resync queued.\n",
+              result.lockerNumber,
+              result.boolValue1 ? "true" : "false",
+              result.boolValue1 && strlen(result.text1) > 0 ? result.text1 : "(none)",
+              runtime.hasCard ? "true" : "false",
+              runtime.hasCard && runtime.stableUid.length() > 0 ? runtime.stableUid.c_str() : "(none)"
+            );
+          }
+        } else {
+          lockerReaders[lockerIndex].reportDirty = true;
+          lockerReaders[lockerIndex].lastReportMs = 0;
         }
       }
       break;
@@ -998,6 +1027,15 @@ void handleNetworkResult(const NetworkResult& result) {
 
       if (result.boolValue1) {
         startTagAssignmentMode(String(result.text1), String(result.text2), String(result.text3));
+      }
+
+      if (result.boolValue2) {
+        const bool assignmentMatches = strlen(result.text4) == 0 || String(result.text4) == tagAssignmentMode.assignmentId;
+        if (tagAssignmentMode.active && assignmentMatches) {
+          Serial.printf("Cancelling tag assignment mode for assignmentId=%s\n", result.text4);
+          stopTagAssignmentMode();
+          blinkLed(2, 90, 90);
+        }
       }
       break;
 
@@ -1109,11 +1147,31 @@ bool enqueueNetworkJob(const NetworkJob& job) {
     return false;
   }
 
-  if (xQueueSend(networkJobQueue, &job, 0) == pdTRUE) {
+  const BaseType_t queued = isPriorityNetworkJob(job)
+    ? xQueueSendToFront(networkJobQueue, &job, 0)
+    : xQueueSend(networkJobQueue, &job, 0);
+
+  if (queued == pdTRUE) {
     return true;
   }
 
   Serial.println("Network job queue is full.");
+  return false;
+}
+
+bool isPriorityNetworkJob(const NetworkJob& job) {
+  switch (job.type) {
+    case NetworkJobType::LockerStatus:
+    case NetworkJobType::VerifyCode:
+    case NetworkJobType::VerifyMasterTag:
+      return true;
+
+    case NetworkJobType::Heartbeat:
+    case NetworkJobType::DeviceActionsPoll:
+    case NetworkJobType::TagAssignmentResult:
+      return false;
+  }
+
   return false;
 }
 
@@ -1357,6 +1415,11 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
         copyCStringToBuffer(tagId, result.text2, sizeof(result.text2));
         copyCStringToBuffer(itemName, result.text3, sizeof(result.text3));
       }
+    } else if (strcmp(type, "CANCEL_RFID_TAG_ASSIGNMENT") == 0 && !result.boolValue2) {
+      const JsonObject payload = action["payload"];
+      const char* assignmentId = payload["assignmentId"] | "";
+      result.boolValue2 = true;
+      copyCStringToBuffer(assignmentId, result.text4, sizeof(result.text4));
     }
   }
 
@@ -2118,7 +2181,7 @@ void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs) {
   http.setTimeout(responseTimeoutMs);
 }
 
-bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key) {
+bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key, MFRC522::StatusCode* statusOut) {
   for (byte i = 0; i < 6; i += 1) {
     key.keyByte[i] = 0xFF;
   }
@@ -2129,6 +2192,10 @@ bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_K
     &key,
     &(reader.uid)
   );
+
+  if (statusOut != nullptr) {
+    *statusOut = status;
+  }
 
   return status == MFRC522::STATUS_OK;
 }
@@ -2199,8 +2266,13 @@ bool tryProgramTag(MFRC522& reader, const String& tagId, String& error) {
   }
 
   MFRC522::MIFARE_Key key;
-  if (!authenticateClassicBlock(reader, RFID_APP_BLOCK, key)) {
-    error = "Nie udalo sie uwierzytelnic bloku RFID.";
+  MFRC522::StatusCode authStatus = MFRC522::STATUS_ERROR;
+  if (!authenticateClassicBlock(reader, RFID_APP_BLOCK, key, &authStatus)) {
+    error = String("Nie udalo sie uwierzytelnic bloku RFID: ")
+      + reader.GetStatusCodeName(authStatus)
+      + " (kod="
+      + static_cast<int>(authStatus)
+      + ")";
     return false;
   }
 

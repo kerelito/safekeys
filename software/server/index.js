@@ -565,6 +565,16 @@ app.post("/rfid-items/tag-assignment/start", requireRoles("master", "admin"), as
   res.status(201).json(result);
 }));
 
+app.post("/rfid-items/tag-assignment/cancel", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
+  const result = await lockerService.cancelTagAssignment({
+    source: "web",
+    actor: getSessionActor(req),
+    reason: req.body?.reason
+  });
+
+  res.json(result);
+}));
+
 app.put("/users/:userId", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
   const result = await lockerService.updateRfidUser(req.params.userId, {
     name: req.body.name,

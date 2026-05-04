@@ -23,6 +23,7 @@ let remoteActionsData = [];
 let confirmResolver = null;
 let logSearchDebounceId = null;
 let selectedLockerDetailsNumber = null;
+let isTagAssignmentRequestPending = false;
 
 const RFID_ITEM_TYPE_LABELS = {
   brelok: "Brelok",
@@ -100,7 +101,8 @@ const LOG_EVENT_PRESENTERS = {
   AUTH_LOGOUT: () => ({ text: "Wylogowano operatora", className: "log-info" }),
   RFID_TAG_ASSIGNMENT_STARTED: log => ({ text: `Rozpoczęto nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-info" }),
   RFID_TAG_ASSIGNMENT_COMPLETED: log => ({ text: `Nadano tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
-  RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" })
+  RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" }),
+  RFID_TAG_ASSIGNMENT_CANCELLED: log => ({ text: `Anulowano nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-warning" })
 };
 
 function formatRelativeTime(value) {
@@ -356,6 +358,7 @@ async function refreshSystemStatus() {
 function showAuthView(message = "") {
   isAuthenticated = false;
   currentUser = null;
+  isTagAssignmentRequestPending = false;
   document.getElementById("authView").classList.remove("hidden");
   document.getElementById("appView").classList.add("hidden");
   document.getElementById("authError").innerText = message;
@@ -494,6 +497,7 @@ function connectSocket() {
   });
   socket.on("rfid-tag-assignment-updated", assignment => {
     currentTagAssignment = assignment;
+    isTagAssignmentRequestPending = false;
     renderRfidAssignmentStatus();
 
     if (assignment?.status === "completed" && assignment?.result?.success && assignment?.result?.tagId) {
@@ -503,6 +507,7 @@ function connectSocket() {
 
     if (assignment?.status === "failed") {
       showToast(assignment.result?.error || "Nie udało się nadać taga RFID.", true);
+      cancelRfidTagAssignment({ reason: "cleanup_after_result", silentSuccess: true, silentNotFound: true });
     }
   });
   socket.on("active-codes-changed", async () => {
@@ -1239,6 +1244,9 @@ function renderRfidAssignmentStatus() {
   const button = document.getElementById("assignRfidTagButton");
   const itemName = document.getElementById("rfidItemName").value.trim();
   const esp32Connected = Boolean(systemStatusData?.esp32?.connected);
+  const isPendingAssignment = currentTagAssignment?.status === "pending";
+
+  button.classList.remove("danger");
 
   if (!canManageRfidConfig()) {
     status.textContent = "Nadawanie tagów RFID jest dostępne tylko dla ról master i administrator.";
@@ -1247,38 +1255,39 @@ function renderRfidAssignmentStatus() {
     return;
   }
 
-  if (!esp32Connected) {
-    status.textContent = "Nadawanie taga jest dostępne tylko wtedy, gdy panel ma aktywne połączenie z ESP32.";
-    button.disabled = true;
-    button.textContent = "ESP32 offline";
-    return;
-  }
-
   if (!currentTagAssignment || !["pending", "completed", "failed"].includes(currentTagAssignment.status)) {
+    if (!esp32Connected) {
+      status.textContent = "Nadawanie taga jest dostępne tylko wtedy, gdy panel ma aktywne połączenie z ESP32.";
+      button.disabled = true;
+      button.textContent = "ESP32 offline";
+      return;
+    }
+
     status.textContent = "Możesz wpisać ID ręcznie albo uruchomić nadawanie na master readerze.";
-    button.disabled = false;
-    button.textContent = "Nadaj tag";
+    button.disabled = isTagAssignmentRequestPending;
+    button.textContent = isTagAssignmentRequestPending ? "Uruchamianie..." : "Nadaj tag";
     return;
   }
 
-  if (currentTagAssignment.status === "pending") {
+  if (isPendingAssignment) {
     const label = currentTagAssignment.itemName || itemName || "przedmiotu";
     status.textContent = `Tryb nadawania jest aktywny. Przyłóż tag do master readera, aby zapisać ID ${currentTagAssignment.tagId} dla ${label}.`;
-    button.disabled = true;
-    button.textContent = "Oczekiwanie...";
+    button.disabled = isTagAssignmentRequestPending;
+    button.textContent = isTagAssignmentRequestPending ? "Anulowanie..." : "Anuluj";
+    button.classList.add("danger");
     return;
   }
 
   if (currentTagAssignment.status === "completed") {
     status.textContent = `Tag został nadany. Nowe ID: ${currentTagAssignment.result?.tagId || currentTagAssignment.tagId}.`;
-    button.disabled = false;
+    button.disabled = isTagAssignmentRequestPending;
     button.textContent = "Nadaj tag";
     return;
   }
 
   status.textContent = `Nadawanie nie powiodło się: ${currentTagAssignment.result?.error || "nieznany błąd"}.`;
-  button.disabled = false;
-  button.textContent = "Spróbuj ponownie";
+  button.disabled = isTagAssignmentRequestPending;
+  button.textContent = isTagAssignmentRequestPending ? "Czyszczenie..." : "Nadaj tag";
 }
 
 function renderPanelUsers() {
@@ -1394,6 +1403,7 @@ async function loadCurrentTagAssignment() {
   try {
     const data = await apiFetch("/rfid-items/tag-assignment");
     currentTagAssignment = data.assignment || null;
+    isTagAssignmentRequestPending = false;
     renderRfidAssignmentStatus();
   } catch (error) {
     showToast(error.message, true);
@@ -1511,18 +1521,70 @@ async function startRfidTagAssignment() {
   const itemName = document.getElementById("rfidItemName").value.trim();
 
   try {
+    isTagAssignmentRequestPending = true;
+    renderRfidAssignmentStatus();
     currentTagAssignment = await apiFetch("/rfid-items/tag-assignment/start", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ itemName })
     });
 
+    isTagAssignmentRequestPending = false;
     renderRfidAssignmentStatus();
     showToast("Włączono tryb nadawania taga na master readerze.");
     await loadRemoteActions();
   } catch (error) {
+    isTagAssignmentRequestPending = false;
+    renderRfidAssignmentStatus();
     showToast(error.message, true);
   }
+}
+
+async function cancelRfidTagAssignment({ reason = "manual_cancel", silentSuccess = false, silentNotFound = false } = {}) {
+  if (!canManageRfidConfig()) {
+    showToast("Nie masz uprawnień do anulowania nadawania tagów RFID.", true);
+    return;
+  }
+
+  if (!currentTagAssignment && !isTagAssignmentRequestPending) {
+    return;
+  }
+
+  try {
+    isTagAssignmentRequestPending = true;
+    renderRfidAssignmentStatus();
+    await apiFetch("/rfid-items/tag-assignment/cancel", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ reason })
+    });
+
+    currentTagAssignment = null;
+    isTagAssignmentRequestPending = false;
+    renderRfidAssignmentStatus();
+    if (!silentSuccess) {
+      showToast("Anulowano tryb nadawania taga RFID.");
+    }
+    await loadRemoteActions();
+  } catch (error) {
+    isTagAssignmentRequestPending = false;
+    renderRfidAssignmentStatus();
+    if (silentNotFound && /Nie ma aktywnego zadania/.test(error.message)) {
+      currentTagAssignment = null;
+      renderRfidAssignmentStatus();
+      return;
+    }
+    showToast(error.message, true);
+  }
+}
+
+function handleRfidTagAssignmentButtonClick() {
+  if (currentTagAssignment?.status === "pending") {
+    cancelRfidTagAssignment();
+    return;
+  }
+
+  startRfidTagAssignment();
 }
 
 async function submitPanelUserForm(event) {
@@ -1937,6 +1999,10 @@ function getRemoteActionTypeLabel(action) {
 
   if (action.type === "ASSIGN_RFID_TAG") {
     return "Nadaj tag RFID";
+  }
+
+  if (action.type === "CANCEL_RFID_TAG_ASSIGNMENT") {
+    return "Anuluj nadawanie RFID";
   }
 
   return action.type || "Polecenie";
@@ -2404,6 +2470,15 @@ function buildLogDetails(log) {
       addActor();
       addSource();
       break;
+    case "RFID_TAG_ASSIGNMENT_CANCELLED":
+      addTag();
+      addDetail(details, "Nazwa przedmiotu", log.itemName);
+      addDetail(details, "ID zadania", log.details?.assignmentId);
+      addDetail(details, "Anulowano o", log.details?.cancelledAt, formatIsoDateTime);
+      addDetail(details, "Powód", log.details?.reason);
+      addActor();
+      addSource();
+      break;
     case "RFID_TAG_ASSIGNMENT_COMPLETED":
     case "RFID_TAG_ASSIGNMENT_FAILED":
       addTag();
@@ -2580,7 +2655,7 @@ document.getElementById("rfidUserForm").addEventListener("submit", submitRfidUse
 document.getElementById("rfidUserReset").addEventListener("click", resetRfidUserForm);
 document.getElementById("rfidItemForm").addEventListener("submit", submitRfidItemForm);
 document.getElementById("rfidItemReset").addEventListener("click", resetRfidItemForm);
-document.getElementById("assignRfidTagButton").addEventListener("click", startRfidTagAssignment);
+document.getElementById("assignRfidTagButton").addEventListener("click", handleRfidTagAssignmentButtonClick);
 document.getElementById("rfidItemName").addEventListener("input", renderRfidAssignmentStatus);
 document.getElementById("panelUserForm").addEventListener("submit", submitPanelUserForm);
 document.getElementById("panelUserReset").addEventListener("click", resetPanelUserForm);

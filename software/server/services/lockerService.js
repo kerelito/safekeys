@@ -838,6 +838,45 @@ class LockerService extends EventEmitter {
     return this.getCurrentTagAssignment();
   }
 
+  async cancelTagAssignment(context = {}) {
+    if (!this.currentTagAssignment) {
+      throw createHttpError(404, "Nie ma aktywnego zadania nadawania taga RFID.");
+    }
+
+    const assignment = { ...this.currentTagAssignment };
+    const shouldStopDevice = assignment.status === "pending";
+
+    if (shouldStopDevice) {
+      this.createRemoteAction("CANCEL_RFID_TAG_ASSIGNMENT", null, {
+        ...context,
+        payload: {
+          assignmentId: assignment.id
+        }
+      });
+    }
+
+    await this.createLog({
+      event: "RFID_TAG_ASSIGNMENT_CANCELLED",
+      source: context.source || "web",
+      actor: context.actor || "system",
+      tagId: assignment.tagId,
+      itemName: assignment.itemName || null,
+      details: {
+        assignmentId: assignment.id,
+        cancelledAt: new Date().toISOString(),
+        reason: context.reason || (shouldStopDevice ? "manual_cancel" : "cleanup_after_result")
+      }
+    });
+
+    this.currentTagAssignment = null;
+    this.emit("rfid-tag-assignment-updated", null);
+
+    return {
+      success: true,
+      cancelledAssignmentId: assignment.id
+    };
+  }
+
   async completeTagAssignment(payload = {}, context = {}) {
     if (!this.currentTagAssignment || this.currentTagAssignment.id !== payload.assignmentId) {
       throw createHttpError(404, "Nie znaleziono aktywnego zadania nadawania taga.");
