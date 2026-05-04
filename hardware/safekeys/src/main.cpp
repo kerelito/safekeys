@@ -88,14 +88,15 @@ static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
 static const uint8_t KEYPAD_RELEASE_CONFIRM_SCANS = 3;
+static const unsigned long KEYPAD_RELEASE_DEBOUNCE_MS = 25;
 static const uint8_t RFID_PRESENT_CONFIRM_SCANS = 3;
 static const uint8_t RFID_MISSING_CONFIRM_SCANS = 4;
 static const unsigned long NETWORK_QUEUE_WAIT_MS = 500;
 static const uint16_t HTTP_CONNECT_TIMEOUT_MS = 1500;
 static const uint16_t HTTP_RESPONSE_TIMEOUT_MS = 2500;
-static const uint8_t NETWORK_QUEUE_LENGTH = 8;
+static const uint8_t NETWORK_QUEUE_LENGTH = 12;
 static const uint16_t NETWORK_TASK_STACK_SIZE = 8192;
-static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 30;
+static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 45;
 static const byte RFID_APP_BLOCK = 4;
 static const char RFID_APP_MAGIC_1 = 'S';
 static const char RFID_APP_MAGIC_2 = 'K';
@@ -266,6 +267,8 @@ long lastHeartbeatPingMs = -1;
 uint8_t lastStableRawKey = I2C_KEYPAD_NOKEY;
 bool keypadPressLocked = false;
 uint8_t keypadReleaseScanCount = 0;
+unsigned long keypadReleaseStartedMs = 0;
+bool keypadReady = false;
 bool wifiConnectInProgress = false;
 unsigned long wifiConnectStartedMs = 0;
 unsigned long lastWifiLoadingFrameMs = 0;
@@ -311,6 +314,7 @@ bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
 bool sendHeartbeat();
 void serviceNetworkResults();
 void handleNetworkResult(const NetworkResult& result);
+void recoverFromDroppedNetworkResult(const NetworkResult& result);
 bool enqueueNetworkJob(const NetworkJob& job);
 void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize);
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize);
@@ -382,12 +386,15 @@ void setup() {
   setStatusLed(false);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  bool keypadReady = false;
   if (ENABLE_KEYPAD) {
     keypadReady = keypad.begin();
-    keypad.loadKeyMap(keypadCharMap);
-    keypad.setKeyPadMode(I2C_KEYPAD_4x4);
-    keypad.setDebounceThreshold(25);
+    if (keypadReady) {
+      keypad.loadKeyMap(keypadCharMap);
+      keypad.setKeyPadMode(I2C_KEYPAD_4x4);
+      keypad.setDebounceThreshold(25);
+    } else {
+      Serial.println("Keypad initialization failed. Keypad handling will stay disabled.");
+    }
   }
 
   strip.begin();
@@ -575,6 +582,7 @@ void networkTaskMain(void* parameter) {
     if (shouldPublishResult && networkResultQueue != nullptr) {
       if (xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
         Serial.println("Network result queue is full, dropping result.");
+        recoverFromDroppedNetworkResult(result);
       }
     }
   }
@@ -589,7 +597,7 @@ void loop() {
   serviceWifiConnection(now);
   serviceCodeResultFlash(now);
   handleSerialDebug();
-  if (ENABLE_KEYPAD) {
+  if (ENABLE_KEYPAD && keypadReady) {
     handleKeypad();
   }
   serviceRfidReaders(now);
@@ -727,19 +735,36 @@ bool maybeReportLockerStatuses(unsigned long now) {
 }
 
 void handleKeypad() {
+  const unsigned long now = millis();
   const uint8_t rawKey = keypad.getKey();
   if (rawKey == I2C_KEYPAD_NOKEY) {
-    if (keypadPressLocked && keypadReleaseScanCount < KEYPAD_RELEASE_CONFIRM_SCANS) {
-      keypadReleaseScanCount += 1;
+    if (keypadPressLocked) {
+      if (keypadReleaseStartedMs == 0) {
+        keypadReleaseStartedMs = now;
+      }
+
+      if (keypadReleaseScanCount < KEYPAD_RELEASE_CONFIRM_SCANS) {
+        keypadReleaseScanCount += 1;
+      }
     }
 
-    if (!keypadPressLocked || keypadReleaseScanCount >= KEYPAD_RELEASE_CONFIRM_SCANS) {
+    if (
+      !keypadPressLocked ||
+      (
+        keypadReleaseScanCount >= KEYPAD_RELEASE_CONFIRM_SCANS &&
+        keypadReleaseStartedMs != 0 &&
+        now - keypadReleaseStartedMs >= KEYPAD_RELEASE_DEBOUNCE_MS
+      )
+    ) {
       keypadPressLocked = false;
       lastStableRawKey = I2C_KEYPAD_NOKEY;
       keypadReleaseScanCount = 0;
+      keypadReleaseStartedMs = 0;
     }
     return;
   }
+
+  keypadReleaseStartedMs = 0;
 
   if (rawKey == I2C_KEYPAD_THRESHOLD) {
     return;
@@ -1041,6 +1066,39 @@ void handleNetworkResult(const NetworkResult& result) {
       }
 
       blinkLed(2, 220, 120);
+      break;
+  }
+}
+
+void recoverFromDroppedNetworkResult(const NetworkResult& result) {
+  switch (result.type) {
+    case NetworkResultType::Heartbeat:
+      heartbeatQueued = false;
+      lastHeartbeatMs = 0;
+      break;
+
+    case NetworkResultType::LockerStatus: {
+      const uint8_t lockerIndex = result.lockerNumber > 0 ? result.lockerNumber - 1 : LOCKER_COUNT;
+      if (lockerIndex < LOCKER_COUNT) {
+        lockerStatusQueued[lockerIndex] = false;
+        lockerReaders[lockerIndex].reportDirty = true;
+        lockerReaders[lockerIndex].lastReportMs = 0;
+      }
+      break;
+    }
+
+    case NetworkResultType::DeviceActionsPoll:
+      deviceActionsPollQueued = false;
+      lastDeviceActionsPollMs = 0;
+      break;
+
+    case NetworkResultType::VerifyCode:
+      setStatusLed(false);
+      clearPendingCode();
+      break;
+
+    case NetworkResultType::VerifyMasterTag:
+      clearPendingMasterTag();
       break;
   }
 }

@@ -2075,20 +2075,46 @@ async function loadActiveCodes() {
     activeCodesData.forEach(c => {
       const li = document.createElement("li");
       li.id = "code-" + c.code;
+      li.className = "active-code-item";
 
-      const row = document.createElement("div");
-      row.className = "code-row";
+      const layout = document.createElement("div");
+      layout.className = "active-code-layout";
 
-      const meta = document.createElement("div");
-      meta.className = "code-meta";
+      const content = document.createElement("div");
+      content.className = "active-code-content";
+
+      const header = document.createElement("div");
+      header.className = "active-code-header";
 
       const label = document.createElement("span");
       label.className = "code-chip";
-      label.textContent = `${c.code} · S${c.locker}`;
+      label.textContent = c.code;
+
+      const lockerBadge = document.createElement("span");
+      lockerBadge.className = "active-code-locker";
+      lockerBadge.textContent = `Skrytka S${c.locker}`;
 
       const deliveryChip = createEmailDeliveryChip(c);
+      const detail = document.createElement("div");
+      detail.className = "active-code-detail";
+
+      if (deliveryChip) {
+        detail.appendChild(deliveryChip);
+      } else {
+        const note = document.createElement("span");
+        note.className = "active-code-note";
+        note.textContent = "Kod dostępny tylko w panelu operatora";
+        detail.appendChild(note);
+      }
+
       const timer = document.createElement("span");
       timer.className = "timer";
+
+      const footer = document.createElement("div");
+      footer.className = "active-code-footer";
+
+      const actions = document.createElement("div");
+      actions.className = "code-actions";
 
       const button = document.createElement("button");
       button.className = "danger";
@@ -2101,17 +2127,19 @@ async function loadActiveCodes() {
       copyButton.textContent = "Kopiuj";
       copyButton.addEventListener("click", () => copyTextToClipboard(c.code, `Skopiowano kod ${c.code}.`));
 
-      meta.appendChild(label);
-      if (deliveryChip) {
-        meta.appendChild(deliveryChip);
-      }
-      meta.appendChild(timer);
-      row.appendChild(meta);
-      row.appendChild(copyButton);
+      header.appendChild(label);
+      header.appendChild(lockerBadge);
+      footer.appendChild(timer);
+      actions.appendChild(copyButton);
       if (canOperateLockers()) {
-        row.appendChild(button);
+        actions.appendChild(button);
       }
-      li.appendChild(row);
+      footer.appendChild(actions);
+      content.appendChild(header);
+      content.appendChild(detail);
+      content.appendChild(footer);
+      layout.appendChild(content);
+      li.appendChild(layout);
       list.appendChild(li);
     });
 
