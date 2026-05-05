@@ -1,5 +1,19 @@
-import panelMarkup from "./panelMarkup.html?raw";
+import { AppView } from "./components/AppView.jsx";
+import { AuthView } from "./components/AuthView.jsx";
+import { ConfirmOverlay } from "./components/ConfirmOverlay.jsx";
+import { LockerDetailsOverlay } from "./components/LockerDetailsOverlay.jsx";
+import { LogDetailsOverlay } from "./components/LogDetailsOverlay.jsx";
+import { Toast } from "./components/Toast.jsx";
 
 export function App() {
-  return <div dangerouslySetInnerHTML={{ __html: panelMarkup }} />;
+  return (
+    <>
+      <AuthView />
+      <AppView />
+      <ConfirmOverlay />
+      <LogDetailsOverlay />
+      <LockerDetailsOverlay />
+      <Toast />
+    </>
+  );
 }

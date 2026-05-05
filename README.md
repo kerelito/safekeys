@@ -13,9 +13,11 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 ├── software/
 │   ├── src/
 │   │   ├── App.jsx
+│   │   ├── components/
+│   │   ├── services/
+│   │   ├── state/
 │   │   ├── legacyApp.js
-│   │   ├── main.jsx
-│   │   └── panelMarkup.html
+│   │   └── main.jsx
 │   ├── public/
 │   │   ├── app.js
 │   │   ├── assets/
@@ -62,7 +64,7 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
   Obsługa interakcji Discord, embedów i akcji administracyjnych.
 
 - `software/src/`
-  Frontend React budowany przez Vite. Aktualnie zachowuje istniejący wygląd i logikę panelu przez kontrolowany shell React oraz moduł `legacyApp.js`.
+  Frontend React budowany przez Vite. Cały statyczny szkielet panelu jest już komponentami React, stan shell UI jest w `state/uiShellStore.js`, alerty i aktywne kody mają własne store, a klient HTTP jest w `services/apiClient.js`; `legacyApp.js` nadal obsługuje Socket.IO oraz pozostałe dynamiczne listy.
 
 - `software/index.html`
   Punkt wejścia Vite/React.

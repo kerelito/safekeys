@@ -1,16 +1,35 @@
-const THEME_STORAGE_KEY = "locker-theme";
-const COMPACT_STORAGE_KEY = "locker-density";
-const API = window.location.origin;
-const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+import {
+  getActivePage,
+  setActivePage as setUiActivePage,
+  setOperationAccess,
+  setPanelUsersAccess,
+  subscribeUiShell
+} from "./state/uiShellStore.js";
+import {
+  clearActiveCodes,
+  configureActiveCodesHandlers,
+  pruneExpiredActiveCodes,
+  refreshActiveCodes
+} from "./state/activeCodesStore.js";
+import {
+  API,
+  apiFetch,
+  buildQueryString,
+  configureApiClient,
+  downloadUrl
+} from "./services/apiClient.js";
+import {
+  clearAlerts,
+  refreshAlerts
+} from "./state/alertsStore.js";
 
-let activeCodesData = [];
 let toastTimeoutId;
 let lastHttpOk = true;
 let socket = null;
 let isAuthenticated = false;
 let isGeneratingCode = false;
 let currentUser = null;
-let currentPage = "dashboard";
+let currentPage = getActivePage();
 let rfidUsersData = [];
 let rfidItemsData = [];
 let panelUsersData = [];
@@ -18,7 +37,6 @@ let systemStatusData = null;
 let currentTagAssignment = null;
 let lockersData = [];
 let logsCount = 0;
-let alertsData = [];
 let remoteActionsData = [];
 let confirmResolver = null;
 let logSearchDebounceId = null;
@@ -158,11 +176,9 @@ function updateOverviewMetrics() {
   const masterUsers = panelUsersData.filter(user => user.role === "master").length;
 
   setText("metricReadyLockers", `${readyLockers}/${totalLockers}`);
-  setText("metricActiveCodes", String(activeCodesData.length));
   setText("metricRfidUsers", String(rfidUsersData.length));
   setText("metricRfidItems", String(rfidItemsData.length));
 
-  setText("activeCodesCount", String(activeCodesData.length));
   setText("logsCount", String(logsCount));
   setText("remoteActionsCount", String(remoteActionsData.length));
   setText("rfidUsersCount", String(rfidUsersData.length));
@@ -289,55 +305,12 @@ function renderSystemStatus() {
   updateOverviewMetrics();
 }
 
-function renderAlerts() {
-  const list = document.getElementById("alertsList");
-  if (!list) {
-    return;
-  }
-
-  list.innerHTML = "";
-  setText("alertsCount", String(alertsData.length));
-
-  if (alertsData.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "alert-item is-info";
-    empty.innerHTML = "<strong>System wygląda zdrowo</strong><span>Nie ma teraz alertów wymagających reakcji.</span>";
-    list.appendChild(empty);
-    return;
-  }
-
-  alertsData.forEach(alert => {
-    const item = document.createElement("article");
-    item.className = `alert-item is-${alert.severity || "info"}`;
-
-    const title = document.createElement("strong");
-    title.textContent = alert.title;
-
-    const detail = document.createElement("span");
-    detail.textContent = alert.detail;
-
-    const action = document.createElement("small");
-    action.textContent = alert.action;
-
-    item.appendChild(title);
-    item.appendChild(detail);
-    item.appendChild(action);
-    list.appendChild(item);
-  });
-}
-
 async function loadAlerts() {
   if (!isAuthenticated) {
     return;
   }
 
-  try {
-    alertsData = await apiFetch("/alerts");
-    renderAlerts();
-  } catch (error) {
-    alertsData = [];
-    renderAlerts();
-  }
+  await refreshAlerts();
 }
 
 async function refreshSystemStatus() {
@@ -371,6 +344,10 @@ function showAuthView(message = "") {
   }
 
   systemStatusData = null;
+  setPanelUsersAccess(false);
+  setOperationAccess(false);
+  clearActiveCodes();
+  clearAlerts();
   renderSystemStatus();
 }
 
@@ -401,7 +378,9 @@ function updateMasterUi() {
   const isMaster = Boolean(currentUser?.isMaster);
   const canManageRfid = canManageRfidConfig();
   const canOperate = canOperateLockers();
-  document.getElementById("panelUsersMenuLink").classList.toggle("hidden", !isMaster);
+  setPanelUsersAccess(isMaster);
+  setOperationAccess(canOperate);
+  currentPage = getActivePage();
   document.querySelectorAll("[data-rfid-admin-only]").forEach(element => {
     element.classList.toggle("hidden", !canManageRfid);
   });
@@ -417,10 +396,6 @@ function updateMasterUi() {
   updateRfidItemTypeOptions();
   renderRfidUsers();
   renderRfidItems();
-
-  if (!isMaster && currentPage === "panelUsers") {
-    setPage("dashboard");
-  }
 }
 
 function getPanelRoleLabel(role) {
@@ -550,94 +525,9 @@ function connectSocket() {
   });
 }
 
-function toggleMenu(forceOpen = null) {
-  const drawer = document.getElementById("menuDrawer");
-  const shouldOpen = forceOpen === null ? drawer.classList.contains("hidden") : forceOpen;
-  drawer.classList.toggle("hidden", !shouldOpen);
-  document.getElementById("menuButton").setAttribute("aria-expanded", String(shouldOpen));
-}
-
 function setPage(page, closeMenu = true) {
-  if (page === "panelUsers" && !currentUser?.isMaster) {
-    page = "dashboard";
-  }
-
-  currentPage = page;
-  document.getElementById("dashboardPage").classList.toggle("active", page === "dashboard");
-  document.getElementById("usersPage").classList.toggle("active", page === "users");
-  document.getElementById("itemsPage").classList.toggle("active", page === "items");
-  document.getElementById("panelUsersPage").classList.toggle("active", page === "panelUsers");
-  document.querySelectorAll(".menu-link").forEach(link => {
-    link.classList.toggle("active", link.dataset.page === page);
-  });
-
-  if (closeMenu) {
-    toggleMenu(false);
-  }
-}
-
-function getStoredTheme() {
-  return localStorage.getItem(THEME_STORAGE_KEY) || "system";
-}
-
-function resolveTheme(theme) {
-  if (theme === "system") {
-    return themeMedia.matches ? "dark" : "light";
-  }
-
-  return theme;
-}
-
-function updateThemeButton(theme) {
-  const button = document.getElementById("themeToggle");
-  button.innerText = `Motyw: ${theme}`;
-}
-
-function updateThemeColor(resolvedTheme) {
-  const metaTheme = document.querySelector('meta[name="theme-color"]');
-  metaTheme.setAttribute("content", resolvedTheme === "dark" ? "#07111f" : "#edf3ff");
-}
-
-function applyTheme(theme) {
-  const resolvedTheme = resolveTheme(theme);
-  document.documentElement.dataset.theme = resolvedTheme;
-  updateThemeButton(theme);
-  updateThemeColor(resolvedTheme);
-}
-
-function cycleTheme() {
-  const currentTheme = getStoredTheme();
-  const nextTheme = currentTheme === "system" ? "dark" : currentTheme === "dark" ? "light" : "system";
-  localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-  applyTheme(nextTheme);
-}
-
-function getStoredDensity() {
-  const stored = localStorage.getItem(COMPACT_STORAGE_KEY);
-  if (stored === "compact" || stored === "simple") {
-    return "simple";
-  }
-  return "advanced";
-}
-
-function applyDensity(density) {
-  const normalizedDensity = density === "simple" ? "simple" : "advanced";
-  const legacyDensity = normalizedDensity === "simple" ? "compact" : "comfort";
-  document.documentElement.dataset.density = legacyDensity;
-  document.documentElement.dataset.viewMode = normalizedDensity;
-  document.getElementById("compactToggle").innerText = normalizedDensity === "simple"
-    ? "Tryb: prosty"
-    : "Tryb: zaawansowany";
-
-  if (normalizedDensity === "simple" && currentPage !== "dashboard") {
-    setPage("dashboard");
-  }
-}
-
-function toggleDensity() {
-  const nextDensity = getStoredDensity() === "simple" ? "advanced" : "simple";
-  localStorage.setItem(COMPACT_STORAGE_KEY, nextDensity);
-  applyDensity(nextDensity);
+  currentPage = setUiActivePage(page, { closeMenu });
+  return currentPage;
 }
 
 function getSearchValue(id) {
@@ -652,23 +542,6 @@ function matchesSearch(values, query) {
   return values
     .filter(value => value !== null && value !== undefined)
     .some(value => String(value).toLowerCase().includes(query));
-}
-
-function buildQueryString(params = {}) {
-  const query = new URLSearchParams();
-
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== null && value !== undefined && String(value).trim() !== "") {
-      query.set(key, String(value).trim());
-    }
-  });
-
-  const serialized = query.toString();
-  return serialized ? `?${serialized}` : "";
-}
-
-function downloadUrl(path) {
-  window.location.href = API + path;
 }
 
 async function copyTextToClipboard(value, successMessage = "Skopiowano do schowka.") {
@@ -828,65 +701,6 @@ function updateGenerateButtonLabel(isSubmitting = false) {
   }
 
   button.innerText = email ? "Generuj i wyślij" : "Generuj";
-}
-
-function createEmailDeliveryChip(codeData) {
-  if (!codeData.recipientEmail) {
-    return null;
-  }
-
-  const chip = document.createElement("span");
-  const failedDelivery = Boolean(codeData.emailDeliveryAttempted && !codeData.emailSentAt);
-
-  chip.className = `code-chip ${failedDelivery ? "is-warning" : "is-success"}`;
-  chip.textContent = failedDelivery
-    ? `E-mail: błąd · ${codeData.recipientEmail}`
-    : `E-mail wysłany · ${codeData.recipientEmail}`;
-
-  if (codeData.emailDeliveryError) {
-    chip.title = codeData.emailDeliveryError;
-  }
-
-  return chip;
-}
-
-async function apiFetch(path, options = {}) {
-  let res;
-
-  try {
-    res = await fetch(API + path, {
-      credentials: "same-origin",
-      ...options
-    });
-  } catch (error) {
-    lastHttpOk = false;
-    renderSystemStatus();
-    throw new Error("Brak połączenia z serwerem.");
-  }
-
-  let data = null;
-  const isJson = res.headers.get("content-type")?.includes("application/json");
-
-  if (isJson) {
-    data = await res.json();
-  }
-
-  if (!res.ok) {
-    if (res.status === 401) {
-      showAuthView("Sesja wygasła. Zaloguj się ponownie.");
-    }
-
-    if (res.status >= 500) {
-      lastHttpOk = false;
-      renderSystemStatus();
-    }
-    throw new Error(data?.error || "Operacja nie powiodła się.");
-  }
-
-  lastHttpOk = true;
-  renderSystemStatus();
-
-  return data;
 }
 
 async function checkSession() {
@@ -2129,90 +1943,7 @@ async function releaseAllLockers() {
 
 async function loadActiveCodes() {
   try {
-    activeCodesData = await apiFetch("/active-codes");
-
-    const list = document.getElementById("activeCodes");
-    list.innerHTML = "";
-
-    if (activeCodesData.length === 0) {
-      renderEmptyState("activeCodes", "Brak aktywnych kodów.");
-      updateOverviewMetrics();
-      await loadAlerts();
-      return;
-    }
-
-    activeCodesData.forEach(c => {
-      const li = document.createElement("li");
-      li.id = "code-" + c.code;
-      li.className = "active-code-item";
-
-      const layout = document.createElement("div");
-      layout.className = "active-code-layout";
-
-      const content = document.createElement("div");
-      content.className = "active-code-content";
-
-      const header = document.createElement("div");
-      header.className = "active-code-header";
-
-      const label = document.createElement("span");
-      label.className = "code-chip";
-      label.textContent = c.code;
-
-      const lockerBadge = document.createElement("span");
-      lockerBadge.className = "active-code-locker";
-      lockerBadge.textContent = `Skrytka S${c.locker}`;
-
-      const deliveryChip = createEmailDeliveryChip(c);
-      const detail = document.createElement("div");
-      detail.className = "active-code-detail";
-
-      if (deliveryChip) {
-        detail.appendChild(deliveryChip);
-      } else {
-        const note = document.createElement("span");
-        note.className = "active-code-note";
-        note.textContent = "Kod dostępny tylko w panelu operatora";
-        detail.appendChild(note);
-      }
-
-      const timer = document.createElement("span");
-      timer.className = "timer";
-
-      const footer = document.createElement("div");
-      footer.className = "active-code-footer";
-
-      const actions = document.createElement("div");
-      actions.className = "code-actions";
-
-      const button = document.createElement("button");
-      button.className = "danger";
-      button.textContent = "Wyłącz";
-      button.addEventListener("click", () => deactivate(c.code));
-
-      const copyButton = document.createElement("button");
-      copyButton.className = "secondary-button code-copy-button";
-      copyButton.type = "button";
-      copyButton.textContent = "Kopiuj";
-      copyButton.addEventListener("click", () => copyTextToClipboard(c.code, `Skopiowano kod ${c.code}.`));
-
-      header.appendChild(label);
-      header.appendChild(lockerBadge);
-      footer.appendChild(timer);
-      actions.appendChild(copyButton);
-      if (canOperateLockers()) {
-        actions.appendChild(button);
-      }
-      footer.appendChild(actions);
-      content.appendChild(header);
-      content.appendChild(detail);
-      content.appendChild(footer);
-      layout.appendChild(content);
-      li.appendChild(layout);
-      list.appendChild(li);
-    });
-
-    updateCountdowns();
+    await refreshActiveCodes();
     updateOverviewMetrics();
     await loadAlerts();
   } catch (error) {
@@ -2221,50 +1952,8 @@ async function loadActiveCodes() {
 }
 
 function updateCountdowns() {
-  activeCodesData.forEach(c => {
-    const el = document.getElementById("code-" + c.code);
-    if (!el) return;
-
-    const t = new Date(c.expiresAt) - new Date();
-
-    if (t <= 0) {
-      el.remove();
-      activeCodesData = activeCodesData.filter(item => item.code !== c.code);
-      if (activeCodesData.length === 0) {
-        renderEmptyState("activeCodes", "Brak aktywnych kodów.");
-      }
-      updateOverviewMetrics();
-      return;
-    }
-
-    const s = Math.floor(t / 1000);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-
-    el.querySelector(".timer").innerText = `Wygasa za ${h}h ${m}m ${sec}s`;
-  });
-}
-
-async function deactivate(code) {
-  if (!canOperateLockers()) {
-    showToast("Nie masz uprawnień do dezaktywacji kodów.", true);
-    return;
-  }
-
-  try {
-    await apiFetch("/deactivate-code", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ code })
-    });
-
-    showToast("Kod dezaktywowany");
-    await loadActiveCodes();
-    await loadAlerts();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  pruneExpiredActiveCodes();
+  updateOverviewMetrics();
 }
 
 function addLog(log, options = {}) {
@@ -2664,10 +2353,29 @@ if (window.__safeKeysLegacyAppBooted) {
 
 window.__safeKeysLegacyAppBooted = true;
 
-document.getElementById("themeToggle").addEventListener("click", cycleTheme);
-document.getElementById("compactToggle").addEventListener("click", toggleDensity);
-document.getElementById("menuButton").setAttribute("aria-expanded", "false");
-document.getElementById("menuButton").addEventListener("click", () => toggleMenu());
+configureApiClient({
+  onHttpStatusChange(ok) {
+    lastHttpOk = ok;
+    renderSystemStatus();
+  },
+  onUnauthorized() {
+    showAuthView("Sesja wygasła. Zaloguj się ponownie.");
+  }
+});
+
+configureActiveCodesHandlers({
+  canDeactivate: canOperateLockers,
+  showToast,
+  async afterChange() {
+    updateOverviewMetrics();
+    await loadAlerts();
+  }
+});
+
+subscribeUiShell(() => {
+  currentPage = getActivePage();
+});
+
 document.getElementById("generateButton").addEventListener("click", generateCode);
 document.getElementById("refreshLockersButton").addEventListener("click", loadLockers);
 document.getElementById("releaseAllLockersButton").addEventListener("click", releaseAllLockers);
@@ -2679,9 +2387,6 @@ document.getElementById("copyGeneratedCodeButton").addEventListener("click", eve
   copyTextToClipboard(event.currentTarget.dataset.code, "Skopiowano wygenerowany kod.");
 });
 document.getElementById("recipientEmail").addEventListener("input", updateGenerateButtonLabel);
-document.querySelectorAll(".menu-link").forEach(link => {
-  link.addEventListener("click", () => setPage(link.dataset.page));
-});
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("rfidUserForm").addEventListener("submit", submitRfidUserForm);
 document.getElementById("rfidUserReset").addEventListener("click", resetRfidUserForm);
@@ -2744,32 +2449,12 @@ document.getElementById("loginForm").addEventListener("submit", async event => {
   }
 });
 
-document.addEventListener("click", event => {
-  const drawer = document.getElementById("menuDrawer");
-  const menuButton = document.getElementById("menuButton");
-
-  if (drawer.classList.contains("hidden")) {
-    return;
-  }
-
-  if (!drawer.contains(event.target) && !menuButton.contains(event.target)) {
-    toggleMenu(false);
-  }
-});
-
-themeMedia.addEventListener("change", () => {
-  if (getStoredTheme() === "system") {
-    applyTheme("system");
-  }
-});
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     closeLogDetails();
   }
 });
 updateGenerateButtonLabel();
-applyTheme(getStoredTheme());
-applyDensity(getStoredDensity());
 renderSystemStatus();
 
 initializeAppSession();
