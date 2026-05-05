@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
@@ -39,6 +40,8 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
+const DIST_DIR = path.join(ROOT_DIR, "dist");
+const CLIENT_DIR = fs.existsSync(path.join(DIST_DIR, "index.html")) ? DIST_DIR : PUBLIC_DIR;
 const DEVICE_STATUS_BROADCAST_INTERVAL_MS = 30000;
 
 if (!MONGODB_URI) {
@@ -345,10 +348,11 @@ lockerService.on("device-status-changed", ({ status, wasConnected }) => {
   }
 });
 
-app.use(express.static(PUBLIC_DIR));
+app.use("/assets", express.static(path.join(PUBLIC_DIR, "assets")));
+app.use(express.static(CLIENT_DIR));
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+  res.sendFile(path.join(CLIENT_DIR, "index.html"));
 });
 
 app.get("/auth/session", (req, res) => {

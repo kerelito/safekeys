@@ -11,6 +11,11 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 │       ├── README.md
 │       └── SafeKeysESP32.ino
 ├── software/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── legacyApp.js
+│   │   ├── main.jsx
+│   │   └── panelMarkup.html
 │   ├── public/
 │   │   ├── app.js
 │   │   ├── assets/
@@ -29,8 +34,10 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 │   │   │   └── lockerValidation.js
 │   │   └── index.js
 │   ├── .env.example
+│   ├── index.html
 │   ├── package-lock.json
-│   └── package.json
+│   ├── package.json
+│   └── vite.config.mjs
 └── README.md
 ```
 
@@ -54,14 +61,17 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 - `software/server/bot/discordBot.js`
   Obsługa interakcji Discord, embedów i akcji administracyjnych.
 
-- `software/public/index.html`
-  Struktura dashboardu i widoków panelu.
+- `software/src/`
+  Frontend React budowany przez Vite. Aktualnie zachowuje istniejący wygląd i logikę panelu przez kontrolowany shell React oraz moduł `legacyApp.js`.
+
+- `software/index.html`
+  Punkt wejścia Vite/React.
 
 - `software/public/styles.css`
   Style panelu WWW.
 
 - `software/public/app.js`
-  Frontend dashboardu: logowanie, przełączanie podstron, żądania API, Socket.IO i renderowanie UI.
+  Poprzedni statyczny frontend dashboardu. Zostaje jako fallback, gdy `software/dist` nie jest jeszcze zbudowany.
 
 - `hardware/esp32/SafeKeysESP32.ino`
   Szkic pod firmware ESP32 przygotowany pod integrację z backendem.
@@ -70,10 +80,20 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 
 ```bash
 cd software
+npm run build
 npm start
 ```
 
 Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
+
+Do pracy nad samym frontendem można uruchomić Vite:
+
+```bash
+cd software
+npm run dev
+```
+
+Vite proxy kieruje żądania API i Socket.IO do backendu pod `http://localhost:3000`, więc backend powinien działać równolegle.
 
 ## Aktualne założenia
 
@@ -82,7 +102,7 @@ Konfiguracja środowiska dla API znajduje się w `software/.env.example`.
 - Stare endpointy HTTP pozostają kompatybilne, a firmware ma batched fallback `POST /device/sync` dla stanu urządzenia.
 - RFID użytkownika jest osobnym bytem od RFID obecności klucza w skrytce.
 - Przedmioty RFID mogą być opisane własną nazwą i typem, a nieznane UID są pokazywane jako obce obiekty.
-- Frontend pozostaje prostą aplikacją statyczną bez bundlera, żeby wdrożenie na Railway było lekkie.
+- Frontend jest budowany przez React/Vite do `software/dist`; serwer Express serwuje `dist`, jeśli istnieje, a w przeciwnym razie wraca do `software/public`.
 - Konta panelu są przechowywane w MongoDB; zmienne `ADMIN_*` służą już jako seed startowy, gdy baza nie ma jeszcze żadnego użytkownika panelu.
 
 ## Komunikacja urządzenia 24/7

@@ -2,10 +2,10 @@
   "name": "locker-system-deploy",
   "private": true,
   "scripts": {
-    "build": "npm --prefix software ci",
+    "build": "npm --prefix software ci && npm --prefix software run build",
     "start": "npm --prefix software start"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   }
 }

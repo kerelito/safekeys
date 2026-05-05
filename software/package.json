@@ -4,6 +4,8 @@
   "description": "",
   "main": "server/index.js",
   "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
     "start": "node server/index.js",
     "test": "node --test"
   },
@@ -19,7 +21,13 @@
     "express-session": "^1.19.0",
     "mongoose": "^9.5.0",
     "nodemailer": "^8.0.5",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
     "socket.io": "^4.8.3",
     "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.10"
   }
 }
