@@ -102,6 +102,7 @@ static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
 static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
+static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
@@ -375,7 +376,7 @@ volatile unsigned long lastDeviceWsConnectedMs = 0;
 unsigned long deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
 unsigned long lastDeviceWsHeartbeatMs = 0;
 unsigned long lastDeviceStateBatchMs = 0;
-unsigned long lastFullStateResyncAckMs = 0;
+unsigned long nextFullStateResyncDueMs = 0;
 unsigned long pendingStateBatchSentMs = 0;
 unsigned long nextDeviceStateBatchAttemptMs = 0;
 uint32_t deviceMessageSequence = 0;
@@ -438,6 +439,7 @@ void rememberAckedStateFingerprint(uint32_t fingerprint, bool full, uint32_t ful
 bool hasDirtyLockerReports();
 void clearAllLockerReportsClean(unsigned long now);
 void requestFullStateResync(const char* reason);
+bool isDeadlineReached(unsigned long now, unsigned long deadline);
 void rememberPendingStateBatch(const NetworkJob& job, const char* messageId, unsigned long now);
 void clearPendingStateBatch();
 bool isPendingStateBatchTimedOut(unsigned long now);
@@ -753,13 +755,15 @@ void networkTaskMain(void* parameter) {
           result.boolValue2 = false;
         } else {
           result.requestOk = sendDeviceStateBatchWs(job);
-          result.boolValue2 = result.requestOk;
+          result.boolValue2 = result.requestOk && DEVICE_STATE_WS_ACK_REQUIRED;
         }
-        if (!result.requestOk && (forceNextStateBatchHttps || shouldUseHttpsFallback(millis()))) {
+        const bool canUseStateHttpsFallback = !isDeviceWebSocketReady()
+          && (forceNextStateBatchHttps || shouldUseHttpsFallback(millis()));
+        if (!result.requestOk && canUseStateHttpsFallback) {
           result.requestOk = postDeviceStateBatch(job);
           result.boolValue2 = false;
         }
-        if (!result.requestOk && forceNextStateBatchHttps) {
+        if (!result.requestOk && forceNextStateBatchHttps && !isDeviceWebSocketReady()) {
           result.requestOk = postLegacyLockerStatusBatch(job);
           result.boolValue2 = false;
         }
@@ -1356,6 +1360,15 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
     }
 
     const bool retryFull = pendingStateWasFull;
+    if (isDeviceWebSocketReady()) {
+      Serial.printf("[WS] state batch ack timeout for %s, keeping WebSocket transport only.\n", pendingStateMessageId);
+      pendingStateBatchSentMs = now;
+      if (deviceStateBatchFailureCount < 255) {
+        deviceStateBatchFailureCount += 1;
+      }
+      return false;
+    }
+
     Serial.printf("[WS] state batch ack timeout for %s, HTTPS fallback scheduled.\n", pendingStateMessageId);
     clearPendingStateBatch();
     forceNextStateBatchHttps = true;
@@ -1378,11 +1391,12 @@ bool maybeQueueDeviceStateBatch(unsigned long now) {
   bool hasDirty = fullStateResyncPending;
   const bool periodicFullResyncDue =
     !fullStateResyncPending &&
-    lastFullStateResyncAckMs != 0 &&
-    now - lastFullStateResyncAckMs >= LOCKER_STATUS_RESYNC_INTERVAL_MS;
+    nextFullStateResyncDueMs != 0 &&
+    isDeadlineReached(now, nextFullStateResyncDueMs);
 
   if (periodicFullResyncDue) {
     hasDirty = true;
+    nextFullStateResyncDueMs = 0;
     requestFullStateResync("periodic full snapshot");
   }
 
@@ -2216,7 +2230,7 @@ void rememberAckedStateFingerprint(uint32_t fingerprint, bool full, uint32_t ful
   lastAckedStateFingerprintReady = true;
   if (full) {
     lastAckedFullStateResyncGeneration = fullGeneration;
-    lastFullStateResyncAckMs = now;
+    nextFullStateResyncDueMs = now + LOCKER_STATUS_RESYNC_INTERVAL_MS;
   }
 }
 
@@ -2246,9 +2260,14 @@ void requestFullStateResync(const char* reason) {
   }
 
   fullStateResyncPending = true;
+  nextFullStateResyncDueMs = 0;
   if (DEBUG_RFID_VERBOSE && !alreadyPending) {
     Serial.printf("[state] full resync requested: %s gen=%lu\n", reason != nullptr ? reason : "unknown", static_cast<unsigned long>(fullStateResyncGeneration));
   }
+}
+
+bool isDeadlineReached(unsigned long now, unsigned long deadline) {
+  return deadline != 0 && static_cast<long>(now - deadline) >= 0;
 }
 
 void rememberPendingStateBatch(const NetworkJob& job, const char* messageId, unsigned long now) {
@@ -2698,7 +2717,7 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
 
   const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
   Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
-  if (sent) {
+  if (sent && DEVICE_STATE_WS_ACK_REQUIRED) {
     rememberPendingStateBatch(job, messageId, millis());
   }
   return sent;
