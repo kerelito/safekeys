@@ -1007,6 +1007,16 @@ select:focus,
   background: rgba(255, 255, 255, 0.92);
 }
 
+.toast.is-error {
+  background: rgba(88, 17, 22, 0.95);
+  color: #ffe7e9;
+}
+
+:root[data-theme="light"] .toast.is-error {
+  background: rgba(255, 233, 236, 0.98);
+  color: #7f1d2d;
+}
+
 .toast.show {
   opacity: 1;
   transform: translateY(0);

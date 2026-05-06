@@ -42,8 +42,14 @@ let state = normalizeState({
   density: readStoredDensity(),
   activePage: "dashboard",
   menuOpen: false,
+  authError: "",
   canAccessPanelUsers: false,
-  canOperateLockers: false
+  canManageRfid: false,
+  canOperateLockers: false,
+  currentDisplayName: "",
+  currentRoleLabel: "",
+  currentUsername: "",
+  isAuthenticated: false
 });
 
 function applyDocumentState() {
@@ -113,8 +119,31 @@ export function setPanelUsersAccess(canAccessPanelUsers) {
   return updateState({ canAccessPanelUsers: Boolean(canAccessPanelUsers) });
 }
 
+export function setRfidAdminAccess(canManageRfid) {
+  return updateState({ canManageRfid: Boolean(canManageRfid) });
+}
+
 export function setOperationAccess(canOperateLockers) {
   return updateState({ canOperateLockers: Boolean(canOperateLockers) });
+}
+
+export function setAuthState({ authError = state.authError, isAuthenticated = state.isAuthenticated } = {}) {
+  return updateState({
+    authError,
+    isAuthenticated: Boolean(isAuthenticated)
+  });
+}
+
+export function setAuthError(authError = "") {
+  return updateState({ authError });
+}
+
+export function setCurrentUserSummary({ displayName = "", roleLabel = "", username = "" } = {}) {
+  return updateState({
+    currentDisplayName: displayName,
+    currentRoleLabel: roleLabel,
+    currentUsername: username
+  });
 }
 
 export function useUiShell() {

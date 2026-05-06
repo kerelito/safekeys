@@ -41,7 +41,8 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const DIST_DIR = path.join(ROOT_DIR, "dist");
-const CLIENT_DIR = fs.existsSync(path.join(DIST_DIR, "index.html")) ? DIST_DIR : PUBLIC_DIR;
+const HAS_CLIENT_BUILD = fs.existsSync(path.join(DIST_DIR, "index.html"));
+const CLIENT_DIR = DIST_DIR;
 const DEVICE_STATUS_BROADCAST_INTERVAL_MS = 30000;
 
 if (!MONGODB_URI) {
@@ -352,6 +353,10 @@ app.use("/assets", express.static(path.join(PUBLIC_DIR, "assets")));
 app.use(express.static(CLIENT_DIR));
 
 app.get("/", (req, res) => {
+  if (!HAS_CLIENT_BUILD) {
+    return res.status(503).send("Brakuje buildu frontendu. Uruchom `npm run build` w katalogu `software`.");
+  }
+
   res.sendFile(path.join(CLIENT_DIR, "index.html"));
 });
 

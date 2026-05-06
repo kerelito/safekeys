@@ -1,8 +1,20 @@
 import { SystemStatusIndicators } from "./SystemStatusIndicators.jsx";
+import { logoutFromStore } from "../state/sessionStore.js";
 import { useUiShell } from "../state/uiShellStore.js";
 
 export function TopBar() {
-  const { density, menuOpen, theme, cycleTheme, toggleDensity, toggleMenu } = useUiShell();
+  const {
+    currentDisplayName,
+    currentRoleLabel,
+    currentUsername,
+    density,
+    isAuthenticated,
+    menuOpen,
+    theme,
+    cycleTheme,
+    toggleDensity,
+    toggleMenu
+  } = useUiShell();
 
   return (
     <div className="topbar">
@@ -19,11 +31,11 @@ export function TopBar() {
         <button id="compactToggle" className="theme-toggle compact-toggle" type="button" onClick={toggleDensity}>
           {density === "simple" ? "Tryb: prosty" : "Tryb: zaawansowany"}
         </button>
-        <div id="userChip" className="user-chip hidden">
-          <strong id="userDisplayName" />
-          <span id="userUsername" />
+        <div id="userChip" className={`user-chip${isAuthenticated ? "" : " hidden"}`}>
+          <strong id="userDisplayName">{currentDisplayName}</strong>
+          <span id="userUsername">{currentUsername ? `@${currentUsername} · ${currentRoleLabel}` : ""}</span>
         </div>
-        <button id="logoutButton" className="logout-button" type="button">Wyloguj</button>
+        <button id="logoutButton" className="logout-button" type="button" onClick={logoutFromStore}>Wyloguj</button>
         <SystemStatusIndicators />
         <button
           id="menuButton"

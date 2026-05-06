@@ -1,6 +1,16 @@
+import {
+  setSessionField,
+  submitLoginFromStore,
+  useSession
+} from "../state/sessionStore.js";
+import { useUiShell } from "../state/uiShellStore.js";
+
 export function AuthView() {
+  const { authError, isAuthenticated } = useUiShell();
+  const session = useSession();
+
   return (
-    <div id="authView" className="auth-shell hidden">
+    <div id="authView" className={`auth-shell${isAuthenticated ? " hidden" : ""}`}>
       <div className="auth-card">
         <div className="auth-header">
           <img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" className="logo-mark" />
@@ -11,19 +21,39 @@ export function AuthView() {
           </p>
         </div>
 
-        <form id="loginForm" className="auth-form">
+        <form id="loginForm" className="auth-form" onSubmit={event => {
+          event.preventDefault();
+          submitLoginFromStore();
+        }}
+        >
           <label className="field">
             <span className="field-label">Login</span>
-            <input id="loginUsername" type="text" autoComplete="username" required />
+            <input
+              id="loginUsername"
+              type="text"
+              autoComplete="username"
+              required
+              value={session.username}
+              onChange={event => setSessionField("username", event.target.value)}
+            />
           </label>
 
           <label className="field">
             <span className="field-label">Hasło</span>
-            <input id="loginPassword" type="password" autoComplete="current-password" required />
+            <input
+              id="loginPassword"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={session.password}
+              onChange={event => setSessionField("password", event.target.value)}
+            />
           </label>
 
-          <button type="submit">Zaloguj</button>
-          <div id="authError" className="auth-error" />
+          <button type="submit" disabled={session.submitting}>
+            {session.submitting ? "Logowanie..." : "Zaloguj"}
+          </button>
+          <div id="authError" className="auth-error">{authError}</div>
         </form>
       </div>
     </div>

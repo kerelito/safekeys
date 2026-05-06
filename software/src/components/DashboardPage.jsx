@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   copyActiveCode,
   deactivateActiveCode,
@@ -9,7 +9,7 @@ import { useAlerts } from "../state/alertsStore.js";
 import {
   openLockerDetailsFromStore,
   openLockerFromStore,
-  refreshLockers,
+  refreshLockersFromStore,
   releaseAllLockersFromStore,
   useLockers
 } from "../state/lockersStore.js";
@@ -17,6 +17,26 @@ import {
   refreshRemoteActions,
   useRemoteActions
 } from "../state/remoteActionsStore.js";
+import {
+  clearLogsFromStore,
+  exportLogsFromStore,
+  openLogDetailsFromStore,
+  refreshLogs,
+  resetLogFilters,
+  setLogFilter,
+  useLogs
+} from "../state/logsStore.js";
+import { useAdminLists } from "../state/adminListsStore.js";
+import {
+  copyGeneratedCode,
+  generateCodeFromStore,
+  setCodeGeneratorField,
+  useCodeGenerator
+} from "../state/codeGeneratorStore.js";
+import {
+  getSystemStatusModel,
+  useSystemStatus
+} from "../state/systemStatusStore.js";
 import { useUiShell } from "../state/uiShellStore.js";
 
 function MetricCard({ label, valueId, initialValue, help }) {
@@ -47,17 +67,39 @@ function ActiveCodesMetricCard() {
   );
 }
 
-function StatusSummaryTile({ label, valueId, metaId, initialValue, meta, accent = false }) {
+function RfidUsersMetricCard() {
+  const { rfidUsers } = useAdminLists();
+
   return (
-    <article className={`status-summary-tile${accent ? " accent" : ""}`}>
+    <MetricCard label="Użytkownicy RFID" valueId="metricRfidUsers" initialValue={String(rfidUsers.length)} help="Przypisane osoby" />
+  );
+}
+
+function RfidItemsMetricCard() {
+  const { rfidItems } = useAdminLists();
+
+  return (
+    <MetricCard label="Przedmioty RFID" valueId="metricRfidItems" initialValue={String(rfidItems.length)} help="Zmapowane UID" />
+  );
+}
+
+function StatusSummaryTile({ accent = false, label, metaId, status, valueId }) {
+  return (
+    <article className={`status-summary-tile${accent ? " accent" : ""}`} data-state={status.state}>
       <span className="status-summary-label">{label}</span>
-      <strong id={valueId} className="status-summary-value">{initialValue}</strong>
-      <small id={metaId} className="status-summary-meta">{meta}</small>
+      <strong id={valueId} className="status-summary-value">{status.value}</strong>
+      <small id={metaId} className="status-summary-meta">{status.meta}</small>
     </article>
   );
 }
 
 function HeroCard() {
+  const codeGenerator = useCodeGenerator();
+  const { canOperateLockers } = useUiShell();
+  const generateButtonLabel = codeGenerator.isSubmitting
+    ? (codeGenerator.recipientEmail.trim() ? "Generowanie i wysyłka..." : "Generowanie...")
+    : (codeGenerator.recipientEmail.trim() ? "Generuj i wyślij" : "Generuj");
+
   return (
     <div className="card hero-card">
       <div className="hero-header">
@@ -78,7 +120,7 @@ function HeroCard() {
       <div className="field-grid">
         <label className="field">
           <span className="field-label">Wybierz skrytkę</span>
-          <select id="locker">
+          <select id="locker" value={codeGenerator.locker} onChange={event => setCodeGeneratorField("locker", event.target.value)}>
             <option value="1">Skrytka 1</option>
             <option value="2">Skrytka 2</option>
             <option value="3">Skrytka 3</option>
@@ -87,7 +129,7 @@ function HeroCard() {
 
         <label className="field">
           <span className="field-label">Czas aktywności</span>
-          <select id="hours">
+          <select id="hours" value={codeGenerator.hours} onChange={event => setCodeGeneratorField("hours", event.target.value)}>
             <option value="2">2h</option>
             <option value="4">4h</option>
             <option value="6">6h</option>
@@ -99,13 +141,25 @@ function HeroCard() {
 
         <label className="field">
           <span className="field-label">Akcja</span>
-          <button id="generateButton" type="button" data-operation-only>Generuj</button>
+          {canOperateLockers ? (
+            <button id="generateButton" type="button" disabled={codeGenerator.isSubmitting} onClick={generateCodeFromStore}>{generateButtonLabel}</button>
+          ) : (
+            <button id="generateButton" type="button" disabled>Brak uprawnień</button>
+          )}
         </label>
       </div>
 
       <label className="field email-field" data-advanced-only="true">
         <span className="field-label">Wyślij kod na e-mail</span>
-        <input id="recipientEmail" type="email" inputMode="email" autoComplete="email" placeholder="np. operator@firma.pl" />
+        <input
+          id="recipientEmail"
+          type="email"
+          inputMode="email"
+          autoComplete="email"
+          value={codeGenerator.recipientEmail}
+          onChange={event => setCodeGeneratorField("recipientEmail", event.target.value)}
+          placeholder="np. operator@firma.pl"
+        />
         <small className="field-help">
           Opcjonalnie. Jeśli podasz adres, SafeKeys spróbuje wysłać kod automatycznie zaraz po wygenerowaniu.
         </small>
@@ -114,20 +168,32 @@ function HeroCard() {
       <div className="generated-output">
         <div className="generated-output-header">
           <small>Ostatnio wygenerowany kod</small>
-          <button id="copyGeneratedCodeButton" className="inline-copy-button hidden" type="button">Kopiuj</button>
-          <span id="generatedDeliveryStatus" className="delivery-status hidden" />
+          <button
+            id="copyGeneratedCodeButton"
+            className={`inline-copy-button${codeGenerator.hasGeneratedCode ? "" : " hidden"}`}
+            type="button"
+            onClick={copyGeneratedCode}
+          >
+            Kopiuj
+          </button>
+          <span
+            id="generatedDeliveryStatus"
+            className={`delivery-status${codeGenerator.deliveryStatus.label ? ` ${codeGenerator.deliveryStatus.variant}` : " hidden"}`}
+          >
+            {codeGenerator.deliveryStatus.label}
+          </span>
         </div>
-        <h3 id="generatedCode" className="generated-code">----</h3>
+        <h3 id="generatedCode" className="generated-code">{codeGenerator.generatedCode}</h3>
         <p id="generatedCodeMeta" className="generated-meta">
-          Kod pojawi się tutaj po wygenerowaniu. Możesz go zostawić tylko w panelu albo od razu wysłać na e-mail.
+          {codeGenerator.generatedMeta}
         </p>
       </div>
 
       <div className="hero-metrics">
         <ReadyLockersMetricCard />
         <ActiveCodesMetricCard />
-        <MetricCard label="Użytkownicy RFID" valueId="metricRfidUsers" initialValue="0" help="Przypisane osoby" />
-        <MetricCard label="Przedmioty RFID" valueId="metricRfidItems" initialValue="0" help="Zmapowane UID" />
+        <RfidUsersMetricCard />
+        <RfidItemsMetricCard />
       </div>
     </div>
   );
@@ -193,10 +259,12 @@ function LockerMapCard() {
           <p>Kompaktowy regał 3 komór z czytelnym stanem i szybkimi akcjami operatora.</p>
         </div>
         <div className="locker-toolbar">
-          <button id="refreshLockersButton" className="secondary-button" type="button" onClick={refreshLockers}>Odśwież status</button>
-          <button id="releaseAllLockersButton" className="danger" type="button" data-operation-only onClick={releaseAllLockersFromStore}>
-            Zwolnij wszystkie
-          </button>
+          <button id="refreshLockersButton" className="secondary-button" type="button" onClick={refreshLockersFromStore}>Odśwież status</button>
+          {canOperateLockers ? (
+            <button id="releaseAllLockersButton" className="danger" type="button" data-operation-only onClick={releaseAllLockersFromStore}>
+              Zwolnij wszystkie
+            </button>
+          ) : null}
         </div>
       </div>
       <div id="lockers" className="lockers">
@@ -241,6 +309,9 @@ function AlertsCard() {
 }
 
 function StatusSummaryCard() {
+  const systemStatus = useSystemStatus();
+  const model = getSystemStatusModel(systemStatus);
+
   return (
     <div className="card status-summary-card">
       <div className="section-copy">
@@ -248,10 +319,10 @@ function StatusSummaryCard() {
         <p>Najważniejsze sygnały techniczne i szybki ogląd gotowości całej platformy.</p>
       </div>
       <div className="status-summary-grid">
-        <StatusSummaryTile label="API" valueId="summaryServerState" metaId="summaryServerMeta" initialValue="Sprawdzanie" meta="Oczekiwanie na odpowiedź" />
-        <StatusSummaryTile label="Baza danych" valueId="summaryDatabaseState" metaId="summaryDatabaseMeta" initialValue="Sprawdzanie" meta="Oczekiwanie na status" />
-        <StatusSummaryTile label="Urządzenie" valueId="summaryDeviceState" metaId="summaryDeviceMeta" initialValue="Sprawdzanie" meta="Brak heartbeat" />
-        <StatusSummaryTile label="Ostatni kontakt" valueId="summaryHeartbeat" metaId="summaryHeartbeatMeta" initialValue="brak danych" meta="ESP32 / Socket.IO" accent />
+        <StatusSummaryTile label="API" valueId="summaryServerState" metaId="summaryServerMeta" status={model.summary.server} />
+        <StatusSummaryTile label="Baza danych" valueId="summaryDatabaseState" metaId="summaryDatabaseMeta" status={model.summary.database} />
+        <StatusSummaryTile label="Urządzenie" valueId="summaryDeviceState" metaId="summaryDeviceMeta" status={model.summary.device} />
+        <StatusSummaryTile label="Ostatni kontakt" valueId="summaryHeartbeat" metaId="summaryHeartbeatMeta" status={model.summary.heartbeat} accent />
       </div>
     </div>
   );
@@ -455,7 +526,124 @@ function RemoteActionsCard() {
   );
 }
 
+function getLogItemTypeLabel(itemType) {
+  const labels = {
+    brelok: "Brelok",
+    karta: "Karta",
+    inne: "Inne",
+    klucz_master: "Klucz master",
+    karta_master: "Karta master"
+  };
+
+  return labels[itemType] || "Inne";
+}
+
+function formatLogItemLabel(log) {
+  if (log.itemKnown && log.itemName) {
+    const typeLabel = log.itemType ? getLogItemTypeLabel(log.itemType).toLowerCase() : "przedmiot";
+    return ` · ${typeLabel}: ${log.itemName}`;
+  }
+
+  if (log.tagId) {
+    return ` · obcy obiekt: ${log.tagId}`;
+  }
+
+  return "";
+}
+
+const LOG_EVENT_PRESENTERS = {
+  LOCKER_OPENED: log => ({ text: `Odblokowano S${log.locker} kod ${log.code}`, className: "log-success" }),
+  INVALID_CODE: log => ({ text: `Błędny kod ${log.code}`, className: "log-error" }),
+  CODE_GENERATED: log => ({ text: `Wygenerowano kod ${log.code}`, className: "log-info" }),
+  CODE_EMAIL_SENT: log => ({ text: `Wysłano kod ${log.code} na ${log.recipientEmail || "e-mail"}`, className: "log-success" }),
+  CODE_EMAIL_FAILED: log => ({ text: `Błąd wysyłki kodu ${log.code}${log.recipientEmail ? ` na ${log.recipientEmail}` : ""}`, className: "log-error" }),
+  CODE_DEACTIVATED: log => ({ text: `Dezaktywowano kod ${log.code}`, className: "log-warning" }),
+  KEY_REMOVED: log => ({ text: `Wyjęty klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-warning" }),
+  KEY_RETURNED: log => ({ text: `Zwrócony klucz S${log.locker}${formatLogItemLabel(log)}`, className: "log-success" }),
+  LOCKER_DOOR_OPENED: log => ({ text: `Otwarte drzwiczki S${log.locker}`, className: "log-warning" }),
+  LOCKER_DOOR_CLOSED: log => ({ text: `Domknięte drzwiczki S${log.locker}`, className: "log-success" }),
+  REMOTE_UNLOCK_REQUESTED: log => ({ text: `Zdalne otwarcie S${log.locker}`, className: "log-info" }),
+  REMOTE_RELEASE_ALL_REQUESTED: () => ({ text: "Zwolniono blokadę wszystkich skrytek", className: "log-warning" }),
+  RFID_ACCESS_GRANTED: log => ({ text: `Autoryzowany tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
+  RFID_ACCESS_DENIED: log => ({ text: `Odrzucony tag RFID${formatLogItemLabel(log)}`, className: "log-error" }),
+  RFID_USER_CREATED: () => ({ text: "Dodano użytkownika RFID", className: "log-info" }),
+  RFID_USER_UPDATED: () => ({ text: "Zaktualizowano użytkownika RFID", className: "log-info" }),
+  RFID_USER_DELETED: () => ({ text: "Usunięto użytkownika RFID", className: "log-warning" }),
+  RFID_ITEM_CREATED: () => ({ text: "Dodano przedmiot RFID", className: "log-info" }),
+  RFID_ITEM_UPDATED: () => ({ text: "Zaktualizowano przedmiot RFID", className: "log-info" }),
+  RFID_ITEM_DELETED: () => ({ text: "Usunięto przedmiot RFID", className: "log-warning" }),
+  PANEL_USER_CREATED: () => ({ text: "Dodano użytkownika panelu", className: "log-info" }),
+  PANEL_USER_UPDATED: () => ({ text: "Zaktualizowano użytkownika panelu", className: "log-info" }),
+  PANEL_USER_DELETED: () => ({ text: "Usunięto użytkownika panelu", className: "log-warning" }),
+  AUTH_LOGIN: () => ({ text: "Zalogowano operatora", className: "log-success" }),
+  AUTH_LOGOUT: () => ({ text: "Wylogowano operatora", className: "log-info" }),
+  RFID_TAG_ASSIGNMENT_STARTED: log => ({ text: `Rozpoczęto nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-info" }),
+  RFID_TAG_ASSIGNMENT_COMPLETED: log => ({ text: `Nadano tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
+  RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" }),
+  RFID_TAG_ASSIGNMENT_CANCELLED: log => ({ text: `Anulowano nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-warning" })
+};
+
+function getLogPresentation(log) {
+  const presenter = LOG_EVENT_PRESENTERS[log.event];
+  if (presenter) {
+    return presenter(log);
+  }
+
+  return {
+    text: log.event || "Zdarzenie systemowe",
+    className: "log-info"
+  };
+}
+
+function formatLogTimestamp(value) {
+  return value ? new Date(value).toLocaleString() : "brak daty";
+}
+
+function LogItem({ log }) {
+  const { text, className } = getLogPresentation(log);
+
+  return (
+    <li className={className}>
+      <div className="log-entry">
+        <span className="log-entry-text">{formatLogTimestamp(log.timestamp)} | {text}</span>
+        <button
+          type="button"
+          className="log-details-trigger"
+          title="Pokaż szczegóły logu"
+          aria-label="Pokaż szczegóły logu"
+          onClick={() => openLogDetailsFromStore(log, text)}
+        >
+          i
+        </button>
+      </div>
+    </li>
+  );
+}
+
 function LogsCard() {
+  const { filters, logEvents, logs } = useLogs();
+  const { canManageRfid } = useUiShell();
+  const skipInitialFilterRefresh = useRef(true);
+
+  useEffect(() => {
+    if (skipInitialFilterRefresh.current) {
+      skipInitialFilterRefresh.current = false;
+      return undefined;
+    }
+
+    const timeoutId = setTimeout(refreshLogs, 250);
+    return () => clearTimeout(timeoutId);
+  }, [filters.event, filters.locker, filters.q]);
+
+  function handleFilterChange(event) {
+    setLogFilter(event.target.name, event.target.value);
+  }
+
+  function handleResetFilters() {
+    resetLogFilters();
+    refreshLogs();
+  }
+
   return (
     <div className="card logs dashboard-logs" data-advanced-only="true">
       <div className="section-header">
@@ -464,21 +652,26 @@ function LogsCard() {
           <p>Zdarzenia i operacje na żywo, zsynchronizowane w czasie rzeczywistym.</p>
         </div>
         <div className="section-actions">
-          <span id="logsCount" className="panel-counter">0</span>
-          <button id="exportLogsButton" className="secondary-button" type="button">Eksport CSV</button>
-          <button id="clearLogsButton" className="danger" type="button" data-rfid-admin-only>Wyczyść logi</button>
+          <span id="logsCount" className="panel-counter">{logs.length}</span>
+          <button id="exportLogsButton" className="secondary-button" type="button" onClick={exportLogsFromStore}>Eksport CSV</button>
+          {canManageRfid ? (
+            <button id="clearLogsButton" className="danger" type="button" data-rfid-admin-only onClick={clearLogsFromStore}>Wyczyść logi</button>
+          ) : null}
         </div>
       </div>
       <div className="log-filters">
         <label className="field mini-field">
           <span className="field-label">Typ zdarzenia</span>
-          <select id="logEventFilter">
+          <select id="logEventFilter" name="event" value={filters.event} onChange={handleFilterChange}>
             <option value="">Wszystkie</option>
+            {logEvents.map(eventName => (
+              <option value={eventName} key={eventName}>{eventName}</option>
+            ))}
           </select>
         </label>
         <label className="field mini-field">
           <span className="field-label">Skrytka</span>
-          <select id="logLockerFilter">
+          <select id="logLockerFilter" name="locker" value={filters.locker} onChange={handleFilterChange}>
             <option value="">Wszystkie</option>
             <option value="1">Skrytka 1</option>
             <option value="2">Skrytka 2</option>
@@ -487,11 +680,20 @@ function LogsCard() {
         </label>
         <label className="field mini-field search-field">
           <span className="field-label">Szukaj</span>
-          <input id="logSearchInput" type="search" placeholder="kod, tag, operator..." />
+          <input id="logSearchInput" name="q" type="search" value={filters.q} onChange={handleFilterChange} placeholder="kod, tag, operator..." />
         </label>
-        <button id="logFilterReset" className="secondary-button" type="button">Reset</button>
+        <button id="logFilterReset" className="secondary-button" type="button" onClick={handleResetFilters}>Reset</button>
       </div>
-      <ul id="logs" className="stack-list" />
+      <ul id="logs" className="stack-list">
+        {logs.length === 0 ? (
+          <li className="empty-state">
+            <strong>Brak danych</strong>
+            <p>Brak logów do wyświetlenia.</p>
+          </li>
+        ) : logs.map((log, index) => (
+          <LogItem key={log._id || log.id || `${log.timestamp}-${log.event}-${index}`} log={log} />
+        ))}
+      </ul>
     </div>
   );
 }

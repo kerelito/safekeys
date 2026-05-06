@@ -6,7 +6,7 @@ import { TopBar } from "./TopBar.jsx";
 import { useUiShell } from "../state/uiShellStore.js";
 
 export function AppView() {
-  const { closeMenu, menuOpen } = useUiShell();
+  const { closeMenu, isAuthenticated, menuOpen } = useUiShell();
 
   useEffect(() => {
     if (!menuOpen) {
@@ -27,7 +27,7 @@ export function AppView() {
   }, [closeMenu, menuOpen]);
 
   return (
-    <div id="appView" className="hidden">
+    <div id="appView" className={isAuthenticated ? "" : "hidden"}>
       <TopBar />
       <MenuDrawer />
       <div className="app-shell">
