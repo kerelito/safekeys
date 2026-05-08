@@ -7,9 +7,13 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 ```text
 .
 ├── hardware/
-│   └── esp32/
-│       ├── README.md
-│       └── SafeKeysESP32.ino
+│   ├── esp32/
+│   │   ├── README.md
+│   │   └── SafeKeysESP32.ino
+│   └── safekeys/
+│       ├── platformio.ini
+│       └── src/
+│           └── main.cpp
 ├── software/
 │   ├── src/
 │   │   ├── App.jsx
@@ -75,8 +79,11 @@ System do zarządzania skrytkami na klucze z panelem WWW, integracją Discord i 
 - `software/public/app.js`
   Poprzedni statyczny frontend dashboardu. Zostaje jako fallback, gdy `software/dist` nie jest jeszcze zbudowany.
 
+- `hardware/safekeys/src/main.cpp`
+  Główne firmware ESP32 w PlatformIO: RFID, keypad I2C, WebSocket urządzenia, kolejka sieciowa, przekaźniki i kontaktrony.
+
 - `hardware/esp32/SafeKeysESP32.ino`
-  Szkic pod firmware ESP32 przygotowany pod integrację z backendem.
+  Prostszy szkic pomocniczy / archiwalny wariant debugowy.
 
 ## Uruchamianie software
 
@@ -114,20 +121,41 @@ MQTT nie jest użyty, bo repo nie dostarcza brokera ani osobnego portu deploymen
 Kontrakt WebSocket:
 
 - backend wysyła `hello` oraz `commands`;
-- firmware wysyła `hello`, `heartbeat`, `state.batch`, `command.ack` i `tag.assignment.result`;
+- firmware wysyła `hello`, `heartbeat`, `state.batch`, `code.verify`, `tag.verify`, `command.ack` i `tag.assignment.result`;
 - każda wiadomość firmware ma `messageId`, `seq`, `deviceId` i `bootId`;
 - backend zapisuje receipt po `messageId`, więc powtórki są idempotentne;
 - stan skrytek jest wysyłany batchowo z per-locker `version`, a po reconnect firmware wymusza pełny resync;
 - komendy są trwałe w MongoDB i przechodzą przez statusy `pending`, `delivered`, `acknowledged`, `applied` albo `failed`;
 - po reconnect backend ponownie dostarcza niezamknięte komendy, a firmware ma cache ostatnich `commandId`, żeby nie wykonać duplikatu.
+- firmware trzyma też trwały cache ostatnio wykonanych `commandId` w NVS, więc restart ESP32 nie powinien już powodować ponownego wykonania tej samej komendy po redelivery;
+- jeśli stan skrytek zmieni się podczas awarii łączności, firmware zaznacza lokalnie sesję zmian offline i po odzyskaniu połączenia backend zapisuje log o odzyskaniu stanu po pracy offline.
 
 Endpointy kompatybilności i fallback:
 
-- `POST /verify-code` i `POST /verify-tag` pozostają dla operacji interaktywnych;
+- `POST /verify-code` i `POST /verify-tag` pozostają jako ścieżki kompatybilności dla starszego firmware;
 - `POST /device/heartbeat` pozostaje dla starszego firmware i jako HTTPS fallback;
 - `POST /device/sync` przyjmuje batch `{ deviceId, messages: [...] }` z tym samym kontraktem co WebSocket;
 - `GET /device/actions` i `POST /device/actions/ack` pozostają kompatybilne, ale korzystają z trwałych komend w MongoDB;
 - `POST /locker-status` i `POST /locker-door-status` pozostają dla starego protokołu.
+
+## Piny ESP32 dla zamków i kontaktronów
+
+Rekomendowany układ dla właściwego firmware w `hardware/safekeys/src/main.cpp`:
+
+- przekaźnik skrytki `S1`: `GPIO18`
+- przekaźnik skrytki `S2`: `GPIO23`
+- przekaźnik skrytki `S3`: `GPIO27`
+- kontaktron drzwi `S1`: `GPIO34`
+- kontaktron drzwi `S2`: `GPIO35`
+- kontaktron drzwi `S3`: `GPIO39`
+
+Uwagi montażowe:
+
+- piny `34/35/39` są wejściowe, więc nadają się dobrze pod kontaktrony, ale wymagają zewnętrznego `pull-up` 10k do `3V3`;
+- przyjęty wariant to kontaktron normalnie zamknięty do `GND`, więc zamknięte drzwi dają stan niski;
+- przekaźniki są traktowane jako aktywne stanem niskim;
+- pole `lockClosed` w raportach urządzenia jest wyliczane z aktywności linii przekaźnika, bez osobnego czujnika rygla.
+- pełna historia wszystkich zdarzeń offline nadal nie jest odtwarzana; po reconnect system odzyskuje pewnie stan końcowy i zapisuje informację, że po drodze zaszły zmiany offline.
 
 Zmienne środowiskowe kanału urządzenia:
 

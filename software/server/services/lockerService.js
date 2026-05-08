@@ -399,6 +399,28 @@ class LockerService extends EventEmitter {
           break;
         }
 
+        case "code.verify": {
+          const result = await this.verifyCode(envelope.payload?.code, {
+            source: context.transport === "websocket" ? "device-ws" : "device",
+            actor: deviceId
+          });
+          response = buildAck(envelope, {
+            verification: result
+          });
+          break;
+        }
+
+        case "tag.verify": {
+          const result = await this.verifyRfidTag(envelope.payload?.tagId, {
+            source: context.transport === "websocket" ? "device-ws" : "rfid-user",
+            actor: deviceId
+          });
+          response = buildAck(envelope, {
+            tagVerification: result
+          });
+          break;
+        }
+
         case "command.ack": {
           const ackPayload = normalizeCommandAckPayload(envelope.payload || {});
           if (!ackPayload.commandId) {
@@ -499,12 +521,15 @@ class LockerService extends EventEmitter {
     const normalizedLockers = lockers.slice(0, ALLOWED_LOCKERS.length).map(item => {
       const locker = Number(item.locker);
       assertValidLocker(locker);
-      assertValidHasTag(item.hasTag);
+
+      const hasTag = item.hasTag == null
+        ? null
+        : assertValidHasTag(item.hasTag);
 
       return {
         locker,
-        hasTag: item.hasTag,
-        tagId: typeof item.tagId === "string" && item.tagId.trim()
+        hasTag,
+        tagId: hasTag === true && typeof item.tagId === "string" && item.tagId.trim()
           ? assertValidTagId(item.tagId.trim().toUpperCase())
           : null,
         doorClosed: typeof item.doorClosed === "boolean" ? item.doorClosed : null,
@@ -527,6 +552,7 @@ class LockerService extends EventEmitter {
     const previousVersions = new Map(
       (stateDoc?.lockers || []).map(item => [Number(item.locker), Number(item.version) || 0])
     );
+    const previousOfflineRecoverySessionId = Number(stateDoc?.lastOfflineRecoverySessionId) || 0;
     const accepted = [];
     const lockerByNumber = new Map(lockerDocs.map(item => [Number(item.locker), item]));
     const knownItemByTagId = new Map(knownItems.map(item => [item.tagId, item]));
@@ -542,9 +568,30 @@ class LockerService extends EventEmitter {
       }])
     );
     const forceFull = payload.full === true;
+    const offlineRecoveryPayload = payload.offlineRecovery && typeof payload.offlineRecovery === "object"
+      ? payload.offlineRecovery
+      : null;
+    const offlineRecoverySessionId = Number(offlineRecoveryPayload?.sessionId) || 0;
+    const offlineRecoveryChangeCount = Number(offlineRecoveryPayload?.changeCount) || 0;
+    const shouldLogOfflineRecovery = offlineRecoveryPayload?.pending === true
+      && offlineRecoverySessionId > 0
+      && offlineRecoverySessionId > previousOfflineRecoverySessionId;
     const lockerWrites = [];
     const logWrites = [];
     const lockerEvents = [];
+
+    if (shouldLogOfflineRecovery) {
+      logWrites.push({
+        event: "DEVICE_OFFLINE_STATE_RECOVERED",
+        source: context.transport === "websocket" ? "device-ws" : "device-sync",
+        actor: deviceId,
+        details: {
+          sessionId: offlineRecoverySessionId,
+          changeCount: offlineRecoveryChangeCount
+        },
+        timestamp: now
+      });
+    }
 
     const describeKnownTag = tagId => {
       if (!tagId) {
@@ -593,6 +640,7 @@ class LockerService extends EventEmitter {
 
       const source = context.transport === "websocket" ? "device-ws" : "device-sync";
       const existingLocker = lockerByNumber.get(locker) || null;
+      const storedLocker = storedLockers.get(locker) || null;
       const previousItem = existingLocker
         ? {
             tagId: existingLocker.detectedTagId || null,
@@ -601,15 +649,26 @@ class LockerService extends EventEmitter {
             itemKnown: typeof existingLocker.detectedItemKnown === "boolean" ? existingLocker.detectedItemKnown : null
           }
         : null;
-      const nextItem = item.hasTag
+      const resolvedHasTag = item.hasTag == null
+        ? (existingLocker?.hasTag ?? storedLocker?.hasTag ?? true)
+        : item.hasTag;
+      const nextItem = item.hasTag === true
         ? (item.tagId ? describeKnownTag(item.tagId) : previousItem)
+        : item.hasTag === false
+          ? {
+              tagId: null,
+              itemName: null,
+              itemType: null,
+              itemKnown: null
+            }
         : {
-            tagId: null,
-            itemName: null,
-            itemType: null,
-            itemKnown: null
+            tagId: previousItem?.tagId || null,
+            itemName: previousItem?.itemName || null,
+            itemType: previousItem?.itemType || null,
+            itemKnown: typeof previousItem?.itemKnown === "boolean" ? previousItem.itemKnown : null
           };
-      const statusChanged = !existingLocker || existingLocker.hasTag !== item.hasTag;
+      const statusChanged = item.hasTag !== null
+        && (!existingLocker || existingLocker.hasTag !== item.hasTag);
       const itemChanged = previousItem?.tagId !== nextItem?.tagId
         || previousItem?.itemName !== nextItem?.itemName
         || previousItem?.itemType !== nextItem?.itemType
@@ -624,12 +683,14 @@ class LockerService extends EventEmitter {
       if (statusChanged || itemChanged || doorChanged) {
         const set = {
           locker,
-          hasTag: item.hasTag,
+          hasTag: resolvedHasTag,
           detectedTagId: nextItem?.tagId || null,
           detectedItemName: nextItem?.itemName || null,
           detectedItemType: nextItem?.itemType || null,
           detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
-          detectedAt: item.hasTag ? now : null
+          detectedAt: resolvedHasTag
+            ? (item.hasTag == null ? (existingLocker?.detectedAt || now) : now)
+            : null
         };
 
         if (hasDoorSignal) {
@@ -690,7 +751,7 @@ class LockerService extends EventEmitter {
       if (statusChanged || itemChanged) {
         lockerEvents.push({
           locker,
-          hasTag: item.hasTag,
+          hasTag: resolvedHasTag,
           tagId: nextItem?.tagId || null,
           itemName: nextItem?.itemName || null,
           itemType: nextItem?.itemType || null,
@@ -709,7 +770,7 @@ class LockerService extends EventEmitter {
 
       storedLockers.set(locker, {
         locker,
-        hasTag: item.hasTag,
+        hasTag: resolvedHasTag,
         tagId: item.tagId,
         doorClosed: item.doorClosed,
         lockClosed: item.lockClosed,
@@ -740,6 +801,9 @@ class LockerService extends EventEmitter {
             connectionId: context.connectionId || this.deviceStatus.connectionId || null,
             bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
             lastSeenAt: now,
+            lastOfflineRecoverySessionId: shouldLogOfflineRecovery
+              ? offlineRecoverySessionId
+              : previousOfflineRecoverySessionId,
             lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
             ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
             lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)

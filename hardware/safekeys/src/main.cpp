@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <Preferences.h>
 #include <I2CKeyPad.h>
 #include <Adafruit_NeoPixel.h>
 #include <MFRC522.h>
@@ -31,13 +32,14 @@
   Główne cele tego firmware:
   - debug po UART i czytelne logi zdarzeń
   - obsługa kodów z keypadu
-  - raportowanie obecności tagów w skrytkach do backendu
+  - raportowanie obecności tagów, przekaźników i kontaktronów do backendu
   - obsługa master RFID przez /verify-tag
-  - polling /device/actions dla pełnego testowania integracji backend <-> ESP32
+  - komendy urządzenia i weryfikacja kodów po WebSocket
 
   Uwaga:
-  - fizyczne czujniki drzwiczek / zamka są na razie opcjonalne
-  - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
+  - wejścia kontaktronów są przewidziane dla pinów 34/35/39 (zewnętrzny pull-up 10k do 3V3)
+  - wyjścia przekaźników są przewidziane dla pinów 18/23/27
+  - lockClosed jest raportowane logicznie z aktywności przekaźnika, bez osobnego czujnika zamka
 */
 
 static const char* WIFI_SSID = "TP-Link_70FC";
@@ -51,8 +53,10 @@ static const uint16_t DEVICE_WS_PORT = 443;
 static const char* DEVICE_WS_PATH = "/device/ws?deviceId=esp32-main";
 
 static const bool ENABLE_KEYPAD = true;
-static const bool ENABLE_LOCKER_SWITCH_INPUTS = false;
+static const bool ENABLE_LOCKER_SWITCH_INPUTS = true;
+static const bool ENABLE_LOCKER_RELAYS = true;
 static const bool DEBUG_RFID_VERBOSE = true;
+static const bool LOCKER_RELAY_ACTIVE_LEVEL = LOW;
 
 #ifdef LED_BUILTIN
 static const uint8_t STATUS_LED_PIN = LED_BUILTIN;
@@ -113,6 +117,8 @@ static const unsigned long LOCKER_STATUS_RETRY_BASE_MS = 5000;
 static const unsigned long LOCKER_STATUS_RETRY_MAX_MS = 120000;
 static const unsigned long LOCKER_INPUT_SCAN_INTERVAL_MS = 50;
 static const unsigned long LOCKER_INPUT_DEBOUNCE_MS = 250;
+static const unsigned long LOCKER_RELAY_PULSE_MS = 900;
+static const unsigned long CODE_VERIFY_ACK_TIMEOUT_MS = 8000;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
@@ -152,9 +158,14 @@ struct LockerInputPin {
   bool activeLow;
 };
 
+struct LockerOutputPin {
+  uint8_t pin;
+  bool activeLow;
+};
+
 struct LockerHardwareConfig {
   LockerInputPin doorClosed;
-  LockerInputPin lockClosed;
+  LockerOutputPin relay;
 };
 
 struct LockerState {
@@ -162,6 +173,18 @@ struct LockerState {
   String tagUid;
   bool doorClosed;
   bool lockClosed;
+};
+
+struct PersistentCommandCache {
+  uint8_t nextSlot;
+  char commandIds[COMMAND_DEDUP_CACHE_SIZE][32];
+};
+
+struct PersistentOfflineRecoveryState {
+  bool pending;
+  uint8_t reserved[3];
+  uint32_t sessionId;
+  uint32_t changeCount;
 };
 
 struct StatusLedEffect {
@@ -279,9 +302,9 @@ struct NetworkResult {
 };
 
 static const LockerHardwareConfig LOCKERS[LOCKER_COUNT] = {
-  { { 18, true }, { 19, true } },
-  { { 23, true }, { 25, true } },
-  { { 26, true }, { 27, true } }
+  { { 34, true }, { 18, true } },
+  { { 35, true }, { 23, true } },
+  { { 39, true }, { 27, true } }
 };
 
 I2CKeyPad keypad(KEYPAD_I2C_ADDRESS);
@@ -291,6 +314,7 @@ MFRC522 lockerReader2(RFID_LOCKER_SS_PINS[1], RFID_RST_PIN);
 MFRC522 lockerReader3(RFID_LOCKER_SS_PINS[2], RFID_RST_PIN);
 MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
 WebSocketsClient deviceWebSocket;
+Preferences runtimePreferences;
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
   { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
@@ -357,8 +381,12 @@ bool deviceStateBatchQueued = false;
 bool deviceStateAckPending = false;
 bool forceNextStateBatchHttps = false;
 char pendingCode[CODE_LENGTH + 1] = "";
+char pendingCodeMessageId[64] = "";
 char pendingMasterTagId[32] = "";
+char pendingMasterTagMessageId[64] = "";
 char pendingStateMessageId[64] = "";
+unsigned long pendingCodeSentMs = 0;
+unsigned long pendingMasterTagSentMs = 0;
 bool taskWatchdogReady = false;
 volatile uint8_t consecutiveNetworkFailureCount = 0;
 volatile unsigned long nextBackgroundNetworkAttemptMs = 0;
@@ -402,8 +430,11 @@ bool candidateLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
 bool candidateLockerLockClosed[LOCKER_COUNT] = { true, true, true };
 unsigned long lockerInputCandidateSinceMs[LOCKER_COUNT] = { 0, 0, 0 };
 unsigned long lastLockerInputServiceMs = 0;
+bool lockerRelayActive[LOCKER_COUNT] = { false, false, false };
+unsigned long lockerRelayActiveUntilMs[LOCKER_COUNT] = { 0, 0, 0 };
 char processedCommandIds[COMMAND_DEDUP_CACHE_SIZE][32] = {};
 uint8_t nextProcessedCommandSlot = 0;
+PersistentOfflineRecoveryState offlineRecoveryState = { false, { 0, 0, 0 }, 0, 0 };
 
 void configureWiFiRuntime();
 void connectWifi();
@@ -412,6 +443,12 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void logWiFiSnapshot(const char* prefix);
 bool isWifiReady();
 void initializeDeviceIdentity();
+void initializePersistentRuntime();
+void loadPersistentCommandCache();
+void persistCommandCache();
+void loadPersistentOfflineRecoveryState();
+void persistOfflineRecoveryState();
+void clearOfflineRecoveryState();
 void serviceDeviceWebSocket(unsigned long now);
 void configureDeviceWebSocket();
 void connectDeviceWebSocket(unsigned long now, bool forceNow = false);
@@ -457,8 +494,18 @@ void maybePollDeviceActions(unsigned long now);
 bool maybeReportLockerStatuses(unsigned long now);
 bool maybeQueueDeviceStateBatch(unsigned long now);
 void serviceLockerInputChanges(unsigned long now);
+void serviceLockerRelayOutputs(unsigned long now);
 void processEnteredCode(const String& code);
-bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber);
+bool sendVerifyCodeWs(const NetworkJob& job);
+void failPendingCodeVerification(const char* reason, bool showVisualFeedback = true);
+void queueVerifyCodeResult(bool requestOk, bool isValid, uint8_t lockerNumber, const char* code);
+bool sendVerifyMasterTagWs(const NetworkJob& job);
+void failPendingMasterTagVerification(const char* reason, bool showVisualFeedback = true);
+void queueVerifyMasterTagResult(
+  bool requestOk,
+  const JsonObject& tagVerification,
+  const char* tagId
+);
 bool postVerifyCode(const String& code, String& responseBody);
 bool postVerifyTag(const String& tagId, String& responseBody);
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
@@ -490,9 +537,13 @@ void serviceStatusLed(unsigned long now);
 void blinkLed(uint8_t times, unsigned long onMs, unsigned long offMs);
 void pulseLed(unsigned long durationMs);
 void configureLockerInputs();
+void configureLockerOutputs();
 bool readInputPin(const LockerInputPin& config);
 LockerState readLockerState(uint8_t lockerIndex);
 bool isLockerComplete(const LockerState& state);
+void setRelayOutput(uint8_t lockerIndex, bool energized);
+bool triggerLockerRelay(uint8_t lockerIndex, const char* reason);
+void triggerAllLockerRelays(const char* reason);
 void updateVisualState();
 void renderLockerStatus();
 void renderCodeEntry();
@@ -526,11 +577,13 @@ void logHttpFailure(const char* requestLabel, int httpCode, WiFiClientSecure& cl
 void noteNetworkSuccess();
 void noteNetworkFailure();
 bool isBackgroundNetworkBackoffActive(unsigned long now);
+bool isBackendOfflineForStateTracking(unsigned long now);
 void maybeRecoverWifiAfterNetworkFailures(unsigned long now);
 void resetDeviceActionsPollCadence(bool verbose = false);
 void relaxDeviceActionsPollCadence();
 void markLockerReportDirty(RfidReaderRuntime& runtime, unsigned long now);
 void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now);
+void noteOfflineLockerStateChange(unsigned long now);
 void noteLockerReportSuccess(RfidReaderRuntime& runtime, unsigned long now);
 void noteLockerReportFailure(RfidReaderRuntime& runtime, unsigned long now);
 void markAllLockerReportsDirty(unsigned long now, bool resetRetryTimers);
@@ -577,8 +630,10 @@ void setup() {
 
   reserveStringBuffers();
   initializeDeviceIdentity();
+  initializePersistentRuntime();
   configureWiFiRuntime();
   configureLockerInputs();
+  configureLockerOutputs();
   initializeRfidReaders();
   initializeTaskWatchdog();
   initializeNetworkTask();
@@ -594,6 +649,8 @@ void setup() {
   Serial.printf("API base URL: %s\n", API_BASE_URL);
   Serial.printf("Device WebSocket: wss://%s:%u%s\n", DEVICE_WS_HOST, DEVICE_WS_PORT, DEVICE_WS_PATH);
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
+  Serial.printf("Locker relays enabled: %s\n", ENABLE_LOCKER_RELAYS ? "yes" : "no");
+  Serial.println("Suggested locker wiring: relays GPIO18/GPIO23/GPIO27, contacts GPIO34/GPIO35/GPIO39.");
   printUsage();
   printRfidSnapshot();
 
@@ -638,6 +695,67 @@ void initializeDeviceIdentity() {
     static_cast<unsigned long>(millis())
   );
   Serial.printf("Device identity: id=%s bootId=%s\n", DEVICE_ID, deviceBootId);
+}
+
+void initializePersistentRuntime() {
+  if (!runtimePreferences.begin("safekeys", false)) {
+    Serial.println("Failed to initialize persistent runtime storage.");
+    return;
+  }
+
+  loadPersistentCommandCache();
+  loadPersistentOfflineRecoveryState();
+}
+
+void loadPersistentCommandCache() {
+  PersistentCommandCache cache = {};
+  const size_t expectedSize = sizeof(cache);
+  const size_t loadedSize = runtimePreferences.getBytes("cmdcache", &cache, expectedSize);
+
+  if (loadedSize != expectedSize) {
+    memset(processedCommandIds, 0, sizeof(processedCommandIds));
+    nextProcessedCommandSlot = 0;
+    return;
+  }
+
+  memcpy(processedCommandIds, cache.commandIds, sizeof(processedCommandIds));
+  nextProcessedCommandSlot = cache.nextSlot % COMMAND_DEDUP_CACHE_SIZE;
+}
+
+void persistCommandCache() {
+  PersistentCommandCache cache = {};
+  cache.nextSlot = nextProcessedCommandSlot % COMMAND_DEDUP_CACHE_SIZE;
+  memcpy(cache.commandIds, processedCommandIds, sizeof(processedCommandIds));
+  runtimePreferences.putBytes("cmdcache", &cache, sizeof(cache));
+}
+
+void loadPersistentOfflineRecoveryState() {
+  PersistentOfflineRecoveryState persisted = {};
+  const size_t expectedSize = sizeof(persisted);
+  const size_t loadedSize = runtimePreferences.getBytes("offline", &persisted, expectedSize);
+
+  if (loadedSize != expectedSize) {
+    offlineRecoveryState = { false, { 0, 0, 0 }, 0, 0 };
+    return;
+  }
+
+  offlineRecoveryState.pending = persisted.pending;
+  offlineRecoveryState.sessionId = persisted.sessionId;
+  offlineRecoveryState.changeCount = persisted.changeCount;
+}
+
+void persistOfflineRecoveryState() {
+  runtimePreferences.putBytes("offline", &offlineRecoveryState, sizeof(offlineRecoveryState));
+}
+
+void clearOfflineRecoveryState() {
+  if (!offlineRecoveryState.pending && offlineRecoveryState.changeCount == 0) {
+    return;
+  }
+
+  offlineRecoveryState.pending = false;
+  offlineRecoveryState.changeCount = 0;
+  persistOfflineRecoveryState();
 }
 
 void initializeTaskWatchdog() {
@@ -790,21 +908,18 @@ void networkTaskMain(void* parameter) {
       }
 
       case NetworkJobType::VerifyCode: {
-        bool isValid = false;
-        int lockerNumber = 0;
         result.type = NetworkResultType::VerifyCode;
         copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
-        result.requestOk = verifyCodeRemotely(String(job.text1), isValid, lockerNumber);
-        result.boolValue1 = isValid;
-        result.lockerNumber = static_cast<uint8_t>(max(0, lockerNumber));
-        shouldPublishResult = true;
+        result.requestOk = sendVerifyCodeWs(job);
+        shouldPublishResult = !result.requestOk;
         break;
       }
 
       case NetworkJobType::VerifyMasterTag: {
         result.type = NetworkResultType::VerifyMasterTag;
-        result.requestOk = verifyMasterTagForTask(job.text1, result);
-        shouldPublishResult = true;
+        result.requestOk = sendVerifyMasterTagWs(job);
+        copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
+        shouldPublishResult = !result.requestOk;
         break;
       }
 
@@ -859,7 +974,14 @@ void loop() {
   }
   serviceRfidReaders(now);
   serviceLockerInputChanges(now);
+  serviceLockerRelayOutputs(now);
   serviceNetworkResults();
+  if (codeVerificationPending && pendingCodeSentMs != 0 && now - pendingCodeSentMs >= CODE_VERIFY_ACK_TIMEOUT_MS) {
+    failPendingCodeVerification("Code verification timed out.");
+  }
+  if (masterTagVerificationPending && pendingMasterTagSentMs != 0 && now - pendingMasterTagSentMs >= CODE_VERIFY_ACK_TIMEOUT_MS) {
+    failPendingMasterTagVerification("Master tag verification timed out.");
+  }
   updateVisualState();
 
   if (!isWifiReady()) {
@@ -1178,6 +1300,12 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
+      if (codeVerificationPending) {
+        failPendingCodeVerification("WebSocket disconnected.");
+      }
+      if (masterTagVerificationPending) {
+        failPendingMasterTagVerification("WebSocket disconnected.");
+      }
       break;
 
     case WStype_TEXT:
@@ -1190,6 +1318,12 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsHelloSent = false;
       deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
+      if (codeVerificationPending) {
+        failPendingCodeVerification("WebSocket error.");
+      }
+      if (masterTagVerificationPending) {
+        failPendingMasterTagVerification("WebSocket error.");
+      }
       break;
 
     case WStype_PONG:
@@ -1231,6 +1365,18 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
   if (strcmp(type, "ack") == 0) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
+    if (codeVerificationPending && pendingCodeMessageId[0] != '\0' && strcmp(messageId, pendingCodeMessageId) == 0) {
+      const JsonObject verification = doc["verification"];
+      const bool valid = ok && (verification["valid"] | false);
+      const uint8_t lockerNumber = static_cast<uint8_t>(verification["locker"] | 0);
+      queueVerifyCodeResult(ok, valid, lockerNumber, pendingCode);
+      return;
+    }
+    if (masterTagVerificationPending && pendingMasterTagMessageId[0] != '\0' && strcmp(messageId, pendingMasterTagMessageId) == 0) {
+      queueVerifyMasterTagResult(ok, doc["tagVerification"], pendingMasterTagId);
+      return;
+    }
+
     if (strncmp(messageId, "state-", 6) == 0) {
       NetworkResult result = {};
       result.type = NetworkResultType::DeviceStateAck;
@@ -1879,6 +2025,7 @@ void handleNetworkResult(const NetworkResult& result) {
         resetStateBatchRetry();
         forceNextStateBatchHttps = false;
         rememberAckedStateFingerprint(static_cast<uint32_t>(result.numberValue), result.boolValue1, fullStateResyncGeneration, now);
+        clearOfflineRecoveryState();
         Serial.printf("Device state batch delivered via %s\n", isDeviceWebSocketReady() ? "WebSocket" : "HTTPS fallback");
       } else {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -1958,6 +2105,12 @@ void handleNetworkResult(const NetworkResult& result) {
       }
 
       Serial.printf("Code %s is valid for locker S%u.\n", result.text1, result.lockerNumber);
+      if (result.lockerNumber == 0 || result.lockerNumber > LOCKER_COUNT || !triggerLockerRelay(result.lockerNumber - 1, "verified-code")) {
+        Serial.printf("Relay trigger failed for locker S%u.\n", result.lockerNumber);
+        flashCodeResult(String(result.text1), false);
+        blinkLed(5, 80, 80);
+        break;
+      }
       flashCodeResult(String(result.text1), true);
       blinkLed(2, 260, 140);
       break;
@@ -2131,17 +2284,25 @@ void handleRemoteCommand(const NetworkResult& result) {
     if (result.lockerNumber == 0 || result.lockerNumber > LOCKER_COUNT) {
       success = false;
       message = "Invalid locker number.";
+    } else if (!ENABLE_LOCKER_RELAYS) {
+      success = false;
+      message = "Relay outputs are disabled in this firmware.";
     } else {
-      Serial.printf("Remote open command applied for locker S%u (relay output not configured in this firmware).\n", result.lockerNumber);
+      triggerLockerRelay(result.lockerNumber - 1, "remote-open");
+      Serial.printf("Remote open command applied for locker S%u.\n", result.lockerNumber);
       blinkLed(2, 120, 80);
-      status = "acknowledged";
-      message = "Command acknowledged; relay output is not configured in this firmware.";
+      message = "Relay pulse triggered.";
     }
   } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
-    Serial.println("Remote release-all command applied (relay outputs not configured in this firmware).");
-    blinkLed(3, 120, 80);
-    status = "acknowledged";
-    message = "Command acknowledged; relay outputs are not configured in this firmware.";
+    if (!ENABLE_LOCKER_RELAYS) {
+      success = false;
+      message = "Relay outputs are disabled in this firmware.";
+    } else {
+      triggerAllLockerRelays("remote-release-all");
+      Serial.println("Remote release-all command applied.");
+      blinkLed(3, 120, 80);
+      message = "Relay pulse triggered for all lockers.";
+    }
   } else {
     success = false;
     message = "Unsupported command type.";
@@ -2192,6 +2353,7 @@ void rememberProcessedCommand(const char* actionId) {
 
   copyCStringToBuffer(actionId, processedCommandIds[nextProcessedCommandSlot], sizeof(processedCommandIds[nextProcessedCommandSlot]));
   nextProcessedCommandSlot = static_cast<uint8_t>((nextProcessedCommandSlot + 1) % COMMAND_DEDUP_CACHE_SIZE);
+  persistCommandCache();
 }
 
 uint32_t calculateJobStateFingerprint(const NetworkJob& job) {
@@ -2373,6 +2535,7 @@ void handleDeviceStateAck(const NetworkResult& result) {
   if (!ackedFull || ackedFullGeneration == fullStateResyncGeneration) {
     fullStateResyncPending = false;
   }
+  clearOfflineRecoveryState();
   Serial.printf("[WS] state ack ok for %s\n", result.text1);
   clearPendingStateBatch();
 }
@@ -2397,45 +2560,191 @@ void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize) {
 void setPendingCode(const String& code) {
   codeVerificationPending = true;
   copyStringToBuffer(code, pendingCode, sizeof(pendingCode));
+  pendingCodeMessageId[0] = '\0';
+  pendingCodeSentMs = 0;
 }
 
 void clearPendingCode() {
   codeVerificationPending = false;
   pendingCode[0] = '\0';
+  pendingCodeMessageId[0] = '\0';
+  pendingCodeSentMs = 0;
 }
 
 void setPendingMasterTag(const String& tagId) {
   masterTagVerificationPending = true;
   copyStringToBuffer(tagId, pendingMasterTagId, sizeof(pendingMasterTagId));
+  pendingMasterTagMessageId[0] = '\0';
+  pendingMasterTagSentMs = 0;
 }
 
 void clearPendingMasterTag() {
   masterTagVerificationPending = false;
   pendingMasterTagId[0] = '\0';
+  pendingMasterTagMessageId[0] = '\0';
+  pendingMasterTagSentMs = 0;
 }
 
-bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber) {
-  isValid = false;
-  lockerNumber = 0;
-
-  String responseBody;
-  if (!postVerifyCode(code, responseBody)) {
+bool sendVerifyCodeWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    Serial.println("Code verification requires an active WebSocket connection.");
     return false;
   }
 
-  JsonDocument responseDoc;
-  const DeserializationError error = deserializeJson(responseDoc, responseBody);
-  if (error) {
-    Serial.printf("verify-code JSON parse failed: %s\n", error.c_str());
-    Serial.printf("Raw response: %s\n", responseBody.c_str());
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "verify", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "code.verify";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["code"] = job.text1;
+
+  char body[256];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] verify code payload too large.");
     return false;
   }
 
-  isValid = responseDoc["valid"] | false;
-  lockerNumber = responseDoc["locker"] | 0;
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] verify code %s code=%s\n", sent ? "sent" : "failed", job.text1);
+  if (sent) {
+    copyCStringToBuffer(messageId, pendingCodeMessageId, sizeof(pendingCodeMessageId));
+    pendingCodeSentMs = millis();
+  }
+  return sent;
+}
 
-  Serial.printf("Backend response: valid=%s, locker=%d\n", isValid ? "true" : "false", lockerNumber);
-  return true;
+void queueVerifyCodeResult(bool requestOk, bool isValid, uint8_t lockerNumber, const char* code) {
+  if (networkResultQueue == nullptr) {
+    return;
+  }
+
+  NetworkResult result = {};
+  result.type = NetworkResultType::VerifyCode;
+  result.requestOk = requestOk;
+  result.boolValue1 = isValid;
+  result.lockerNumber = lockerNumber;
+  copyCStringToBuffer(code, result.text1, sizeof(result.text1));
+
+  if (xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+    Serial.println("[WS] verify-code result queue full.");
+  }
+}
+
+void failPendingCodeVerification(const char* reason, bool showVisualFeedback) {
+  if (!codeVerificationPending) {
+    return;
+  }
+
+  char failedCode[sizeof(pendingCode)];
+  copyCStringToBuffer(pendingCode, failedCode, sizeof(failedCode));
+  clearPendingCode();
+  setStatusLed(false);
+  Serial.println(reason != nullptr ? reason : "Code verification failed.");
+
+  if (showVisualFeedback) {
+    flashCodeResult(String(failedCode), false);
+    blinkLed(5, 80, 80);
+  }
+}
+
+bool sendVerifyMasterTagWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    Serial.println("Master tag verification requires an active WebSocket connection.");
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "tagverify", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "tag.verify";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["tagId"] = job.text1;
+
+  char body[256];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] verify master tag payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] verify master tag %s uid=%s\n", sent ? "sent" : "failed", job.text1);
+  if (sent) {
+    copyCStringToBuffer(messageId, pendingMasterTagMessageId, sizeof(pendingMasterTagMessageId));
+    pendingMasterTagSentMs = millis();
+  }
+  return sent;
+}
+
+void queueVerifyMasterTagResult(bool requestOk, const JsonObject& tagVerification, const char* tagId) {
+  if (networkResultQueue == nullptr) {
+    return;
+  }
+
+  NetworkResult result = {};
+  result.type = NetworkResultType::VerifyMasterTag;
+  result.requestOk = requestOk;
+  copyCStringToBuffer(tagId, result.text1, sizeof(result.text1));
+
+  if (requestOk) {
+    result.boolValue1 = tagVerification["valid"] | false;
+
+    const JsonObject item = tagVerification["item"];
+    if (!item.isNull()) {
+      result.boolValue2 = item["itemKnown"] | false;
+      copyCStringToBuffer(item["itemName"] | "", result.text3, sizeof(result.text3));
+      copyCStringToBuffer(item["itemType"] | "", result.text4, sizeof(result.text4));
+    }
+
+    const JsonObject user = tagVerification["user"];
+    if (!user.isNull()) {
+      copyCStringToBuffer(user["name"] | "unknown", result.text2, sizeof(result.text2));
+    }
+
+    const JsonArray openedLockers = tagVerification["openedLockers"];
+    if (!openedLockers.isNull()) {
+      for (JsonVariant value : openedLockers) {
+        if (result.count >= LOCKER_COUNT) {
+          break;
+        }
+        result.lockers[result.count] = static_cast<uint8_t>(value.as<int>());
+        result.count += 1;
+      }
+    }
+  }
+
+  if (xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+    Serial.println("[WS] verify master-tag result queue full.");
+  }
+}
+
+void failPendingMasterTagVerification(const char* reason, bool showVisualFeedback) {
+  if (!masterTagVerificationPending) {
+    return;
+  }
+
+  char failedTagId[sizeof(pendingMasterTagId)];
+  copyCStringToBuffer(pendingMasterTagId, failedTagId, sizeof(failedTagId));
+  clearPendingMasterTag();
+  Serial.println(reason != nullptr ? reason : "Master tag verification failed.");
+
+  if (showVisualFeedback) {
+    blinkLed(4, 70, 70);
+    if (strlen(failedTagId) > 0) {
+      Serial.printf("Failed master tag UID: %s\n", failedTagId);
+    }
+  }
 }
 
 bool postVerifyCode(const String& code, String& responseBody) {
@@ -2679,6 +2988,12 @@ void buildStateBatchMessage(const NetworkJob& job, JsonDocument& doc, uint32_t s
   payload["full"] = job.boolValue;
   payload["bootId"] = deviceBootId;
   payload["reason"] = job.boolValue ? "resync" : "dirty-batch";
+  if (offlineRecoveryState.pending) {
+    JsonObject offlineRecovery = payload["offlineRecovery"].to<JsonObject>();
+    offlineRecovery["pending"] = true;
+    offlineRecovery["sessionId"] = offlineRecoveryState.sessionId;
+    offlineRecovery["changeCount"] = offlineRecoveryState.changeCount;
+  }
 
   JsonArray lockers = payload["lockers"].to<JsonArray>();
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -3073,7 +3388,7 @@ void printUsage() {
     Serial.println("Keypad actions:");
     Serial.println("  0-9 -> add digit to 4-digit code");
     Serial.println("  *   -> clear code buffer");
-    Serial.println("  #   -> send code to backend");
+    Serial.println("  #   -> verify code over WebSocket");
     Serial.println("  A   -> reconnect WiFi");
     Serial.println("  B   -> print current status");
     Serial.println("  C   -> print this help");
@@ -3092,7 +3407,7 @@ void printUsage() {
   Serial.println("  clear/c   -> clear code buffer");
   Serial.println("Network:");
   Serial.println("  - primary transport: persistent WebSocket /device/ws");
-  Serial.println("  - fallback: batched HTTPS /device/sync plus legacy verify endpoints");
+  Serial.println("  - fallback: batched HTTPS /device/sync plus compatibility endpoints");
   Serial.println("LED visuals:");
   Serial.println("  - green  -> locker ready / tag present");
   Serial.println("  - red    -> locker without tag");
@@ -3126,17 +3441,19 @@ void printStatus() {
 
   Serial.printf("Current code buffer: %s\n", enteredCode.length() > 0 ? enteredCode.c_str() : "(empty)");
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
+  Serial.printf("Locker relays enabled: %s\n", ENABLE_LOCKER_RELAYS ? "yes" : "no");
   printRfidSnapshot();
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const LockerState state = readLockerState(i);
     Serial.printf(
-      "Locker S%u -> tag=%s uid=%s door=%s lock=%s ready=%s version=%lu lastReport=%lu ms ago dirty=%s retryIn=%lu failCount=%u\n",
+      "Locker S%u -> tag=%s uid=%s door=%s lock=%s relay=%s ready=%s version=%lu lastReport=%lu ms ago dirty=%s retryIn=%lu failCount=%u\n",
       i + 1,
       state.tagPresent ? "yes" : "no",
       state.tagPresent ? state.tagUid.c_str() : "(none)",
       ENABLE_LOCKER_SWITCH_INPUTS ? (state.doorClosed ? "closed" : "open") : "n/a",
-      ENABLE_LOCKER_SWITCH_INPUTS ? (state.lockClosed ? "closed" : "open") : "n/a",
+      state.lockClosed ? "closed" : "open",
+      lockerRelayActive[i] ? "active" : "idle",
       isLockerComplete(state) ? "yes" : "no",
       static_cast<unsigned long>(lockerStateVersions[i]),
       lockerReaders[i].lastReportMs == 0 ? 0UL : millis() - lockerReaders[i].lastReportMs,
@@ -3307,8 +3624,20 @@ void configureLockerInputs() {
   }
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
-    pinMode(LOCKERS[i].doorClosed.pin, INPUT_PULLUP);
-    pinMode(LOCKERS[i].lockClosed.pin, INPUT_PULLUP);
+    pinMode(LOCKERS[i].doorClosed.pin, INPUT);
+  }
+}
+
+void configureLockerOutputs() {
+  if (!ENABLE_LOCKER_RELAYS) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    pinMode(LOCKERS[i].relay.pin, OUTPUT);
+    setRelayOutput(i, false);
+    lockerRelayActive[i] = false;
+    lockerRelayActiveUntilMs[i] = 0;
   }
 }
 
@@ -3320,12 +3649,11 @@ bool readInputPin(const LockerInputPin& config) {
 LockerState readLockerState(uint8_t lockerIndex) {
   const RfidReaderRuntime& runtime = lockerReaders[lockerIndex];
   bool doorClosed = true;
-  bool lockClosed = true;
+  const bool lockClosed = !lockerRelayActive[lockerIndex];
 
   if (ENABLE_LOCKER_SWITCH_INPUTS) {
     const LockerHardwareConfig& cfg = LOCKERS[lockerIndex];
     doorClosed = readInputPin(cfg.doorClosed);
-    lockClosed = readInputPin(cfg.lockClosed);
   }
 
   return {
@@ -3338,6 +3666,64 @@ LockerState readLockerState(uint8_t lockerIndex) {
 
 bool isLockerComplete(const LockerState& state) {
   return state.tagPresent && state.doorClosed && state.lockClosed;
+}
+
+void setRelayOutput(uint8_t lockerIndex, bool energized) {
+  if (!ENABLE_LOCKER_RELAYS) {
+    return;
+  }
+
+  const LockerOutputPin& relay = LOCKERS[lockerIndex].relay;
+  const uint8_t level = energized
+    ? (relay.activeLow ? LOW : HIGH)
+    : (relay.activeLow ? HIGH : LOW);
+  digitalWrite(relay.pin, level);
+}
+
+bool triggerLockerRelay(uint8_t lockerIndex, const char* reason) {
+  if (!ENABLE_LOCKER_RELAYS || lockerIndex >= LOCKER_COUNT) {
+    return false;
+  }
+
+  lockerRelayActive[lockerIndex] = true;
+  lockerRelayActiveUntilMs[lockerIndex] = millis() + LOCKER_RELAY_PULSE_MS;
+  setRelayOutput(lockerIndex, true);
+  markLockerStateChanged(lockerReaders[lockerIndex], millis());
+  Serial.printf("Locker S%u relay pulse started (%s)\n", lockerIndex + 1, reason != nullptr ? reason : "relay");
+  return true;
+}
+
+void triggerAllLockerRelays(const char* reason) {
+  if (!ENABLE_LOCKER_RELAYS) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    lockerRelayActive[i] = true;
+    lockerRelayActiveUntilMs[i] = now + LOCKER_RELAY_PULSE_MS;
+    setRelayOutput(i, true);
+    markLockerStateChanged(lockerReaders[i], now);
+    Serial.printf("Locker S%u relay pulse started (%s)\n", i + 1, reason != nullptr ? reason : "relay-all");
+  }
+}
+
+void serviceLockerRelayOutputs(unsigned long now) {
+  if (!ENABLE_LOCKER_RELAYS) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (!lockerRelayActive[i] || !isDeadlineReached(now, lockerRelayActiveUntilMs[i])) {
+      continue;
+    }
+
+    lockerRelayActive[i] = false;
+    lockerRelayActiveUntilMs[i] = 0;
+    setRelayOutput(i, false);
+    markLockerStateChanged(lockerReaders[i], now);
+    Serial.printf("Locker S%u relay pulse finished\n", i + 1);
+  }
 }
 
 void updateVisualState() {
@@ -3841,6 +4227,13 @@ bool isBackgroundNetworkBackoffActive(unsigned long now) {
   return nextBackgroundNetworkAttemptMs != 0 && now < nextBackgroundNetworkAttemptMs;
 }
 
+bool isBackendOfflineForStateTracking(unsigned long now) {
+  return !isWifiReady()
+    || wifiConnectInProgress
+    || isBackgroundNetworkBackoffActive(now)
+    || (!isDeviceWebSocketReady() && !shouldUseHttpsFallback(now));
+}
+
 void maybeRecoverWifiAfterNetworkFailures(unsigned long now) {
   if (consecutiveNetworkFailureCount < NETWORK_FAILURES_BEFORE_WIFI_RESET) {
     return;
@@ -3909,6 +4302,28 @@ void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now) {
   }
   nextDeviceStateBatchAttemptMs = 0;
   markLockerReportDirty(runtime, now);
+  if (isBackendOfflineForStateTracking(now)) {
+    noteOfflineLockerStateChange(now);
+  }
+}
+
+void noteOfflineLockerStateChange(unsigned long now) {
+  (void) now;
+
+  if (!offlineRecoveryState.pending) {
+    offlineRecoveryState.pending = true;
+    offlineRecoveryState.sessionId += 1;
+    if (offlineRecoveryState.sessionId == 0) {
+      offlineRecoveryState.sessionId = 1;
+    }
+    offlineRecoveryState.changeCount = 0;
+  }
+
+  if (offlineRecoveryState.changeCount < UINT32_MAX) {
+    offlineRecoveryState.changeCount += 1;
+  }
+
+  persistOfflineRecoveryState();
 }
 
 void noteLockerReportSuccess(RfidReaderRuntime& runtime, unsigned long now) {

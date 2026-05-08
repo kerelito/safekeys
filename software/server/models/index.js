@@ -292,6 +292,10 @@ const DeviceStateSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
+  lastOfflineRecoverySessionId: {
+    type: Number,
+    default: 0
+  },
   lockers: [{
     locker: Number,
     hasTag: Boolean,
