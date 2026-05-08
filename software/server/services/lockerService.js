@@ -995,19 +995,60 @@ class LockerService extends EventEmitter {
   }
 
   async getLockers() {
-    const data = await Locker.find();
+    const [data, stateDoc] = await Promise.all([
+      Locker.find({ locker: { $in: ALLOWED_LOCKERS } }).lean(),
+      DeviceState.findOne({ deviceId: DEFAULT_DEVICE_ID }).lean()
+    ]);
+    const liveLockers = new Map(
+      (stateDoc?.lockers || []).map(item => [Number(item.locker), item])
+    );
+    const liveTagIds = [...new Set(
+      (stateDoc?.lockers || [])
+        .filter(item => item?.hasTag === true && typeof item.tagId === "string" && item.tagId.trim())
+        .map(item => item.tagId.trim().toUpperCase())
+    )];
+    const liveItems = liveTagIds.length > 0
+      ? await RfidItem.find({ tagId: { $in: liveTagIds }, active: true }).lean()
+      : [];
+    const liveItemsByTagId = new Map(liveItems.map(item => [item.tagId, item]));
 
     return ALLOWED_LOCKERS.map(num => {
-      const found = data.find(item => item.locker === num);
+      const found = data.find(item => item.locker === num) || null;
+      const live = liveLockers.get(num) || null;
+      const hasLiveTagState = typeof live?.hasTag === "boolean";
+      const hasLiveDoorState = typeof live?.doorClosed === "boolean" || typeof live?.lockClosed === "boolean";
+      const hasTag = hasLiveTagState
+        ? live.hasTag === true
+        : (found ? found.hasTag : false);
+      const isDoorClosed = hasLiveDoorState
+        ? live.doorClosed !== false && live.lockClosed !== false
+        : (found ? found.isDoorClosed !== false : true);
+      const detectedTagId = hasTag
+        ? (typeof live?.tagId === "string" && live.tagId.trim()
+            ? live.tagId.trim().toUpperCase()
+            : (found?.detectedTagId || null))
+        : null;
+      const detectedItem = detectedTagId ? (liveItemsByTagId.get(detectedTagId) || null) : null;
+
       return {
         locker: num,
-        hasTag: found ? found.hasTag : false,
-        isDoorClosed: found ? found.isDoorClosed !== false : true,
-        detectedTagId: found?.detectedTagId || null,
-        detectedItemName: found?.detectedItemName || null,
-        detectedItemType: found?.detectedItemType || null,
-        detectedItemKnown: typeof found?.detectedItemKnown === "boolean" ? found.detectedItemKnown : null,
-        detectedAt: found?.detectedAt || null
+        hasTag,
+        isDoorClosed,
+        detectedTagId,
+        detectedItemName: hasTag
+          ? (detectedItem?.name || found?.detectedItemName || null)
+          : null,
+        detectedItemType: hasTag
+          ? (detectedItem?.itemType || found?.detectedItemType || null)
+          : null,
+        detectedItemKnown: hasTag
+          ? (detectedItem
+              ? true
+              : (typeof found?.detectedItemKnown === "boolean" ? found.detectedItemKnown : (detectedTagId ? false : null)))
+          : null,
+        detectedAt: hasTag
+          ? (live?.updatedAt || found?.detectedAt || null)
+          : null
       };
     });
   }
