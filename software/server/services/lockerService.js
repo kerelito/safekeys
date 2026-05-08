@@ -539,23 +539,12 @@ class LockerService extends EventEmitter {
           : (normalizeSequence(context.sequence) || 0)
       };
     });
-    const tagIds = [...new Set(normalizedLockers
-      .filter(item => item.hasTag && item.tagId)
-      .map(item => item.tagId))];
-    const [stateDoc, lockerDocs, knownItems] = await Promise.all([
-      DeviceState.findOne({ deviceId }).lean(),
-      Locker.find({ locker: { $in: ALLOWED_LOCKERS } }).lean(),
-      tagIds.length > 0
-        ? RfidItem.find({ tagId: { $in: tagIds }, active: true }).lean()
-        : Promise.resolve([])
-    ]);
+    const stateDoc = await DeviceState.findOne({ deviceId }).lean();
     const previousVersions = new Map(
       (stateDoc?.lockers || []).map(item => [Number(item.locker), Number(item.version) || 0])
     );
     const previousOfflineRecoverySessionId = Number(stateDoc?.lastOfflineRecoverySessionId) || 0;
     const accepted = [];
-    const lockerByNumber = new Map(lockerDocs.map(item => [Number(item.locker), item]));
-    const knownItemByTagId = new Map(knownItems.map(item => [item.tagId, item]));
     const storedLockers = new Map(
       (stateDoc?.lockers || []).map(item => [Number(item.locker), {
         locker: Number(item.locker),
@@ -576,14 +565,12 @@ class LockerService extends EventEmitter {
     const shouldLogOfflineRecovery = offlineRecoveryPayload?.pending === true
       && offlineRecoverySessionId > 0
       && offlineRecoverySessionId > previousOfflineRecoverySessionId;
-    const lockerWrites = [];
-    const logWrites = [];
-    const lockerEvents = [];
+    const source = context.transport === "websocket" ? "device-ws" : "device-sync";
 
     if (shouldLogOfflineRecovery) {
-      logWrites.push({
+      await this.createLog({
         event: "DEVICE_OFFLINE_STATE_RECOVERED",
-        source: context.transport === "websocket" ? "device-ws" : "device-sync",
+        source,
         actor: deviceId,
         details: {
           sessionId: offlineRecoverySessionId,
@@ -592,34 +579,6 @@ class LockerService extends EventEmitter {
         timestamp: now
       });
     }
-
-    const describeKnownTag = tagId => {
-      if (!tagId) {
-        return {
-          tagId: null,
-          itemName: null,
-          itemType: null,
-          itemKnown: null
-        };
-      }
-
-      const item = knownItemByTagId.get(tagId);
-      if (!item) {
-        return {
-          tagId,
-          itemName: null,
-          itemType: null,
-          itemKnown: false
-        };
-      }
-
-      return {
-        tagId: item.tagId,
-        itemName: item.name,
-        itemType: item.itemType,
-        itemKnown: true
-      };
-    };
 
     for (const item of normalizedLockers) {
       const locker = item.locker;
@@ -638,140 +597,34 @@ class LockerService extends EventEmitter {
         continue;
       }
 
-      const source = context.transport === "websocket" ? "device-ws" : "device-sync";
-      const existingLocker = lockerByNumber.get(locker) || null;
       const storedLocker = storedLockers.get(locker) || null;
-      const previousItem = existingLocker
-        ? {
-            tagId: existingLocker.detectedTagId || null,
-            itemName: existingLocker.detectedItemName || null,
-            itemType: existingLocker.detectedItemType || null,
-            itemKnown: typeof existingLocker.detectedItemKnown === "boolean" ? existingLocker.detectedItemKnown : null
-          }
-        : null;
       const resolvedHasTag = item.hasTag == null
-        ? (existingLocker?.hasTag ?? storedLocker?.hasTag ?? true)
+        ? (storedLocker?.hasTag ?? true)
         : item.hasTag;
-      const nextItem = item.hasTag === true
-        ? (item.tagId ? describeKnownTag(item.tagId) : previousItem)
-        : item.hasTag === false
-          ? {
-              tagId: null,
-              itemName: null,
-              itemType: null,
-              itemKnown: null
-            }
-        : {
-            tagId: previousItem?.tagId || null,
-            itemName: previousItem?.itemName || null,
-            itemType: previousItem?.itemType || null,
-            itemKnown: typeof previousItem?.itemKnown === "boolean" ? previousItem.itemKnown : null
-          };
-      const statusChanged = item.hasTag !== null
-        && (!existingLocker || existingLocker.hasTag !== item.hasTag);
-      const itemChanged = previousItem?.tagId !== nextItem?.tagId
-        || previousItem?.itemName !== nextItem?.itemName
-        || previousItem?.itemType !== nextItem?.itemType
-        || previousItem?.itemKnown !== nextItem?.itemKnown;
       const hasDoorSignal = item.doorClosed !== null || item.lockClosed !== null;
       const isDoorClosed = hasDoorSignal
         ? item.doorClosed !== false && item.lockClosed !== false
         : null;
-      const previousDoorClosed = existingLocker ? existingLocker.isDoorClosed !== false : null;
-      const doorChanged = hasDoorSignal && (!existingLocker || previousDoorClosed !== isDoorClosed);
 
-      if (statusChanged || itemChanged || doorChanged) {
-        const set = {
-          locker,
-          hasTag: resolvedHasTag,
-          detectedTagId: nextItem?.tagId || null,
-          detectedItemName: nextItem?.itemName || null,
-          detectedItemType: nextItem?.itemType || null,
-          detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
-          detectedAt: resolvedHasTag
-            ? (item.hasTag == null ? (existingLocker?.detectedAt || now) : now)
-            : null
-        };
-
-        if (hasDoorSignal) {
-          set.isDoorClosed = isDoorClosed;
-        } else if (!existingLocker) {
-          set.isDoorClosed = true;
-        }
-
-        lockerWrites.push({
-          updateOne: {
-            filter: { locker },
-            update: {
-              $set: set
-            },
-            upsert: true
-          }
-        });
-      }
-
-      if (existingLocker && existingLocker.hasTag === true && item.hasTag === false) {
-        logWrites.push({
-          event: "KEY_REMOVED",
-          locker,
-          tagId: previousItem?.tagId || null,
-          itemName: previousItem?.itemName || null,
-          itemType: previousItem?.itemType || null,
-          itemKnown: typeof previousItem?.itemKnown === "boolean" ? previousItem.itemKnown : null,
+      if (item.hasTag !== null) {
+        await this.updateLockerStatus(locker, resolvedHasTag, {
           source,
-          actor: deviceId,
-          timestamp: now
+          tagId: resolvedHasTag ? item.tagId : null,
+          actor: deviceId
         });
       }
 
-      if (existingLocker && existingLocker.hasTag === false && item.hasTag === true) {
-        logWrites.push({
-          event: "KEY_RETURNED",
-          locker,
-          tagId: nextItem?.tagId || null,
-          itemName: nextItem?.itemName || null,
-          itemType: nextItem?.itemType || null,
-          itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+      if (hasDoorSignal) {
+        await this.updateLockerDoorStatus(locker, isDoorClosed, {
           source,
-          actor: deviceId,
-          timestamp: now
-        });
-      }
-
-      if (existingLocker && doorChanged) {
-        logWrites.push({
-          event: isDoorClosed ? "LOCKER_DOOR_CLOSED" : "LOCKER_DOOR_OPENED",
-          locker,
-          source,
-          actor: deviceId,
-          timestamp: now
-        });
-      }
-
-      if (statusChanged || itemChanged) {
-        lockerEvents.push({
-          locker,
-          hasTag: resolvedHasTag,
-          tagId: nextItem?.tagId || null,
-          itemName: nextItem?.itemName || null,
-          itemType: nextItem?.itemType || null,
-          itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
-          source
-        });
-      }
-
-      if (doorChanged) {
-        lockerEvents.push({
-          locker,
-          isDoorClosed,
-          source
+          actor: deviceId
         });
       }
 
       storedLockers.set(locker, {
         locker,
         hasTag: resolvedHasTag,
-        tagId: item.tagId,
+        tagId: resolvedHasTag ? item.tagId : null,
         doorClosed: item.doorClosed,
         lockClosed: item.lockClosed,
         version: incomingVersion,
@@ -784,42 +637,26 @@ class LockerService extends EventEmitter {
       });
     }
 
-    const [, logs] = await Promise.all([
-      lockerWrites.length > 0
-        ? Locker.bulkWrite(lockerWrites, { ordered: false })
-        : Promise.resolve(),
-      logWrites.length > 0
-        ? Log.insertMany(logWrites)
-        : Promise.resolve([]),
-      DeviceState.findOneAndUpdate(
-        { deviceId },
-        {
-          $set: {
-            deviceId,
-            connected: true,
-            transport: context.transport || "unknown",
-            connectionId: context.connectionId || this.deviceStatus.connectionId || null,
-            bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
-            lastSeenAt: now,
-            lastOfflineRecoverySessionId: shouldLogOfflineRecovery
-              ? offlineRecoverySessionId
-              : previousOfflineRecoverySessionId,
-            lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
-            ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
-            lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
-          }
-        },
-        { upsert: true, new: true }
-      )
-    ]);
-
-    for (const log of logs || []) {
-      this.emit("log", log);
-    }
-
-    for (const event of lockerEvents) {
-      this.emit("locker-status-changed", event);
-    }
+    await DeviceState.findOneAndUpdate(
+      { deviceId },
+      {
+        $set: {
+          deviceId,
+          connected: true,
+          transport: context.transport || "unknown",
+          connectionId: context.connectionId || this.deviceStatus.connectionId || null,
+          bootId: context.bootId || payload.bootId || this.deviceStatus.bootId || null,
+          lastSeenAt: now,
+          lastOfflineRecoverySessionId: shouldLogOfflineRecovery
+            ? offlineRecoverySessionId
+            : previousOfflineRecoverySessionId,
+          lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null,
+          ...(context.sequence !== null && context.sequence !== undefined ? { lastSequence: context.sequence } : {}),
+          lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
+        }
+      },
+      { upsert: true, new: true }
+    );
 
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > 1000) {
@@ -828,8 +665,7 @@ class LockerService extends EventEmitter {
         messageId: context.messageId || null,
         elapsedMs,
         lockers: normalizedLockers.length,
-        writes: lockerWrites.length,
-        logs: logWrites.length
+        writes: accepted.filter(item => item.accepted).length
       });
     }
 
