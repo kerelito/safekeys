@@ -46,6 +46,62 @@ function setLockers(lockers) {
   return state.lockers;
 }
 
+function upsertLocker(locker, patch = {}) {
+  const current = state.lockers.find(item => item.locker === locker) || {
+    locker,
+    hasTag: false,
+    isDoorClosed: true,
+    detectedTagId: null,
+    detectedItemName: null,
+    detectedItemType: null,
+    detectedItemKnown: null,
+    detectedAt: null
+  };
+
+  const next = {
+    ...current
+  };
+
+  if (typeof patch.hasTag === "boolean") {
+    next.hasTag = patch.hasTag;
+    if (!patch.hasTag) {
+      next.detectedTagId = null;
+      next.detectedItemName = null;
+      next.detectedItemType = null;
+      next.detectedItemKnown = null;
+      next.detectedAt = null;
+    } else if (!next.detectedAt) {
+      next.detectedAt = new Date().toISOString();
+    }
+  }
+
+  if (typeof patch.isDoorClosed === "boolean") {
+    next.isDoorClosed = patch.isDoorClosed;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "tagId")) {
+    next.detectedTagId = patch.tagId || null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "itemName")) {
+    next.detectedItemName = patch.itemName || null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "itemType")) {
+    next.detectedItemType = patch.itemType || null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "itemKnown")) {
+    next.detectedItemKnown = typeof patch.itemKnown === "boolean" ? patch.itemKnown : null;
+  }
+
+  const nextLockers = state.lockers.some(item => item.locker === locker)
+    ? state.lockers.map(item => (item.locker === locker ? next : item))
+    : [...state.lockers, next].sort((left, right) => left.locker - right.locker);
+
+  return setLockers(nextLockers);
+}
+
 function setLockerDetails(patch) {
   state = {
     ...state,
@@ -124,6 +180,15 @@ export function clearLockers() {
   emit();
   handlers.onAfterRefresh(state.lockers);
   return state.lockers;
+}
+
+export function applyLockerStatusUpdate(update = {}) {
+  const locker = Number(update?.locker);
+  if (!Number.isFinite(locker) || locker <= 0) {
+    return state.lockers;
+  }
+
+  return upsertLocker(locker, update);
 }
 
 export function openLockerFromStore(locker) {

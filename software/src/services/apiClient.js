@@ -31,11 +31,20 @@ export function downloadUrl(path) {
 
 export async function apiFetch(path, options = {}) {
   let res;
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || {});
+
+  if (method === "GET" || method === "HEAD") {
+    headers.set("Cache-Control", "no-cache");
+    headers.set("Pragma", "no-cache");
+  }
 
   try {
     res = await fetch(API + path, {
+      ...options,
       credentials: "same-origin",
-      ...options
+      cache: "no-store",
+      headers
     });
   } catch (error) {
     onHttpStatusChange(false);

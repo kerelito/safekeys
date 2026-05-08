@@ -24,6 +24,7 @@ import {
   refreshAlerts
 } from "./state/alertsStore.js";
 import {
+  applyLockerStatusUpdate,
   clearLockers,
   configureLockersHandlers,
   getLockerDetailsLockerNumber,
@@ -284,6 +285,7 @@ function connectSocket() {
     await loadActiveCodes();
   });
   socket.on("locker-status-changed", async status => {
+    applyLockerStatusUpdate(status);
     await loadLockers();
     await loadAlerts();
 
