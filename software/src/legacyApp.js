@@ -30,7 +30,8 @@ import {
   getLockerDetailsLockerNumber,
   openLockerDetailsFromStore,
   refreshLockerDetailsFromStore,
-  refreshLockers
+  refreshLockers,
+  syncLockers
 } from "./state/lockersStore.js";
 import {
   clearRemoteActions,
@@ -291,6 +292,13 @@ function connectSocket() {
 
     const selectedLockerDetailsNumber = getLockerDetailsLockerNumber();
     if (selectedLockerDetailsNumber && (!status?.locker || status.locker === selectedLockerDetailsNumber)) {
+      refreshLockerDetailsFromData();
+    }
+  });
+  socket.on("lockers-snapshot", lockers => {
+    syncLockers(lockers);
+    const selectedLockerDetailsNumber = getLockerDetailsLockerNumber();
+    if (selectedLockerDetailsNumber) {
       refreshLockerDetailsFromData();
     }
   });

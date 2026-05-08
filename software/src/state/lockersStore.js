@@ -182,6 +182,10 @@ export function clearLockers() {
   return state.lockers;
 }
 
+export function syncLockers(lockers) {
+  return setLockers(lockers);
+}
+
 export function applyLockerStatusUpdate(update = {}) {
   const locker = Number(update?.locker);
   if (!Number.isFinite(locker) || locker <= 0) {

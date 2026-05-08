@@ -335,6 +335,15 @@ lockerService.on("active-codes-changed", () => {
 
 lockerService.on("locker-status-changed", status => {
   io.emit("locker-status-changed", status);
+  lockerService.getLockers()
+    .then(lockers => {
+      io.emit("lockers-snapshot", lockers);
+    })
+    .catch(error => {
+      console.error("Nie udalo sie wyslac lockers-snapshot.", {
+        error: error.message
+      });
+    });
 });
 
 lockerService.on("rfid-tag-assignment-updated", assignment => {
