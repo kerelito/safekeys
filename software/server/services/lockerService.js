@@ -399,6 +399,28 @@ class LockerService extends EventEmitter {
           break;
         }
 
+        case "code.verify": {
+          const verification = await this.verifyCode(envelope.payload?.code, {
+            source: "device",
+            actor: deviceId
+          });
+          response = buildAck(envelope, {
+            verification
+          });
+          break;
+        }
+
+        case "tag.verify": {
+          const tagVerification = await this.verifyRfidTag(envelope.payload?.tagId, {
+            source: "device",
+            actor: deviceId
+          });
+          response = buildAck(envelope, {
+            tagVerification
+          });
+          break;
+        }
+
         case "command.ack": {
           const ackPayload = normalizeCommandAckPayload(envelope.payload || {});
           if (!ackPayload.commandId) {
