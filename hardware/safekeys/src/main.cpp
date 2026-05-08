@@ -42,8 +42,8 @@
   - lockClosed jest raportowane logicznie z aktywności przekaźnika, bez osobnego czujnika zamka
 */
 
-static const char* WIFI_SSID = "TP-Link_70FC";
-static const char* WIFI_PASSWORD = "13793814";
+static const char* WIFI_SSID = "NETIASPOT-2.4GHz-U2ut";
+static const char* WIFI_PASSWORD = "nqdrusJ9hYST";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -106,7 +106,7 @@ static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
 static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
-static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
+static const bool DEVICE_STATE_WS_ACK_REQUIRED = true;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
