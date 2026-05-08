@@ -40,8 +40,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "TP-Link_70FC";
-static const char* WIFI_PASSWORD = "13793814";
+static const char* WIFI_SSID = "NETIASPOT-2.4GHz-U2ut";
+static const char* WIFI_PASSWORD = "nqdrusJ9hYST";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -103,6 +103,8 @@ static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
+static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 8000;
+static const unsigned long DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
@@ -357,7 +359,9 @@ bool deviceStateBatchQueued = false;
 bool deviceStateAckPending = false;
 bool forceNextStateBatchHttps = false;
 char pendingCode[CODE_LENGTH + 1] = "";
+char pendingCodeMessageId[64] = "";
 char pendingMasterTagId[32] = "";
+char pendingMasterTagMessageId[64] = "";
 char pendingStateMessageId[64] = "";
 bool taskWatchdogReady = false;
 volatile uint8_t consecutiveNetworkFailureCount = 0;
@@ -376,6 +380,8 @@ volatile unsigned long lastDeviceWsConnectedMs = 0;
 unsigned long deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
 unsigned long lastDeviceWsHeartbeatMs = 0;
 unsigned long lastDeviceStateBatchMs = 0;
+unsigned long pendingCodeSentMs = 0;
+unsigned long pendingMasterTagSentMs = 0;
 unsigned long nextFullStateResyncDueMs = 0;
 unsigned long pendingStateBatchSentMs = 0;
 unsigned long nextDeviceStateBatchAttemptMs = 0;
@@ -425,6 +431,8 @@ bool sendDeviceHeartbeatWs();
 bool sendDeviceStateBatchWs(const NetworkJob& job);
 bool sendDeviceCommandAckWs(const NetworkJob& job);
 bool sendTagAssignmentResultWs(const NetworkJob& job);
+bool sendVerifyCodeWs(const NetworkJob& job);
+bool sendVerifyMasterTagWs(const NetworkJob& job);
 bool postDeviceStateBatch(const NetworkJob& job);
 bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postCommandAck(const NetworkJob& job);
@@ -458,9 +466,6 @@ bool maybeReportLockerStatuses(unsigned long now);
 bool maybeQueueDeviceStateBatch(unsigned long now);
 void serviceLockerInputChanges(unsigned long now);
 void processEnteredCode(const String& code);
-bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber);
-bool postVerifyCode(const String& code, String& responseBody);
-bool postVerifyTag(const String& tagId, String& responseBody);
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
 bool sendHeartbeat();
 void serviceNetworkResults();
@@ -479,8 +484,9 @@ void setPendingCode(const String& code);
 void clearPendingCode();
 void setPendingMasterTag(const String& tagId);
 void clearPendingMasterTag();
+void failPendingCodeVerification(const char* reason);
+void failPendingMasterTagVerification(const char* reason);
 bool fetchDeviceActionsForTask(NetworkResult& result);
-bool verifyMasterTagForTask(const char* tagId, NetworkResult& result);
 void printUsage();
 void printStatus();
 void printRfidSnapshot();
@@ -790,21 +796,18 @@ void networkTaskMain(void* parameter) {
       }
 
       case NetworkJobType::VerifyCode: {
-        bool isValid = false;
-        int lockerNumber = 0;
         result.type = NetworkResultType::VerifyCode;
         copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
-        result.requestOk = verifyCodeRemotely(String(job.text1), isValid, lockerNumber);
-        result.boolValue1 = isValid;
-        result.lockerNumber = static_cast<uint8_t>(max(0, lockerNumber));
-        shouldPublishResult = true;
+        result.requestOk = sendVerifyCodeWs(job);
+        shouldPublishResult = !result.requestOk;
         break;
       }
 
       case NetworkJobType::VerifyMasterTag: {
         result.type = NetworkResultType::VerifyMasterTag;
-        result.requestOk = verifyMasterTagForTask(job.text1, result);
-        shouldPublishResult = true;
+        copyCStringToBuffer(job.text1, result.text1, sizeof(result.text1));
+        result.requestOk = sendVerifyMasterTagWs(job);
+        shouldPublishResult = !result.requestOk;
         break;
       }
 
@@ -861,6 +864,14 @@ void loop() {
   serviceLockerInputChanges(now);
   serviceNetworkResults();
   updateVisualState();
+
+  if (codeVerificationPending && pendingCodeSentMs != 0 && now - pendingCodeSentMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
+    failPendingCodeVerification("Code verification timed out.");
+  }
+
+  if (masterTagVerificationPending && pendingMasterTagSentMs != 0 && now - pendingMasterTagSentMs >= DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS) {
+    failPendingMasterTagVerification("Master tag verification timed out.");
+  }
 
   if (!isWifiReady()) {
     if (!wifiConnectInProgress && now - lastWifiRetryMs >= wifiRetryIntervalMs) {
@@ -1178,6 +1189,12 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
+      if (codeVerificationPending) {
+        failPendingCodeVerification("WebSocket disconnected.");
+      }
+      if (masterTagVerificationPending) {
+        failPendingMasterTagVerification("WebSocket disconnected.");
+      }
       break;
 
     case WStype_TEXT:
@@ -1190,6 +1207,12 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsHelloSent = false;
       deviceWsServerHelloSeen = false;
       deviceWsReconnectRequested = true;
+      if (codeVerificationPending) {
+        failPendingCodeVerification("WebSocket error.");
+      }
+      if (masterTagVerificationPending) {
+        failPendingMasterTagVerification("WebSocket error.");
+      }
       break;
 
     case WStype_PONG:
@@ -1231,6 +1254,61 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
   if (strcmp(type, "ack") == 0) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
+    if (codeVerificationPending && pendingCodeMessageId[0] != '\0' && strcmp(messageId, pendingCodeMessageId) == 0) {
+      NetworkResult result = {};
+      result.type = NetworkResultType::VerifyCode;
+      result.requestOk = ok;
+      copyCStringToBuffer(pendingCode, result.text1, sizeof(result.text1));
+      const JsonObject verification = doc["verification"];
+      if (!verification.isNull()) {
+        result.boolValue1 = ok && (verification["valid"] | false);
+        result.lockerNumber = static_cast<uint8_t>(verification["locker"] | 0);
+      }
+      if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+        Serial.printf("[WS] verify code result queue full for %s\n", messageId);
+        recoverFromDroppedNetworkResult(result);
+      }
+      return;
+    }
+    if (masterTagVerificationPending && pendingMasterTagMessageId[0] != '\0' && strcmp(messageId, pendingMasterTagMessageId) == 0) {
+      NetworkResult result = {};
+      result.type = NetworkResultType::VerifyMasterTag;
+      result.requestOk = ok;
+      copyCStringToBuffer(pendingMasterTagId, result.text1, sizeof(result.text1));
+
+      const JsonObject verification = doc["tagVerification"];
+      if (!verification.isNull()) {
+        result.boolValue1 = ok && (verification["valid"] | false);
+        const JsonObject item = verification["item"];
+        if (!item.isNull()) {
+          result.boolValue2 = item["itemKnown"] | false;
+          copyCStringToBuffer(item["itemName"] | "", result.text3, sizeof(result.text3));
+          copyCStringToBuffer(item["itemType"] | "", result.text4, sizeof(result.text4));
+        }
+
+        const JsonObject user = verification["user"];
+        if (!user.isNull()) {
+          copyCStringToBuffer(user["name"] | "unknown", result.text2, sizeof(result.text2));
+        }
+
+        const JsonArray openedLockers = verification["openedLockers"];
+        if (!openedLockers.isNull()) {
+          for (JsonVariant value : openedLockers) {
+            if (result.count >= LOCKER_COUNT) {
+              break;
+            }
+            result.lockers[result.count] = static_cast<uint8_t>(value.as<int>());
+            result.count += 1;
+          }
+        }
+      }
+
+      if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+        Serial.printf("[WS] verify master tag result queue full for %s\n", messageId);
+        recoverFromDroppedNetworkResult(result);
+      }
+      return;
+    }
     if (strncmp(messageId, "state-", 6) == 0) {
       NetworkResult result = {};
       result.type = NetworkResultType::DeviceStateAck;
@@ -2402,6 +2480,8 @@ void setPendingCode(const String& code) {
 void clearPendingCode() {
   codeVerificationPending = false;
   pendingCode[0] = '\0';
+  pendingCodeMessageId[0] = '\0';
+  pendingCodeSentMs = 0;
 }
 
 void setPendingMasterTag(const String& tagId) {
@@ -2412,109 +2492,49 @@ void setPendingMasterTag(const String& tagId) {
 void clearPendingMasterTag() {
   masterTagVerificationPending = false;
   pendingMasterTagId[0] = '\0';
+  pendingMasterTagMessageId[0] = '\0';
+  pendingMasterTagSentMs = 0;
 }
 
-bool verifyCodeRemotely(const String& code, bool& isValid, int& lockerNumber) {
-  isValid = false;
-  lockerNumber = 0;
-
-  String responseBody;
-  if (!postVerifyCode(code, responseBody)) {
-    return false;
+void failPendingCodeVerification(const char* reason) {
+  if (!codeVerificationPending) {
+    return;
   }
 
-  JsonDocument responseDoc;
-  const DeserializationError error = deserializeJson(responseDoc, responseBody);
-  if (error) {
-    Serial.printf("verify-code JSON parse failed: %s\n", error.c_str());
-    Serial.printf("Raw response: %s\n", responseBody.c_str());
-    return false;
+  NetworkResult result = {};
+  result.type = NetworkResultType::VerifyCode;
+  result.requestOk = false;
+  copyCStringToBuffer(pendingCode, result.text1, sizeof(result.text1));
+  clearPendingCode();
+  setStatusLed(false);
+
+  if (reason != nullptr && strlen(reason) > 0) {
+    Serial.println(reason);
   }
 
-  isValid = responseDoc["valid"] | false;
-  lockerNumber = responseDoc["locker"] | 0;
-
-  Serial.printf("Backend response: valid=%s, locker=%d\n", isValid ? "true" : "false", lockerNumber);
-  return true;
+  if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+    recoverFromDroppedNetworkResult(result);
+  }
 }
 
-bool postVerifyCode(const String& code, String& responseBody) {
-  WiFiClientSecure secureClient;
-  HTTPClient http;
-  char url[128];
-  snprintf(url, sizeof(url), "%s/verify-code", API_BASE_URL);
-
-  if (!beginSecureRequest(http, secureClient, url, "/verify-code")) {
-    return false;
+void failPendingMasterTagVerification(const char* reason) {
+  if (!masterTagVerificationPending) {
+    return;
   }
 
-  http.addHeader("Content-Type", "application/json");
+  NetworkResult result = {};
+  result.type = NetworkResultType::VerifyMasterTag;
+  result.requestOk = false;
+  copyCStringToBuffer(pendingMasterTagId, result.text1, sizeof(result.text1));
+  clearPendingMasterTag();
 
-  if (strlen(DEVICE_API_KEY) > 0) {
-    http.addHeader("x-device-key", DEVICE_API_KEY);
+  if (reason != nullptr && strlen(reason) > 0) {
+    Serial.println(reason);
   }
 
-  JsonDocument payload;
-  payload["code"] = code;
-
-  char body[96];
-  const size_t bodyLen = serializeJson(payload, body, sizeof(body));
-
-  Serial.printf("POST %s\n", url);
-  Serial.printf("Payload: %s\n", body);
-
-  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), bodyLen);
-  responseBody = http.getString();
-  http.end();
-
-  Serial.printf("HTTP status: %d\n", httpCode);
-  if (httpCode < 200 || httpCode >= 300) {
-    logHttpFailure("/verify-code", httpCode, secureClient, responseBody);
+  if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+    recoverFromDroppedNetworkResult(result);
   }
-  if (responseBody.length() > 0) {
-    Serial.printf("HTTP response: %s\n", responseBody.c_str());
-  }
-
-  return httpCode >= 200 && httpCode < 300;
-}
-
-bool postVerifyTag(const String& tagId, String& responseBody) {
-  WiFiClientSecure secureClient;
-  HTTPClient http;
-  char url[128];
-  snprintf(url, sizeof(url), "%s/verify-tag", API_BASE_URL);
-
-  if (!beginSecureRequest(http, secureClient, url, "/verify-tag")) {
-    return false;
-  }
-
-  http.addHeader("Content-Type", "application/json");
-  if (strlen(DEVICE_API_KEY) > 0) {
-    http.addHeader("x-device-key", DEVICE_API_KEY);
-  }
-
-  JsonDocument payload;
-  payload["tagId"] = tagId;
-
-  char body[128];
-  const size_t bodyLen = serializeJson(payload, body, sizeof(body));
-
-  Serial.printf("POST %s\n", url);
-  Serial.printf("Payload: %s\n", body);
-
-  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), bodyLen);
-  responseBody = http.getString();
-  http.end();
-
-  Serial.printf("HTTP status: %d\n", httpCode);
-  if (httpCode < 200 || httpCode >= 300) {
-    logHttpFailure("/verify-tag", httpCode, secureClient, responseBody);
-  }
-  if (responseBody.length() > 0) {
-    Serial.printf("HTTP response: %s\n", responseBody.c_str());
-  }
-
-  return httpCode >= 200 && httpCode < 300;
 }
 
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId) {
@@ -2790,6 +2810,72 @@ bool sendTagAssignmentResultWs(const NetworkJob& job) {
   return sent;
 }
 
+bool sendVerifyCodeWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "verify", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "code.verify";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["code"] = job.text1;
+
+  char body[256];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] verify code payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  if (sent) {
+    copyCStringToBuffer(messageId, pendingCodeMessageId, sizeof(pendingCodeMessageId));
+    pendingCodeSentMs = millis();
+  }
+  Serial.printf("[WS] verify code %s code=%s\n", sent ? "sent" : "failed", job.text1);
+  return sent;
+}
+
+bool sendVerifyMasterTagWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "tagverify", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "tag.verify";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["tagId"] = job.text1;
+
+  char body[256];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] verify master tag payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  if (sent) {
+    copyCStringToBuffer(messageId, pendingMasterTagMessageId, sizeof(pendingMasterTagMessageId));
+    pendingMasterTagSentMs = millis();
+  }
+  Serial.printf("[WS] verify master tag %s uid=%s\n", sent ? "sent" : "failed", job.text1);
+  return sent;
+}
+
 bool postDeviceStateBatch(const NetworkJob& job) {
   const uint32_t sequence = nextDeviceSequence();
   char messageId[64];
@@ -3019,53 +3105,6 @@ bool sendHeartbeat() {
   logHttpFailure("/device/heartbeat", httpCode, secureClient, responseBody);
 
   return false;
-}
-
-bool verifyMasterTagForTask(const char* tagId, NetworkResult& result) {
-  copyCStringToBuffer(tagId, result.text1, sizeof(result.text1));
-  Serial.printf("Verifying master RFID UID %s via /verify-tag\n", tagId);
-
-  String responseBody;
-  if (!postVerifyTag(String(tagId), responseBody)) {
-    return false;
-  }
-
-  JsonDocument responseDoc;
-  const DeserializationError error = deserializeJson(responseDoc, responseBody);
-  if (error) {
-    Serial.printf("verify-tag JSON parse failed: %s\n", error.c_str());
-    Serial.printf("Raw response: %s\n", responseBody.c_str());
-    return false;
-  }
-
-  result.boolValue1 = responseDoc["valid"] | false;
-
-  const JsonObject item = responseDoc["item"];
-  if (!item.isNull()) {
-    result.boolValue2 = item["itemKnown"] | false;
-    copyCStringToBuffer(item["itemName"] | "", result.text3, sizeof(result.text3));
-    copyCStringToBuffer(item["itemType"] | "", result.text4, sizeof(result.text4));
-  }
-
-  if (!result.boolValue1) {
-    return true;
-  }
-
-  const JsonObject user = responseDoc["user"];
-  copyCStringToBuffer(user["name"] | "unknown", result.text2, sizeof(result.text2));
-
-  const JsonArray openedLockers = responseDoc["openedLockers"];
-  if (!openedLockers.isNull()) {
-    for (JsonVariant value : openedLockers) {
-      if (result.count >= LOCKER_COUNT) {
-        break;
-      }
-      result.lockers[result.count] = static_cast<uint8_t>(value.as<int>());
-      result.count += 1;
-    }
-  }
-
-  return true;
 }
 
 void printUsage() {
