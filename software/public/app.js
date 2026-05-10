@@ -73,6 +73,28 @@ const PANEL_USER_REFRESH_EVENTS = [
   "PANEL_USER_DELETED"
 ];
 
+function formatLockerMask(mask) {
+  if (mask == null || mask === "") {
+    return "";
+  }
+
+  const numericMask = Number(mask);
+  if (!Number.isFinite(numericMask)) {
+    return String(mask);
+  }
+
+  const binaryMask = (numericMask >>> 0).toString(2).padStart(3, "0");
+  return `0b${binaryMask}`;
+}
+
+function formatLockerList(lockers) {
+  if (!Array.isArray(lockers) || lockers.length === 0) {
+    return "";
+  }
+
+  return lockers.map(locker => `S${locker}`).join(", ");
+}
+
 const LOG_EVENT_PRESENTERS = {
   LOCKER_OPENED: log => ({ text: `Odblokowano S${log.locker} kod ${log.code}`, className: "log-success" }),
   INVALID_CODE: log => ({ text: `Błędny kod ${log.code}`, className: "log-error" }),
@@ -88,6 +110,15 @@ const LOG_EVENT_PRESENTERS = {
   REMOTE_RELEASE_ALL_REQUESTED: () => ({ text: "Zwolniono blokadę wszystkich skrytek", className: "log-warning" }),
   RFID_ACCESS_GRANTED: log => ({ text: `Autoryzowany tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
   RFID_ACCESS_DENIED: log => ({ text: `Odrzucony tag RFID${formatLogItemLabel(log)}`, className: "log-error" }),
+  access_selection_started: log => ({ text: `Rozpoczęto wybór skrytki${log.details?.isMaster ? " dla taga master" : ""}`, className: "log-info" }),
+  access_selection_cancelled: () => ({ text: "Anulowano wybór skrytki", className: "log-warning" }),
+  access_selection_timeout: () => ({ text: "Wygasł czas wyboru skrytki", className: "log-warning" }),
+  access_selection_invalid_locker: log => ({ text: `Odrzucono wybór niedostępnej skrytki${log.locker ? ` S${log.locker}` : ""}`, className: "log-error" }),
+  access_selection_open_single: log => ({ text: `Otwarto wybraną skrytkę${log.locker ? ` S${log.locker}` : ""}`, className: "log-success" }),
+  access_selection_open_all: log => ({ text: `Otwarto wszystkie dostępne skrytki${formatLockerList(log.details?.lockers) ? `: ${formatLockerList(log.details?.lockers)}` : ""}`, className: "log-success" }),
+  access_selection_busy: () => ({ text: "Zignorowano kolejny tag podczas aktywnej sesji wyboru", className: "log-warning" }),
+  invalid_selection_key: log => ({ text: `Zignorowano nieprawidłowy klawisz${log.details?.selectionKey ? ` ${log.details.selectionKey}` : ""}`, className: "log-warning" }),
+  access_denied_no_lockers: () => ({ text: "Tag nie ma dostępu do żadnej skrytki", className: "log-error" }),
   RFID_USER_CREATED: () => ({ text: "Dodano użytkownika RFID", className: "log-info" }),
   RFID_USER_UPDATED: () => ({ text: "Zaktualizowano użytkownika RFID", className: "log-info" }),
   RFID_USER_DELETED: () => ({ text: "Usunięto użytkownika RFID", className: "log-warning" }),
@@ -514,7 +545,11 @@ function connectSocket() {
     await loadActiveCodes();
   });
   socket.on("locker-status-changed", async status => {
-    await loadLockers();
+    if (applyLockerStatusUpdate(status)) {
+      renderLockers();
+    } else {
+      await loadLockers();
+    }
     await loadAlerts();
 
     if (selectedLockerDetailsNumber && (!status?.locker || status.locker === selectedLockerDetailsNumber)) {
@@ -1057,6 +1092,78 @@ function describeDetectedItem(data) {
     title: "Przedmiot RFID obecny",
     meta: "System nie otrzymał jeszcze UID tego przedmiotu."
   };
+}
+
+function getLockerItemStatus(locker) {
+  if (locker?.itemStatus) {
+    return locker.itemStatus;
+  }
+
+  if (!locker?.hasTag) {
+    return "missing";
+  }
+
+  if (locker.detectedItemKnown && locker.detectedItemName) {
+    return "known";
+  }
+
+  return "unknown";
+}
+
+function getLockerItemPresentation(locker) {
+  const itemStatus = getLockerItemStatus(locker);
+
+  if (itemStatus === "known") {
+    return {
+      status: "known",
+      stateClass: "known-item",
+      iconClass: "good",
+      label: "Znany przedmiot",
+      value: locker.detectedItemName || locker.itemName || "Zarejestrowany przedmiot",
+      meta: locker.detectedItemType ? getItemTypeLabel(locker.detectedItemType) : "Przedmiot RFID"
+    };
+  }
+
+  if (itemStatus === "missing") {
+    return {
+      status: "missing",
+      stateClass: "missing-item",
+      iconClass: "warn",
+      label: "Stan",
+      value: "Brak klucza",
+      meta: "Czytnik RFID nie wykrywa żadnego taga."
+    };
+  }
+
+  return {
+    status: "unknown",
+    stateClass: "unknown-item",
+    iconClass: "bad",
+    label: "Stan",
+    value: "Obcy przedmiot",
+    meta: locker.detectedTagId ? `UID ${locker.detectedTagId}` : "Nieznany tag RFID"
+  };
+}
+
+function applyLockerStatusUpdate(status) {
+  if (!status?.locker) {
+    return false;
+  }
+
+  const nextLockers = [...lockersData];
+  const index = nextLockers.findIndex(locker => locker.locker === status.locker);
+  if (index >= 0) {
+    nextLockers[index] = {
+      ...nextLockers[index],
+      ...status
+    };
+  } else {
+    nextLockers.push(status);
+  }
+
+  nextLockers.sort((left, right) => left.locker - right.locker);
+  lockersData = nextLockers;
+  return true;
 }
 
 function renderRfidUsers() {
@@ -1769,75 +1876,95 @@ async function generateCode() {
 async function loadLockers() {
   try {
     lockersData = await apiFetch("/lockers");
-    const container = document.getElementById("lockers");
-    container.innerHTML = "";
-
-    const rack = document.createElement("div");
-    rack.className = "lockers-rack";
-
-    lockersData.forEach(l => {
-      const chamber = document.createElement("article");
-      chamber.className = `locker-chamber state-${getLockerSeverity(l)}`;
-
-      const header = document.createElement("div");
-      header.className = "chamber-header";
-
-      const title = document.createElement("h3");
-      title.className = "locker-name";
-      title.textContent = `S${l.locker}`;
-
-      const severity = document.createElement("span");
-      severity.className = "chamber-severity";
-      severity.textContent = getLockerSeverityLabel(l);
-
-      header.appendChild(title);
-      header.appendChild(severity);
-
-      const icons = document.createElement("div");
-      icons.className = "chamber-icons";
-      icons.innerHTML = `
-        <span class="state-icon ${l.hasTag ? "good" : "bad"}" title="Stan klucza"><span>Klucz</span><strong>${l.hasTag ? "obecny" : "brak"}</strong></span>
-        <span class="state-icon ${l.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span>Drzwi</span><strong>${l.isDoorClosed ? "zamknięte" : "otwarte"}</strong></span>
-      `;
-
-      const actions = document.createElement("div");
-      actions.className = "locker-actions";
-
-      const openButton = document.createElement("button");
-      openButton.textContent = `Otwórz`;
-      openButton.addEventListener("click", () => openLocker(l.locker));
-
-      const statusButton = document.createElement("button");
-      statusButton.className = "secondary-button";
-      statusButton.textContent = "Szczegóły";
-      statusButton.addEventListener("click", () => openLockerDetails(l));
-
-      if (canOperateLockers()) {
-        actions.appendChild(openButton);
-      }
-      actions.appendChild(statusButton);
-      chamber.appendChild(header);
-      chamber.appendChild(icons);
-      chamber.appendChild(actions);
-      rack.appendChild(chamber);
-    });
-
-    container.appendChild(rack);
-
-    updateOverviewMetrics();
+    renderLockers();
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
+function renderLockers() {
+  const container = document.getElementById("lockers");
+  container.innerHTML = "";
+
+  const rack = document.createElement("div");
+  rack.className = "lockers-rack";
+
+  lockersData.forEach(locker => {
+    const itemPresentation = getLockerItemPresentation(locker);
+
+    const chamber = document.createElement("article");
+    chamber.className = `locker-chamber state-${getLockerSeverity(locker)}`;
+
+    const header = document.createElement("div");
+    header.className = "chamber-header";
+
+    const title = document.createElement("h3");
+    title.className = "locker-name";
+    title.textContent = `S${locker.locker}`;
+
+    const severity = document.createElement("span");
+    severity.className = "chamber-severity";
+    severity.textContent = getLockerSeverityLabel(locker);
+
+    header.appendChild(title);
+    header.appendChild(severity);
+
+    const itemStatus = document.createElement("div");
+    itemStatus.className = `locker-item-status ${itemPresentation.stateClass}`;
+    itemStatus.innerHTML = `
+      <span class="locker-item-label">${itemPresentation.label}</span>
+      <strong class="locker-item-value">${itemPresentation.value}</strong>
+      <small class="locker-item-meta">${itemPresentation.meta}</small>
+    `;
+
+    const icons = document.createElement("div");
+    icons.className = "chamber-icons";
+    icons.innerHTML = `
+      <span class="state-icon ${itemPresentation.iconClass}" title="Stan klucza"><span>Klucz</span><strong>${itemPresentation.status === "known" ? "znany" : itemPresentation.status === "missing" ? "brak" : "obcy"}</strong></span>
+      <span class="state-icon ${locker.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span>Drzwi</span><strong>${locker.isDoorClosed ? "zamknięte" : "otwarte"}</strong></span>
+    `;
+
+    const actions = document.createElement("div");
+    actions.className = "locker-actions";
+
+    const openButton = document.createElement("button");
+    openButton.textContent = "Otwórz";
+    openButton.addEventListener("click", () => openLocker(locker.locker));
+
+    const statusButton = document.createElement("button");
+    statusButton.className = "secondary-button";
+    statusButton.textContent = "Szczegóły";
+    statusButton.addEventListener("click", () => openLockerDetails(locker));
+
+    if (canOperateLockers()) {
+      actions.appendChild(openButton);
+    }
+    actions.appendChild(statusButton);
+
+    chamber.appendChild(header);
+    chamber.appendChild(itemStatus);
+    chamber.appendChild(icons);
+    chamber.appendChild(actions);
+    rack.appendChild(chamber);
+  });
+
+  container.appendChild(rack);
+  updateOverviewMetrics();
+}
+
 function getLockerSeverity(locker) {
-  if (locker.hasTag && locker.isDoorClosed) {
-    return "ok";
-  }
-  if (!locker.hasTag && !locker.isDoorClosed) {
+  const itemStatus = getLockerItemStatus(locker);
+
+  if (itemStatus === "unknown") {
     return "critical";
   }
-  if (!locker.hasTag) {
+  if (itemStatus === "known" && locker.isDoorClosed) {
+    return "ok";
+  }
+  if (itemStatus === "missing" && !locker.isDoorClosed) {
+    return "critical";
+  }
+  if (itemStatus === "missing") {
     return "warn";
   }
   return "info";
@@ -2376,6 +2503,16 @@ function buildLogDetails(log) {
   const addItem = () => addDetail(details, "Rozpoznany przedmiot", formatLogItemDetails(log));
   const addEmail = () => addDetail(details, "Adres e-mail", log.recipientEmail);
   const addError = () => addDetail(details, "Komunikat błędu", log.errorMessage);
+  const addAccessMask = () => addDetail(details, "Maska dostępnych skrytek", log.details?.accessibleLockersMask, formatLockerMask);
+  const addSelectionKey = () => addDetail(details, "Klawisz wyboru", log.details?.selectionKey);
+  const addUserId = () => addDetail(details, "ID użytkownika RFID", log.details?.userId);
+  const addUserName = () => addDetail(details, "Nazwa użytkownika RFID", log.details?.userName);
+  const addMode = () => {
+    if (typeof log.details?.isMaster === "boolean") {
+      addDetail(details, "Tryb dostępu", log.details.isMaster ? "master" : "użytkownik");
+    }
+  };
+  const addSelectedLockers = () => addDetail(details, "Wybrane skrytki", formatLockerList(log.details?.lockers));
   const addSuccess = () => {
     if (typeof log.success === "boolean") {
       addDetail(details, "Sukces operacji", log.success, formatBoolean);
@@ -2462,6 +2599,50 @@ function buildLogDetails(log) {
     case "RFID_ACCESS_DENIED":
       addTag();
       addItem();
+      addAccessMask();
+      addMode();
+      addUserId();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+    case "access_selection_started":
+    case "access_selection_cancelled":
+    case "access_selection_timeout":
+    case "access_selection_busy":
+    case "invalid_selection_key":
+    case "access_denied_no_lockers":
+      addLocker();
+      addTag();
+      addUserName();
+      addUserId();
+      addAccessMask();
+      addMode();
+      addSelectionKey();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+    case "access_selection_invalid_locker":
+    case "access_selection_open_single":
+      addLocker();
+      addTag();
+      addUserName();
+      addUserId();
+      addAccessMask();
+      addMode();
+      addSelectionKey();
+      addActor();
+      addSource();
+      addSuccess();
+      break;
+    case "access_selection_open_all":
+      addTag();
+      addUserName();
+      addUserId();
+      addAccessMask();
+      addMode();
+      addSelectedLockers();
       addActor();
       addSource();
       addSuccess();

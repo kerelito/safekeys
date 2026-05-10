@@ -35,9 +35,135 @@ const MASTER_RFID_ITEM_TYPES = new Set(["klucz_master", "karta_master"]);
 const DEVICE_HEARTBEAT_TIMEOUT_MS = Number(process.env.DEVICE_HEARTBEAT_TIMEOUT_MS) || 180 * 1000;
 const DEVICE_COMMAND_REDELIVER_AFTER_MS = Number(process.env.DEVICE_COMMAND_REDELIVER_AFTER_MS) || 30 * 1000;
 const DEVICE_COMMAND_DELIVERY_LIMIT = Number(process.env.DEVICE_COMMAND_DELIVERY_LIMIT) || 20;
+const ACCESS_SELECTION_EVENTS = new Set([
+  "access_selection_started",
+  "access_selection_cancelled",
+  "access_selection_timeout",
+  "access_selection_invalid_locker",
+  "access_selection_open_single",
+  "access_selection_open_all",
+  "access_denied_no_lockers",
+  "access_selection_busy",
+  "invalid_selection_key"
+]);
 
 function isMasterRfidItemType(itemType) {
   return MASTER_RFID_ITEM_TYPES.has(itemType);
+}
+
+function buildAccessMask(lockers = []) {
+  return lockers.reduce((mask, locker) => {
+    if (!Number.isInteger(locker) || locker < 1 || locker > ALLOWED_LOCKERS.length) {
+      return mask;
+    }
+
+    return mask | (1 << (locker - 1));
+  }, 0);
+}
+
+function maskToLockers(mask) {
+  const numericMask = Number(mask) & ((1 << ALLOWED_LOCKERS.length) - 1);
+  return ALLOWED_LOCKERS.filter(locker => (numericMask & (1 << (locker - 1))) !== 0);
+}
+
+function normalizeAccessSelectionEvent(value) {
+  const event = normalizeString(value);
+  if (!ACCESS_SELECTION_EVENTS.has(event)) {
+    throw createHttpError(400, "Nieznany typ zdarzenia access selection.");
+  }
+  return event;
+}
+
+function buildAccessSelectionActor(userName, tagId, fallback = "RFID access selection") {
+  const normalizedName = normalizeString(userName, "");
+  const normalizedTagId = normalizeString(tagId, "");
+
+  if (normalizedName && normalizedTagId) {
+    return `${normalizedName} • ${normalizedTagId}`;
+  }
+
+  return normalizedName || normalizedTagId || fallback;
+}
+
+function getLockerItemStatus(locker = {}) {
+  const hasTag = locker.hasTag === true;
+  const detectedItemKnown = typeof locker.detectedItemKnown === "boolean"
+    ? locker.detectedItemKnown
+    : (typeof locker.itemKnown === "boolean" ? locker.itemKnown : null);
+  const detectedItemName = locker.detectedItemName || locker.itemName || null;
+  const detectedTagId = locker.detectedTagId || locker.tagId || locker.tagUid || null;
+
+  if (!hasTag) {
+    return "missing";
+  }
+
+  if (detectedItemKnown === true && detectedItemName) {
+    return "known";
+  }
+
+  if (detectedTagId || detectedItemKnown === false) {
+    return "unknown";
+  }
+
+  return "unknown";
+}
+
+function getLockerItemLabel(locker = {}) {
+  const itemStatus = getLockerItemStatus(locker);
+  const detectedItemName = locker.detectedItemName || locker.itemName || null;
+
+  if (itemStatus === "known" && detectedItemName) {
+    return detectedItemName;
+  }
+
+  if (itemStatus === "missing") {
+    return "Brak klucza";
+  }
+
+  return "Obcy przedmiot";
+}
+
+function buildLockerStatePayload(locker = {}) {
+  const lockerNumber = Number(locker.locker || locker.lockerId);
+  const hasTag = locker.hasTag === true;
+  const isDoorClosed = locker.isDoorClosed !== false;
+  const detectedTagId = locker.detectedTagId || locker.tagId || locker.tagUid || null;
+  const detectedItemName = locker.detectedItemName || locker.itemName || null;
+  const detectedItemType = locker.detectedItemType || locker.itemType || null;
+  const detectedItemKnown = typeof locker.detectedItemKnown === "boolean"
+    ? locker.detectedItemKnown
+    : (typeof locker.itemKnown === "boolean" ? locker.itemKnown : null);
+  const detectedAt = locker.detectedAt || null;
+  const itemStatus = getLockerItemStatus({
+    hasTag,
+    detectedTagId,
+    detectedItemName,
+    detectedItemKnown
+  });
+
+  return {
+    locker: lockerNumber,
+    lockerId: lockerNumber,
+    hasTag,
+    isDoorClosed,
+    detectedTagId,
+    detectedItemName,
+    detectedItemType,
+    detectedItemKnown,
+    detectedAt,
+    tagUid: detectedTagId,
+    itemName: detectedItemName,
+    itemType: detectedItemType,
+    itemKnown: detectedItemKnown,
+    itemStatus,
+    itemLabel: getLockerItemLabel({
+      hasTag,
+      detectedTagId,
+      detectedItemName,
+      detectedItemKnown
+    }),
+    source: locker.source || null
+  };
 }
 
 function parseGenerateCodeInput(lockerOrPayload, hours) {
@@ -421,6 +547,17 @@ class LockerService extends EventEmitter {
           break;
         }
 
+        case "access.selection": {
+          const selectionResult = await this.handleAccessSelectionEvent(envelope.payload || {}, {
+            source: "device",
+            actor: deviceId
+          });
+          response = buildAck(envelope, {
+            accessSelection: selectionResult
+          });
+          break;
+        }
+
         case "command.ack": {
           const ackPayload = normalizeCommandAckPayload(envelope.payload || {});
           if (!ackPayload.commandId) {
@@ -709,24 +846,20 @@ class LockerService extends EventEmitter {
         });
       }
 
-      if (statusChanged || itemChanged) {
-        lockerEvents.push({
+      if (statusChanged || itemChanged || doorChanged) {
+        lockerEvents.push(buildLockerStatePayload({
           locker,
           hasTag: item.hasTag,
-          tagId: nextItem?.tagId || null,
-          itemName: nextItem?.itemName || null,
-          itemType: nextItem?.itemType || null,
-          itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+          isDoorClosed: hasDoorSignal
+            ? isDoorClosed
+            : (existingLocker ? existingLocker.isDoorClosed !== false : true),
+          detectedTagId: nextItem?.tagId || null,
+          detectedItemName: nextItem?.itemName || null,
+          detectedItemType: nextItem?.itemType || null,
+          detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+          detectedAt: item.hasTag ? now : null,
           source
-        });
-      }
-
-      if (doorChanged) {
-        lockerEvents.push({
-          locker,
-          isDoorClosed,
-          source
-        });
+        }));
       }
 
       storedLockers.set(locker, {
@@ -862,6 +995,49 @@ class LockerService extends EventEmitter {
       itemName: item.name,
       itemType: item.itemType,
       itemKnown: true
+    };
+  }
+
+  async resolveRfidAccess(tagId) {
+    const normalizedTagId = assertValidTagId(tagId);
+    const user = await RfidUser.findOne({ tagId: normalizedTagId, active: true }).lean();
+    const item = await this.describeDetectedItem(normalizedTagId);
+
+    if (!user && item.itemKnown && isMasterRfidItemType(item.itemType)) {
+      return {
+        valid: true,
+        isMaster: true,
+        item,
+        user: {
+          id: null,
+          name: item.itemName || "Master RFID",
+          tagId: item.tagId,
+          role: "rfid-master"
+        },
+        allowedLockers: [...ALLOWED_LOCKERS]
+      };
+    }
+
+    if (!user) {
+      return {
+        valid: false,
+        isMaster: false,
+        item,
+        user: null,
+        allowedLockers: []
+      };
+    }
+
+    return {
+      valid: true,
+      isMaster: false,
+      item,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        tagId: user.tagId
+      },
+      allowedLockers: [...user.allowedLockers]
     };
   }
 
@@ -1121,7 +1297,7 @@ class LockerService extends EventEmitter {
 
     return ALLOWED_LOCKERS.map(num => {
       const found = data.find(item => item.locker === num);
-      return {
+      return buildLockerStatePayload({
         locker: num,
         hasTag: found ? found.hasTag : false,
         isDoorClosed: found ? found.isDoorClosed !== false : true,
@@ -1130,7 +1306,7 @@ class LockerService extends EventEmitter {
         detectedItemType: found?.detectedItemType || null,
         detectedItemKnown: typeof found?.detectedItemKnown === "boolean" ? found.detectedItemKnown : null,
         detectedAt: found?.detectedAt || null
-      };
+      });
     });
   }
 
@@ -1212,15 +1388,17 @@ class LockerService extends EventEmitter {
       });
     }
 
-    this.emit("locker-status-changed", {
+    this.emit("locker-status-changed", buildLockerStatePayload({
       locker,
       hasTag,
-      tagId: nextItem?.tagId || null,
-      itemName: nextItem?.itemName || null,
-      itemType: nextItem?.itemType || null,
-      itemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+      isDoorClosed: found.isDoorClosed !== false,
+      detectedTagId: nextItem?.tagId || null,
+      detectedItemName: nextItem?.itemName || null,
+      detectedItemType: nextItem?.itemType || null,
+      detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+      detectedAt: found.detectedAt || null,
       source: context.source || "rfid"
-    });
+    }));
 
     return { success: true };
   }
@@ -1252,11 +1430,17 @@ class LockerService extends EventEmitter {
       });
     }
 
-    this.emit("locker-status-changed", {
+    this.emit("locker-status-changed", buildLockerStatePayload({
       locker,
+      hasTag: found.hasTag === true,
       isDoorClosed,
+      detectedTagId: found.detectedTagId || null,
+      detectedItemName: found.detectedItemName || null,
+      detectedItemType: found.detectedItemType || null,
+      detectedItemKnown: typeof found.detectedItemKnown === "boolean" ? found.detectedItemKnown : null,
+      detectedAt: found.detectedAt || null,
       source: context.source || "contactron"
-    });
+    }));
 
     return { success: true };
   }
@@ -1309,6 +1493,19 @@ class LockerService extends EventEmitter {
       actionId: action.id,
       locker
     };
+  }
+
+  async openMultipleLockers(lockers = [], context = {}) {
+    const normalizedLockers = [...new Set(lockers.map(locker => Number(locker)))];
+    if (normalizedLockers.length === 0) {
+      return [];
+    }
+
+    const actions = [];
+    for (const locker of normalizedLockers) {
+      actions.push(await this.openLocker(locker, context));
+    }
+    return actions;
   }
 
   async releaseAllLockers(context = {}) {
@@ -1963,94 +2160,157 @@ class LockerService extends EventEmitter {
   }
 
   async verifyRfidTag(tagId, context = {}) {
-    const normalizedTagId = assertValidTagId(tagId);
-    const user = await RfidUser.findOne({ tagId: normalizedTagId, active: true });
-    const item = await this.describeDetectedItem(normalizedTagId);
+    const access = await this.resolveRfidAccess(tagId);
 
-    if (!user && item.itemKnown && isMasterRfidItemType(item.itemType)) {
-      const openedLockers = [];
-
-      for (const locker of ALLOWED_LOCKERS) {
-        await this.openLocker(locker, {
-          source: context.source || "rfid-master",
-          actor: `${item.itemName || "Master RFID"} • ${item.tagId}`
-        });
-        openedLockers.push(locker);
-      }
-
-      await this.createLog({
-        event: "RFID_ACCESS_GRANTED",
-        source: context.source || "rfid-master",
-        actor: `${item.itemName || "Master RFID"} • ${item.tagId}`,
-        success: true,
-        tagId: item.tagId,
-        itemName: item.itemName,
-        itemType: item.itemType,
-        itemKnown: true
-      });
-
-      return {
-        valid: true,
-        item,
-        user: {
-          id: null,
-          name: item.itemName || "Master RFID",
-          tagId: item.tagId,
-          role: "rfid-master"
-        },
-        allowedLockers: [...ALLOWED_LOCKERS],
-        openedLockers
-      };
-    }
-
-    if (!user) {
+    if (!access.valid) {
       await this.createLog({
         event: "RFID_ACCESS_DENIED",
         source: context.source || "rfid-user",
-        actor: normalizedTagId,
-        tagId: item.tagId,
-        itemName: item.itemName,
-        itemType: item.itemType,
-        itemKnown: item.itemKnown
+        actor: assertValidTagId(tagId),
+        tagId: access.item.tagId,
+        itemName: access.item.itemName,
+        itemType: access.item.itemType,
+        itemKnown: access.item.itemKnown
       });
 
       return {
         valid: false,
-        item
+        item: access.item,
+        isMaster: false,
+        allowedLockers: []
       };
     }
 
-    const openedLockers = [];
+    const accessMask = buildAccessMask(access.allowedLockers);
+    const source = context.source || (access.isMaster ? "rfid-master" : "rfid-user");
+    const actor = buildAccessSelectionActor(access.user?.name, access.user?.tagId);
 
-    for (const locker of user.allowedLockers) {
-      await this.openLocker(locker, {
-        source: context.source || "rfid-user",
-        actor: `${user.name} • ${user.tagId}`
+    if (access.allowedLockers.length === 0) {
+      await this.createLog({
+        event: "access_denied_no_lockers",
+        source,
+        actor,
+        success: false,
+        tagId: access.item.tagId,
+        itemName: access.item.itemName,
+        itemType: access.item.itemType,
+        itemKnown: access.item.itemKnown,
+        details: {
+          userId: access.user?.id || null,
+          accessibleLockersMask: accessMask,
+          isMaster: access.isMaster
+        }
       });
-      openedLockers.push(locker);
+    } else {
+      await this.createLog({
+        event: "RFID_ACCESS_GRANTED",
+        source,
+        actor,
+        success: true,
+        tagId: access.item.tagId,
+        itemName: access.item.itemName,
+        itemType: access.item.itemType,
+        itemKnown: access.item.itemKnown,
+        details: {
+          userId: access.user?.id || null,
+          accessibleLockersMask: accessMask,
+          isMaster: access.isMaster
+        }
+      });
     }
-
-    await this.createLog({
-      event: "RFID_ACCESS_GRANTED",
-      source: context.source || "rfid-user",
-      actor: `${user.name} • ${user.tagId}`,
-      success: true,
-      tagId: item.tagId,
-      itemName: item.itemName,
-      itemType: item.itemType,
-      itemKnown: item.itemKnown
-    });
 
     return {
       valid: true,
-      item,
-      user: {
-        id: user._id.toString(),
-        name: user.name,
-        tagId: user.tagId
-      },
-      allowedLockers: [...user.allowedLockers],
-      openedLockers
+      item: access.item,
+      user: access.user,
+      isMaster: access.isMaster,
+      allowedLockers: [...access.allowedLockers],
+      openedLockers: []
+    };
+  }
+
+  async handleAccessSelectionEvent(payload = {}, context = {}) {
+    const event = normalizeAccessSelectionEvent(payload.event);
+    const tagId = normalizeString(payload.tagId, null);
+    const userId = normalizeString(payload.userId, null);
+    const userName = normalizeString(payload.userName, null);
+    const source = context.source || "device";
+    const actor = buildAccessSelectionActor(userName, tagId, context.actor || "device");
+    const accessibleLockersMask = Number(payload.accessibleLockersMask) & ((1 << ALLOWED_LOCKERS.length) - 1);
+    const locker = payload.locker == null || payload.locker === ""
+      ? null
+      : assertValidLocker(Number(payload.locker));
+    const selectionKey = normalizeString(payload.selectionKey, null);
+    const isMaster = payload.isMaster === true;
+
+    const baseLogPayload = {
+      event,
+      source,
+      actor,
+      tagId,
+      success: !["access_selection_invalid_locker", "access_denied_no_lockers"].includes(event),
+      details: {
+        userId,
+        userName,
+        accessibleLockersMask,
+        isMaster,
+        selectionKey
+      }
+    };
+
+    if (locker != null) {
+      baseLogPayload.locker = locker;
+    }
+
+    if (event === "access_selection_open_single") {
+      if (locker == null || (accessibleLockersMask & (1 << (locker - 1))) === 0) {
+        throw createHttpError(403, "Wybrana skrytka nie jest dostepna w tej sesji.");
+      }
+
+      const log = await this.createLog(baseLogPayload);
+      const action = await this.openLocker(locker, {
+        source,
+        actor
+      });
+
+      return {
+        logged: true,
+        logId: log._id.toString(),
+        locker,
+        actionIds: [action.actionId]
+      };
+    }
+
+    if (event === "access_selection_open_all") {
+      const lockers = maskToLockers(accessibleLockersMask);
+      if (lockers.length === 0) {
+        throw createHttpError(403, "Brak skrytek do otwarcia w tej sesji.");
+      }
+
+      const log = await this.createLog({
+        ...baseLogPayload,
+        details: {
+          ...baseLogPayload.details,
+          lockers
+        }
+      });
+      const actions = await this.openMultipleLockers(lockers, {
+        source,
+        actor
+      });
+
+      return {
+        logged: true,
+        logId: log._id.toString(),
+        lockers,
+        actionIds: actions.map(action => action.actionId)
+      };
+    }
+
+    const log = await this.createLog(baseLogPayload);
+    return {
+      logged: true,
+      logId: log._id.toString()
     };
   }
 

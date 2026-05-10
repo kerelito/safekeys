@@ -105,6 +105,9 @@ static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS = 8000;
+static const unsigned long ACCESS_SELECTION_TIMEOUT_MS = 60000;
+static const unsigned long ACCESS_SELECTION_DENIED_BLINK_MS = 500;
+static const unsigned long ACCESS_SELECTION_ALLOWED_FRAME_MS = 80;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
@@ -221,6 +224,24 @@ struct TagAssignmentMode {
   unsigned long animationFrame;
 };
 
+enum class AccessSelectionState : uint8_t {
+  ACCESS_SELECTION_INACTIVE,
+  ACCESS_SELECTION_ACTIVE
+};
+
+struct AccessSelectionSession {
+  AccessSelectionState state;
+  unsigned long startedMs;
+  unsigned long timeoutMs;
+  uint32_t sessionId;
+  bool isMaster;
+  uint8_t accessibleLockersMask;
+  String tagId;
+  String userId;
+  String userName;
+  String lastBusyTagId;
+};
+
 enum class NetworkJobType : uint8_t {
   Heartbeat,
   LockerStatus,
@@ -229,6 +250,7 @@ enum class NetworkJobType : uint8_t {
   DeviceActionsPoll,
   VerifyCode,
   VerifyMasterTag,
+  AccessSelectionEvent,
   TagAssignmentResult
 };
 
@@ -267,6 +289,7 @@ struct NetworkResult {
   bool requestOk;
   bool boolValue1;
   bool boolValue2;
+  bool boolValue3;
   uint8_t lockerNumber;
   uint8_t count;
   long numberValue;
@@ -343,6 +366,18 @@ bool statusLedBaseEnabled = false;
 StatusLedEffect statusLedEffect = { false, false, false, 0, 0, 0, 0 };
 CodeResultFlashEffect codeResultFlash = { false, false, 0, 0, 0 };
 TagAssignmentMode tagAssignmentMode = { false, "", "", "", 0, 0 };
+AccessSelectionSession accessSelection = {
+  AccessSelectionState::ACCESS_SELECTION_INACTIVE,
+  0,
+  ACCESS_SELECTION_TIMEOUT_MS,
+  0,
+  false,
+  0,
+  "",
+  "",
+  "",
+  ""
+};
 bool visualStateDirty = true;
 unsigned long lastRfidServiceMs = 0;
 uint8_t nextRfidReaderIndex = 0;
@@ -433,9 +468,11 @@ bool sendDeviceCommandAckWs(const NetworkJob& job);
 bool sendTagAssignmentResultWs(const NetworkJob& job);
 bool sendVerifyCodeWs(const NetworkJob& job);
 bool sendVerifyMasterTagWs(const NetworkJob& job);
+bool sendAccessSelectionEventWs(const NetworkJob& job);
 bool postDeviceStateBatch(const NetworkJob& job);
 bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postCommandAck(const NetworkJob& job);
+bool postAccessSelectionEvent(const NetworkJob& job);
 bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
 uint32_t nextDeviceSequence();
 void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence);
@@ -465,6 +502,7 @@ void maybePollDeviceActions(unsigned long now);
 bool maybeReportLockerStatuses(unsigned long now);
 bool maybeQueueDeviceStateBatch(unsigned long now);
 void serviceLockerInputChanges(unsigned long now);
+void serviceAccessSelection(unsigned long now);
 void processEnteredCode(const String& code);
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
 bool sendHeartbeat();
@@ -499,7 +537,13 @@ void configureLockerInputs();
 bool readInputPin(const LockerInputPin& config);
 LockerState readLockerState(uint8_t lockerIndex);
 bool isLockerComplete(const LockerState& state);
+bool hasAccessToLocker(uint8_t mask, int lockerNumber);
+uint8_t lockerNumberToMask(int lockerNumber);
 void updateVisualState();
+void updateAccessSelectionLeds();
+void renderAllowedSegmentAnimation(uint8_t lockerIndex);
+void renderDeniedSegmentBlink(uint8_t lockerIndex);
+void restoreNormalLedMode();
 void renderLockerStatus();
 void renderCodeEntry();
 void renderWifiLoadingFrame(uint8_t frameIndex);
@@ -515,6 +559,13 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
 RfidScanResult readTagFromReader(RfidReaderRuntime& runtime);
 String uidToString(const MFRC522::Uid& uid);
 void debugPrintReaderChipVersion(const RfidReaderRuntime& runtime);
+void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool isMaster, const String& userId = "", const String& userName = "");
+void cancelAccessSelection(const char* reason);
+void finishAccessSelection(const char* reason);
+void handleAccessSelectionKey(char key);
+bool openSelectedLocker(int lockerNumber);
+bool openAllAccessibleLockers();
+bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber = 0);
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName);
 void stopTagAssignmentMode();
 void renderTagAssignmentFrame(uint8_t frameIndex);
@@ -556,6 +607,10 @@ uint32_t colorBlue(uint8_t brightness = EFFECT_BRIGHTNESS) {
 
 uint32_t colorYellow(uint8_t brightness = EFFECT_BRIGHTNESS) {
   return strip.Color(brightness, brightness, 0);
+}
+
+uint32_t colorPurple(uint8_t brightness = EFFECT_BRIGHTNESS) {
+  return strip.Color(brightness, 0, brightness);
 }
 
 void setup() {
@@ -621,6 +676,10 @@ void reserveStringBuffers() {
   tagAssignmentMode.assignmentId.reserve(32);
   tagAssignmentMode.tagId.reserve(16);
   tagAssignmentMode.itemName.reserve(64);
+  accessSelection.tagId.reserve(24);
+  accessSelection.userId.reserve(32);
+  accessSelection.userName.reserve(64);
+  accessSelection.lastBusyTagId.reserve(24);
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     lockerReaders[i].stableUid.reserve(24);
@@ -811,6 +870,19 @@ void networkTaskMain(void* parameter) {
         break;
       }
 
+      case NetworkJobType::AccessSelectionEvent: {
+        bool requestOk = sendAccessSelectionEventWs(job);
+        if (!requestOk && shouldUseHttpsFallback(millis())) {
+          requestOk = postAccessSelectionEvent(job);
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        } else {
+          noteNetworkFailure();
+        }
+        break;
+      }
+
       case NetworkJobType::TagAssignmentResult: {
         bool requestOk = sendTagAssignmentResultWs(job);
         if (!requestOk) {
@@ -856,6 +928,7 @@ void loop() {
   serviceStatusLed(now);
   serviceWifiConnection(now);
   serviceCodeResultFlash(now);
+  serviceAccessSelection(now);
   handleSerialDebug();
   if (ENABLE_KEYPAD && keypadReady) {
     handleKeypad();
@@ -1279,21 +1352,22 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
       const JsonObject verification = doc["tagVerification"];
       if (!verification.isNull()) {
         result.boolValue1 = ok && (verification["valid"] | false);
+        result.boolValue3 = verification["isMaster"] | false;
         const JsonObject item = verification["item"];
         if (!item.isNull()) {
           result.boolValue2 = item["itemKnown"] | false;
           copyCStringToBuffer(item["itemName"] | "", result.text3, sizeof(result.text3));
-          copyCStringToBuffer(item["itemType"] | "", result.text4, sizeof(result.text4));
         }
 
         const JsonObject user = verification["user"];
         if (!user.isNull()) {
           copyCStringToBuffer(user["name"] | "unknown", result.text2, sizeof(result.text2));
+          copyCStringToBuffer(user["id"] | "", result.text4, sizeof(result.text4));
         }
 
-        const JsonArray openedLockers = verification["openedLockers"];
-        if (!openedLockers.isNull()) {
-          for (JsonVariant value : openedLockers) {
+        const JsonArray allowedLockers = verification["allowedLockers"];
+        if (!allowedLockers.isNull()) {
+          for (JsonVariant value : allowedLockers) {
             if (result.count >= LOCKER_COUNT) {
               break;
             }
@@ -1717,6 +1791,11 @@ void handleKeypad() {
   Serial.printf("Key pressed: %c\n", key);
   pulseLed(30);
 
+  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    handleAccessSelectionKey(key);
+    return;
+  }
+
   if (key >= '0' && key <= '9') {
     if (enteredCode.length() >= CODE_LENGTH) {
       Serial.println("Buffer already has 4 digits. Press # to submit or * to clear.");
@@ -2052,31 +2131,36 @@ void handleNetworkResult(const NetworkResult& result) {
       }
 
       if (!result.boolValue1) {
-        Serial.printf("Master RFID denied for UID %s\n", result.text1);
-        if (result.boolValue2 && strlen(result.text3) > 0) {
-          Serial.printf("Denied item: %s (%s)\n", result.text3, result.text4);
-        }
+        Serial.printf("RFID access denied for UID %s\n", result.text1);
         blinkLed(4, 90, 80);
         break;
       }
 
-      Serial.printf("Master RFID granted for %s, UID=%s\n", result.text2, result.text1);
-      Serial.print("Opened lockers: ");
-      if (result.count == 0) {
-        Serial.println("(none)");
-      } else {
-        for (uint8_t i = 0; i < result.count && i < LOCKER_COUNT; i += 1) {
-          Serial.printf("S%u ", result.lockers[i]);
-        }
-        Serial.println();
+      uint8_t accessibleMask = 0;
+      for (uint8_t i = 0; i < result.count && i < LOCKER_COUNT; i += 1) {
+        accessibleMask |= lockerNumberToMask(result.lockers[i]);
       }
 
-      if (result.boolValue2 && strlen(result.text3) > 0) {
-        Serial.printf("Recognized item: %s (%s)\n", result.text3, result.text4);
-      } else {
-        Serial.printf("Recognized foreign UID: %s\n", result.text1);
+      if (accessibleMask == 0) {
+        Serial.printf("RFID recognized for UID %s but no lockers are accessible.\n", result.text1);
+        blinkLed(4, 90, 80);
+        break;
       }
 
+      Serial.printf(
+        "RFID access granted for %s, UID=%s, mask=0x%02X, mode=%s\n",
+        strlen(result.text2) > 0 ? result.text2 : "(unknown)",
+        result.text1,
+        accessibleMask,
+        result.boolValue3 ? "master" : "user"
+      );
+      startAccessSelection(
+        String(result.text1),
+        accessibleMask,
+        result.boolValue3,
+        String(result.text4),
+        String(result.text2)
+      );
       blinkLed(2, 220, 120);
       break;
   }
@@ -2160,6 +2244,7 @@ bool isPriorityNetworkJob(const NetworkJob& job) {
     case NetworkJobType::CommandAck:
     case NetworkJobType::VerifyCode:
     case NetworkJobType::VerifyMasterTag:
+    case NetworkJobType::AccessSelectionEvent:
       return true;
 
     case NetworkJobType::Heartbeat:
@@ -2876,6 +2961,78 @@ bool sendVerifyMasterTagWs(const NetworkJob& job) {
   return sent;
 }
 
+bool sendAccessSelectionEventWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "accesssel", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "access.selection";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["event"] = job.text3;
+  payload["tagId"] = job.text1;
+  payload["isMaster"] = job.boolValue;
+  payload["accessibleLockersMask"] = static_cast<uint8_t>(job.numberValue & 0xFF);
+  if (strlen(job.text2) > 0) {
+    payload["userId"] = job.text2;
+  }
+  if (strlen(job.text4) > 0) {
+    payload["userName"] = job.text4;
+  }
+  if (job.lockerNumber > 0) {
+    payload["locker"] = job.lockerNumber;
+  }
+
+  char body[512];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] access selection payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[WS] access selection %s event=%s uid=%s\n", sent ? "sent" : "failed", job.text3, job.text1);
+  return sent;
+}
+
+bool postAccessSelectionEvent(const NetworkJob& job) {
+  JsonDocument doc;
+  doc["type"] = "access.selection";
+  doc["deviceId"] = DEVICE_ID;
+  doc["seq"] = nextDeviceSequence();
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["event"] = job.text3;
+  payload["tagId"] = job.text1;
+  payload["isMaster"] = job.boolValue;
+  payload["accessibleLockersMask"] = static_cast<uint8_t>(job.numberValue & 0xFF);
+  if (strlen(job.text2) > 0) {
+    payload["userId"] = job.text2;
+  }
+  if (strlen(job.text4) > 0) {
+    payload["userName"] = job.text4;
+  }
+  if (job.lockerNumber > 0) {
+    payload["locker"] = job.lockerNumber;
+  }
+
+  char messageBody[512];
+  const size_t messageLen = serializeJson(doc, messageBody, sizeof(messageBody));
+  if (messageLen == 0 || messageLen >= sizeof(messageBody)) {
+    Serial.println("Access selection HTTPS payload too large.");
+    return false;
+  }
+
+  return postDeviceSyncMessage(messageBody, "/device/sync access.selection");
+}
+
 bool postDeviceStateBatch(const NetworkJob& job) {
   const uint32_t sequence = nextDeviceSequence();
   char messageId[64];
@@ -3233,6 +3390,10 @@ void printRfidSnapshot() {
 }
 
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName) {
+  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    finishAccessSelection("tag_assignment_override");
+  }
+
   tagAssignmentMode.active = true;
   tagAssignmentMode.assignmentId = assignmentId;
   tagAssignmentMode.tagId = tagId;
@@ -3379,6 +3540,183 @@ bool isLockerComplete(const LockerState& state) {
   return state.tagPresent && state.doorClosed && state.lockClosed;
 }
 
+bool hasAccessToLocker(uint8_t mask, int lockerNumber) {
+  return (mask & lockerNumberToMask(lockerNumber)) != 0;
+}
+
+uint8_t lockerNumberToMask(int lockerNumber) {
+  if (lockerNumber < 1 || lockerNumber > LOCKER_COUNT) {
+    return 0;
+  }
+
+  return static_cast<uint8_t>(1U << (lockerNumber - 1));
+}
+
+void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool isMaster, const String& userId, const String& userName) {
+  accessSelection.state = AccessSelectionState::ACCESS_SELECTION_ACTIVE;
+  accessSelection.startedMs = millis();
+  accessSelection.timeoutMs = ACCESS_SELECTION_TIMEOUT_MS;
+  accessSelection.sessionId += 1;
+  accessSelection.isMaster = isMaster;
+  accessSelection.accessibleLockersMask = accessibleLockersMask;
+  accessSelection.tagId = uid;
+  accessSelection.userId = userId;
+  accessSelection.userName = userName;
+  accessSelection.lastBusyTagId = "";
+  enteredCode = "";
+  masterReaderRuntime.lastTriggeredUid = uid;
+
+  Serial.printf(
+    "Access selection started. session=%lu uid=%s mask=0x%02X mode=%s\n",
+    static_cast<unsigned long>(accessSelection.sessionId),
+    uid.c_str(),
+    accessibleLockersMask,
+    isMaster ? "master" : "user"
+  );
+
+  queueAccessSelectionEvent("access_selection_started");
+  markVisualStateDirty();
+  updateVisualState();
+}
+
+void cancelAccessSelection(const char* reason) {
+  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    return;
+  }
+
+  if (reason != nullptr && strlen(reason) > 0) {
+    queueAccessSelectionEvent(reason);
+  }
+
+  finishAccessSelection(reason);
+}
+
+void finishAccessSelection(const char* reason) {
+  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    return;
+  }
+
+  Serial.printf(
+    "Access selection finished. session=%lu reason=%s\n",
+    static_cast<unsigned long>(accessSelection.sessionId),
+    reason != nullptr && strlen(reason) > 0 ? reason : "(none)"
+  );
+
+  accessSelection.state = AccessSelectionState::ACCESS_SELECTION_INACTIVE;
+  accessSelection.startedMs = 0;
+  accessSelection.timeoutMs = ACCESS_SELECTION_TIMEOUT_MS;
+  accessSelection.isMaster = false;
+  accessSelection.accessibleLockersMask = 0;
+  accessSelection.tagId = "";
+  accessSelection.userId = "";
+  accessSelection.userName = "";
+  accessSelection.lastBusyTagId = "";
+
+  restoreNormalLedMode();
+}
+
+void serviceAccessSelection(unsigned long now) {
+  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    return;
+  }
+
+  if (now - accessSelection.startedMs >= accessSelection.timeoutMs) {
+    cancelAccessSelection("access_selection_timeout");
+  }
+}
+
+void handleAccessSelectionKey(char key) {
+  if (key >= '1' && key <= '3') {
+    openSelectedLocker(static_cast<int>(key - '0'));
+    return;
+  }
+
+  if (key == '*') {
+    cancelAccessSelection("access_selection_cancelled");
+    blinkLed(1, 80, 80);
+    return;
+  }
+
+  if (key == '#') {
+    openAllAccessibleLockers();
+    return;
+  }
+
+  Serial.printf("Ignored invalid access selection key: %c\n", key);
+  queueAccessSelectionEvent("invalid_selection_key");
+  blinkLed(2, 60, 60);
+}
+
+bool openSelectedLocker(int lockerNumber) {
+  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    return false;
+  }
+
+  if (!hasAccessToLocker(accessSelection.accessibleLockersMask, lockerNumber)) {
+    Serial.printf("Access selection rejected locker S%d for UID %s\n", lockerNumber, accessSelection.tagId.c_str());
+    queueAccessSelectionEvent("access_selection_invalid_locker", static_cast<uint8_t>(lockerNumber));
+    blinkLed(3, 70, 70);
+    return false;
+  }
+
+  if (!queueAccessSelectionEvent("access_selection_open_single", static_cast<uint8_t>(lockerNumber))) {
+    blinkLed(4, 70, 70);
+    return false;
+  }
+
+  Serial.printf("Access selection opening locker S%d for UID %s\n", lockerNumber, accessSelection.tagId.c_str());
+  finishAccessSelection("access_selection_open_single");
+  blinkLed(2, 220, 120);
+  return true;
+}
+
+bool openAllAccessibleLockers() {
+  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    return false;
+  }
+
+  if (accessSelection.accessibleLockersMask == 0) {
+    blinkLed(4, 70, 70);
+    return false;
+  }
+
+  if (!queueAccessSelectionEvent("access_selection_open_all")) {
+    blinkLed(4, 70, 70);
+    return false;
+  }
+
+  Serial.printf("Access selection opening all accessible lockers. uid=%s mask=0x%02X\n",
+    accessSelection.tagId.c_str(),
+    accessSelection.accessibleLockersMask
+  );
+  finishAccessSelection("access_selection_open_all");
+  blinkLed(3, 180, 90);
+  return true;
+}
+
+bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber) {
+  if (eventName == nullptr || strlen(eventName) == 0) {
+    return false;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::AccessSelectionEvent;
+  job.lockerNumber = lockerNumber;
+  job.boolValue = accessSelection.isMaster;
+  job.numberValue = accessSelection.accessibleLockersMask;
+  copyStringToBuffer(accessSelection.tagId, job.text1, sizeof(job.text1));
+  copyStringToBuffer(accessSelection.userId, job.text2, sizeof(job.text2));
+  copyCStringToBuffer(eventName, job.text3, sizeof(job.text3));
+  copyStringToBuffer(accessSelection.userName, job.text4, sizeof(job.text4));
+
+  if (!enqueueNetworkJob(job)) {
+    Serial.printf("Failed to queue access selection event: %s\n", eventName);
+    return false;
+  }
+
+  return true;
+}
+
 void updateVisualState() {
   if (codeResultFlash.active || wifiConnectInProgress) {
     return;
@@ -3390,6 +3728,11 @@ void updateVisualState() {
       lastTagAssignmentFrame = frame;
       renderTagAssignmentFrame(frame);
     }
+    return;
+  }
+
+  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+    updateAccessSelectionLeds();
     return;
   }
 
@@ -3408,6 +3751,58 @@ void updateVisualState() {
 
 void markVisualStateDirty() {
   visualStateDirty = true;
+}
+
+void updateAccessSelectionLeds() {
+  clearStrip();
+
+  for (uint8_t lockerIndex = 0; lockerIndex < LOCKER_COUNT; lockerIndex += 1) {
+    if (hasAccessToLocker(accessSelection.accessibleLockersMask, lockerIndex + 1)) {
+      renderAllowedSegmentAnimation(lockerIndex);
+    } else {
+      renderDeniedSegmentBlink(lockerIndex);
+    }
+  }
+
+  strip.show();
+}
+
+void renderAllowedSegmentAnimation(uint8_t lockerIndex) {
+  const uint16_t start = lockerIndex * LEDS_PER_LOCKER;
+  const uint16_t span = LEDS_PER_LOCKER;
+  const uint16_t cycleLength = static_cast<uint16_t>((span - 1) * 2);
+  const uint16_t frame = static_cast<uint16_t>((millis() / ACCESS_SELECTION_ALLOWED_FRAME_MS) % cycleLength);
+  const uint16_t localPosition = frame < span ? frame : (cycleLength - frame);
+
+  for (uint8_t offset = 0; offset < 4; offset += 1) {
+    if (localPosition < offset) {
+      break;
+    }
+
+    const uint16_t ledIndex = start + localPosition - offset;
+    const uint8_t brightness = offset == 0
+      ? 96
+      : (offset == 1 ? 64 : (offset == 2 ? 36 : 18));
+    strip.setPixelColor(ledIndex, colorPurple(brightness));
+  }
+}
+
+void renderDeniedSegmentBlink(uint8_t lockerIndex) {
+  const bool visible = ((millis() / ACCESS_SELECTION_DENIED_BLINK_MS) % 2) == 0;
+  if (!visible) {
+    return;
+  }
+
+  const uint16_t start = lockerIndex * LEDS_PER_LOCKER;
+  const uint16_t end = start + LEDS_PER_LOCKER;
+  for (uint16_t led = start; led < end; led += 1) {
+    strip.setPixelColor(led, colorRed(EFFECT_BRIGHTNESS));
+  }
+}
+
+void restoreNormalLedMode() {
+  markVisualStateDirty();
+  updateVisualState();
 }
 
 void renderLockerStatus() {
@@ -3683,6 +4078,19 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         }
       } else if (runtime.stableUid.length() > 0 && runtime.stableUid != runtime.lastTriggeredUid) {
         if (masterTagVerificationPending) {
+          return;
+        }
+
+        if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+          if (runtime.stableUid != accessSelection.tagId && runtime.stableUid != accessSelection.lastBusyTagId) {
+            accessSelection.lastBusyTagId = runtime.stableUid;
+            Serial.printf("Access selection busy. Ignoring tag UID %s while session for %s is active.\n",
+              runtime.stableUid.c_str(),
+              accessSelection.tagId.c_str()
+            );
+            queueAccessSelectionEvent("access_selection_busy");
+            blinkLed(2, 60, 60);
+          }
           return;
         }
 
