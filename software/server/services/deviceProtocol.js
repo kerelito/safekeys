@@ -84,6 +84,7 @@ module.exports = {
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
+  normalizeString,
   normalizeDeviceId,
   normalizeMessageId,
   normalizeSequence

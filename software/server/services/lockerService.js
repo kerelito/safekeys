@@ -26,6 +26,7 @@ const {
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
+  normalizeString,
   normalizeDeviceId,
   normalizeMessageId,
   normalizeSequence

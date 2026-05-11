@@ -40,8 +40,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "NETIASPOT-2.4GHz-U2ut";
-static const char* WIFI_PASSWORD = "nqdrusJ9hYST";
+static const char* WIFI_SSID = "iPhone (Karol)";
+static const char* WIFI_PASSWORD = "123456789";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
