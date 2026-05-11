@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildAck,
+  buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
@@ -86,6 +87,44 @@ test("builds protocol ack with stable envelope metadata", () => {
   assert.equal(ack.ok, true);
   assert.deepEqual(ack.state, { accepted: [] });
   assert.match(ack.serverTime, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("builds locker status result for firmware LED sync", () => {
+  const result = buildLockerStatusResult({
+    messageId: "state-1"
+  }, {
+    full: false,
+    accepted: [
+      {
+        locker: 1,
+        accepted: true,
+        version: 4,
+        hasTag: true,
+        isDoorClosed: true,
+        itemStatus: "known",
+        detectedItemKnown: true,
+        severity: "ok"
+      },
+      {
+        locker: 2,
+        accepted: false,
+        reason: "stale_version"
+      }
+    ]
+  });
+
+  assert.equal(result.type, "locker.status.result");
+  assert.equal(result.messageId, "state-1");
+  assert.equal(result.full, false);
+  assert.deepEqual(result.lockers, [{
+    locker: 1,
+    version: 4,
+    hasTag: true,
+    isDoorClosed: true,
+    itemStatus: "known",
+    detectedItemKnown: true,
+    severity: "ok"
+  }]);
 });
 
 test("builds RFID verification result separate from transport ack", () => {

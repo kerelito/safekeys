@@ -167,6 +167,7 @@ struct LockerHardwareConfig {
 
 struct LockerState {
   bool tagPresent;
+  bool tagProgrammed;
   String tagUid;
   bool doorClosed;
   bool lockClosed;
@@ -211,6 +212,7 @@ struct RfidReaderRuntime {
   uint8_t lockerNumber;
   MFRC522* reader;
   bool hasCard;
+  bool stableHasCustomTag;
   String stableUid;
   String stablePhysicalUid;
   String lastTriggeredUid;
@@ -238,6 +240,12 @@ enum LedMode : uint8_t {
   LED_MODE_NORMAL,
   LED_MODE_ACCESS_SELECTION,
   LED_MODE_ERROR_FLASH
+};
+
+enum class LockerLedStatus : uint8_t {
+  Ok,
+  Warning,
+  Error
 };
 
 struct AccessSelectionSession {
@@ -349,9 +357,9 @@ MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
 WebSocketsClient deviceWebSocket;
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
-  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
-  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
-  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 }
+  { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-2", RFID_LOCKER_SS_PINS[1], false, 2, &lockerReader2, false, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
+  { "locker-rfid-3", RFID_LOCKER_SS_PINS[2], false, 3, &lockerReader3, false, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 }
 };
 
 RfidReaderRuntime masterReaderRuntime = {
@@ -360,6 +368,7 @@ RfidReaderRuntime masterReaderRuntime = {
   true,
   0,
   &masterReader,
+  false,
   false,
   "",
   "",
@@ -471,6 +480,13 @@ unsigned long nextDeviceStateBatchAttemptMs = 0;
 uint32_t deviceMessageSequence = 0;
 uint32_t lockerStateVersions[LOCKER_COUNT] = { 1, 1, 1 };
 uint32_t pendingStateVersions[LOCKER_COUNT] = { 0, 0, 0 };
+LockerLedStatus panelLockerLedStatuses[LOCKER_COUNT] = {
+  LockerLedStatus::Warning,
+  LockerLedStatus::Warning,
+  LockerLedStatus::Warning
+};
+bool panelLockerLedStatusKnown[LOCKER_COUNT] = { false, false, false };
+uint32_t panelLockerLedStatusVersions[LOCKER_COUNT] = { 0, 0, 0 };
 bool fullStateResyncPending = true;
 bool pendingStateWasFull = false;
 uint32_t fullStateResyncGeneration = 1;
@@ -510,6 +526,7 @@ bool shouldUseHttpsFallback(unsigned long now);
 void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length);
 void handleDeviceWebSocketMessage(const char* payload, size_t length);
 void handleTagVerifyResultMessage(JsonDocument& doc);
+void handleLockerStatusResultMessage(JsonDocument& doc);
 bool sendDeviceHello();
 bool sendDeviceHeartbeatWs();
 bool sendDeviceStateBatchWs(const NetworkJob& job);
@@ -592,6 +609,12 @@ void configureLockerInputs();
 bool readInputPin(const LockerInputPin& config);
 LockerState readLockerState(uint8_t lockerIndex);
 bool isLockerComplete(const LockerState& state);
+LockerLedStatus getLockerLedStatus(uint8_t lockerIndex, const LockerState& state);
+LockerLedStatus getProvisionalLockerLedStatus(const LockerState& state);
+bool parseLockerLedStatus(const char* value, LockerLedStatus& status);
+const char* lockerLedStatusName(LockerLedStatus status);
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, const char* severity);
+uint32_t colorForLockerLedStatus(LockerLedStatus status);
 bool hasAccessToLocker(uint8_t mask, int lockerNumber);
 uint8_t lockerNumberToMask(int lockerNumber);
 LockerLedSegment getLockerLedSegment(uint8_t lockerNumber);
@@ -1402,6 +1425,11 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
     return;
   }
 
+  if (strcmp(type, "locker.status.result") == 0) {
+    handleLockerStatusResultMessage(doc);
+    return;
+  }
+
   if (strcmp(type, "ack") == 0) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
@@ -1625,6 +1653,51 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
     Serial.printf("[WS] tag verify result queue full requestId=%s\n", strlen(requestId) > 0 ? requestId : "(none)");
     recoverFromDroppedNetworkResult(result);
+  }
+}
+
+void handleLockerStatusResultMessage(JsonDocument& doc) {
+  const char* messageId = doc["messageId"] | "(none)";
+  JsonArray lockers = doc["lockers"];
+  if (lockers.isNull()) {
+    JsonObject state = doc["state"];
+    if (!state.isNull()) {
+      lockers = state["accepted"];
+    }
+  }
+
+  if (lockers.isNull()) {
+    Serial.printf("[LED STATUS] result ignored messageId=%s reason=no_lockers\n", messageId);
+    return;
+  }
+
+  uint8_t applied = 0;
+  for (JsonVariant item : lockers) {
+    if ((item["accepted"] | true) == false) {
+      continue;
+    }
+
+    const uint8_t lockerNumber = static_cast<uint8_t>(item["locker"] | 0);
+    const uint32_t version = static_cast<uint32_t>(item["version"] | 0);
+    const char* severity = item["severity"] | "";
+    LockerLedStatus status;
+    if (!parseLockerLedStatus(severity, status)) {
+      Serial.printf("[LED STATUS] locker=%u ignored reason=unknown_severity value=%s\n",
+        lockerNumber,
+        strlen(severity) > 0 ? severity : "(empty)"
+      );
+      continue;
+    }
+
+    if (applyPanelLockerLedStatus(lockerNumber, version, status, severity)) {
+      applied += 1;
+    }
+  }
+
+  if (applied > 0) {
+    Serial.printf("[LED STATUS] applied panel statuses count=%u messageId=%s\n", applied, messageId);
+    markVisualStateDirty();
+    updateVisualState();
   }
 }
 
@@ -3665,9 +3738,9 @@ void printUsage() {
   Serial.println("  - primary transport: persistent WebSocket /device/ws");
   Serial.println("  - fallback: batched HTTPS /device/sync plus legacy verify endpoints");
   Serial.println("LED visuals:");
-  Serial.println("  - green  -> locker ready / tag present");
-  Serial.println("  - red    -> locker without tag");
-  Serial.println("  - yellow -> locker tag present but optional switches report problem");
+  Serial.println("  - green  -> OK: programmed tag present and locker closed");
+  Serial.println("  - yellow -> warning: missing key or locker not fully closed");
+  Serial.println("  - red    -> error: unknown tag or missing key with open locker");
   Serial.println("  - blue   -> keypad code entry");
   Serial.println("  - yellow chase -> WiFi connecting");
   Serial.println("  - green chase  -> master reader in tag assignment mode");
@@ -3701,14 +3774,18 @@ void printStatus() {
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const LockerState state = readLockerState(i);
+    const LockerLedStatus ledStatus = getLockerLedStatus(i, state);
     Serial.printf(
-      "Locker S%u -> tag=%s uid=%s door=%s lock=%s ready=%s version=%lu lastReport=%lu ms ago dirty=%s retryIn=%lu failCount=%u\n",
+      "Locker S%u -> tag=%s programmed=%s uid=%s door=%s lock=%s ready=%s led=%s panelLed=%s version=%lu lastReport=%lu ms ago dirty=%s retryIn=%lu failCount=%u\n",
       i + 1,
       state.tagPresent ? "yes" : "no",
+      state.tagProgrammed ? "yes" : "no",
       state.tagPresent ? state.tagUid.c_str() : "(none)",
       ENABLE_LOCKER_SWITCH_INPUTS ? (state.doorClosed ? "closed" : "open") : "n/a",
       ENABLE_LOCKER_SWITCH_INPUTS ? (state.lockClosed ? "closed" : "open") : "n/a",
       isLockerComplete(state) ? "yes" : "no",
+      lockerLedStatusName(ledStatus),
+      panelLockerLedStatusKnown[i] ? "yes" : "no",
       static_cast<unsigned long>(lockerStateVersions[i]),
       lockerReaders[i].lastReportMs == 0 ? 0UL : millis() - lockerReaders[i].lastReportMs,
       lockerReaders[i].reportDirty ? "yes" : "no",
@@ -3733,10 +3810,11 @@ void printRfidSnapshot() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const RfidReaderRuntime& runtime = lockerReaders[i];
     Serial.printf(
-      "[%s] ss=%u present=%s uid=%s physical=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
+      "[%s] ss=%u present=%s programmed=%s uid=%s physical=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
       runtime.label,
       runtime.ssPin,
       runtime.hasCard ? "yes" : "no",
+      runtime.stableHasCustomTag ? "yes" : "no",
       runtime.hasCard ? runtime.stableUid.c_str() : "(none)",
       runtime.stablePhysicalUid.length() > 0 ? runtime.stablePhysicalUid.c_str() : "(none)",
       runtime.candidateUid.length() > 0 ? runtime.candidateUid.c_str() : "(none)",
@@ -3905,6 +3983,7 @@ LockerState readLockerState(uint8_t lockerIndex) {
 
   return {
     runtime.hasCard,
+    runtime.stableHasCustomTag,
     runtime.stableUid,
     doorClosed,
     lockClosed
@@ -3913,6 +3992,104 @@ LockerState readLockerState(uint8_t lockerIndex) {
 
 bool isLockerComplete(const LockerState& state) {
   return state.tagPresent && state.doorClosed && state.lockClosed;
+}
+
+LockerLedStatus getLockerLedStatus(uint8_t lockerIndex, const LockerState& state) {
+  if (
+    lockerIndex < LOCKER_COUNT &&
+    panelLockerLedStatusKnown[lockerIndex] &&
+    panelLockerLedStatusVersions[lockerIndex] == lockerStateVersions[lockerIndex]
+  ) {
+    return panelLockerLedStatuses[lockerIndex];
+  }
+
+  return getProvisionalLockerLedStatus(state);
+}
+
+LockerLedStatus getProvisionalLockerLedStatus(const LockerState& state) {
+  const bool chamberClosed = state.doorClosed && state.lockClosed;
+
+  if (!state.tagPresent && !chamberClosed) {
+    return LockerLedStatus::Error;
+  }
+
+  return LockerLedStatus::Warning;
+}
+
+bool parseLockerLedStatus(const char* value, LockerLedStatus& status) {
+  if (value == nullptr) {
+    return false;
+  }
+
+  if (strcmp(value, "ok") == 0 || strcmp(value, "OK") == 0) {
+    status = LockerLedStatus::Ok;
+    return true;
+  }
+
+  if (strcmp(value, "warn") == 0 || strcmp(value, "warning") == 0 || strcmp(value, "info") == 0) {
+    status = LockerLedStatus::Warning;
+    return true;
+  }
+
+  if (strcmp(value, "critical") == 0 || strcmp(value, "error") == 0 || strcmp(value, "bad") == 0) {
+    status = LockerLedStatus::Error;
+    return true;
+  }
+
+  return false;
+}
+
+const char* lockerLedStatusName(LockerLedStatus status) {
+  switch (status) {
+    case LockerLedStatus::Ok:
+      return "ok";
+    case LockerLedStatus::Warning:
+      return "warn";
+    case LockerLedStatus::Error:
+    default:
+      return "critical";
+  }
+}
+
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, const char* severity) {
+  if (lockerNumber < 1 || lockerNumber > LOCKER_COUNT) {
+    return false;
+  }
+
+  const uint8_t index = lockerNumber - 1;
+  const uint32_t currentVersion = lockerStateVersions[index];
+  if (version != 0 && version != currentVersion) {
+    Serial.printf("[LED STATUS] stale panel status ignored locker=%u severity=%s version=%lu current=%lu\n",
+      lockerNumber,
+      severity != nullptr && strlen(severity) > 0 ? severity : lockerLedStatusName(status),
+      static_cast<unsigned long>(version),
+      static_cast<unsigned long>(currentVersion)
+    );
+    return false;
+  }
+
+  panelLockerLedStatuses[index] = status;
+  panelLockerLedStatusKnown[index] = true;
+  panelLockerLedStatusVersions[index] = currentVersion;
+  Serial.printf("[LED STATUS] locker=%u severity=%s color=%s version=%lu source=panel\n",
+    lockerNumber,
+    severity != nullptr && strlen(severity) > 0 ? severity : lockerLedStatusName(status),
+    lockerLedStatusName(status),
+    static_cast<unsigned long>(currentVersion)
+  );
+  return true;
+}
+
+uint32_t colorForLockerLedStatus(LockerLedStatus status) {
+  switch (status) {
+    case LockerLedStatus::Ok:
+      return colorGreen(STATUS_BRIGHTNESS);
+    case LockerLedStatus::Warning:
+      return colorYellow(STATUS_BRIGHTNESS);
+    case LockerLedStatus::Error:
+    default:
+      return colorRed(STATUS_BRIGHTNESS);
+  }
 }
 
 bool hasAccessToLocker(uint8_t mask, int lockerNumber) {
@@ -4323,13 +4500,7 @@ void renderLockerStatus() {
 
   for (uint8_t lockerIndex = 0; lockerIndex < LOCKER_COUNT; lockerIndex += 1) {
     const LockerState state = readLockerState(lockerIndex);
-    uint32_t color = colorRed();
-
-    if (state.tagPresent) {
-      color = isLockerComplete(state)
-        ? colorGreen()
-        : colorYellow();
-    }
+    const uint32_t color = colorForLockerLedStatus(getLockerLedStatus(lockerIndex, state));
 
     const LockerLedSegment segment = getLockerLedSegment(lockerIndex + 1);
     if (!segment.valid) {
@@ -4532,6 +4703,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
 
       if (uidChanged) {
         runtime.stableUid = observedLogicalTagId;
+        runtime.stableHasCustomTag = scanResult.hasCustomTag;
         runtime.stablePhysicalUid = scanResult.physicalUid;
         if (!runtime.isMaster) {
           markLockerStateChanged(runtime, now);
@@ -4685,6 +4857,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
   }
 
   runtime.stableUid = "";
+  runtime.stableHasCustomTag = false;
   runtime.stablePhysicalUid = "";
   runtime.missingSeenCount = 0;
   markVisualStateDirty();
@@ -4890,11 +5063,14 @@ void markLockerReportDirty(RfidReaderRuntime& runtime, unsigned long now) {
 
 void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now) {
   if (runtime.lockerNumber > 0 && runtime.lockerNumber <= LOCKER_COUNT) {
-    uint32_t& version = lockerStateVersions[runtime.lockerNumber - 1];
+    const uint8_t index = runtime.lockerNumber - 1;
+    uint32_t& version = lockerStateVersions[index];
     version += 1;
     if (version == 0) {
       version = 1;
     }
+    panelLockerLedStatusKnown[index] = false;
+    panelLockerLedStatusVersions[index] = version;
   }
   nextDeviceStateBatchAttemptMs = 0;
   markLockerReportDirty(runtime, now);

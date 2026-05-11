@@ -1953,6 +1953,10 @@ function renderLockers() {
 }
 
 function getLockerSeverity(locker) {
+  if (["ok", "warn", "critical"].includes(locker?.severity)) {
+    return locker.severity;
+  }
+
   const itemStatus = getLockerItemStatus(locker);
 
   if (itemStatus === "unknown") {
@@ -1967,7 +1971,7 @@ function getLockerSeverity(locker) {
   if (itemStatus === "missing") {
     return "warn";
   }
-  return "info";
+  return "warn";
 }
 
 function getLockerSeverityLabel(locker) {

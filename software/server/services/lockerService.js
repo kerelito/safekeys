@@ -109,6 +109,25 @@ function getLockerItemStatus(locker = {}) {
   return "unknown";
 }
 
+function getLockerSeverity(locker = {}) {
+  const itemStatus = locker.itemStatus || getLockerItemStatus(locker);
+  const isDoorClosed = locker.isDoorClosed !== false;
+
+  if (itemStatus === "unknown") {
+    return "critical";
+  }
+
+  if (itemStatus === "known" && isDoorClosed) {
+    return "ok";
+  }
+
+  if (itemStatus === "missing" && !isDoorClosed) {
+    return "critical";
+  }
+
+  return "warn";
+}
+
 function getLockerItemLabel(locker = {}) {
   const itemStatus = getLockerItemStatus(locker);
   const detectedItemName = locker.detectedItemName || locker.itemName || null;
@@ -142,7 +161,7 @@ function buildLockerStatePayload(locker = {}) {
     detectedItemKnown
   });
 
-  return {
+  const payload = {
     locker: lockerNumber,
     lockerId: lockerNumber,
     hasTag,
@@ -165,6 +184,9 @@ function buildLockerStatePayload(locker = {}) {
     }),
     source: locker.source || null
   };
+
+  payload.severity = getLockerSeverity(payload);
+  return payload;
 }
 
 function parseGenerateCodeInput(lockerOrPayload, hours) {
@@ -780,6 +802,19 @@ class LockerService extends EventEmitter {
         : null;
       const previousDoorClosed = existingLocker ? existingLocker.isDoorClosed !== false : null;
       const doorChanged = hasDoorSignal && (!existingLocker || previousDoorClosed !== isDoorClosed);
+      const resolvedLockerState = buildLockerStatePayload({
+        locker,
+        hasTag: item.hasTag,
+        isDoorClosed: hasDoorSignal
+          ? isDoorClosed
+          : (existingLocker ? existingLocker.isDoorClosed !== false : true),
+        detectedTagId: nextItem?.tagId || null,
+        detectedItemName: nextItem?.itemName || null,
+        detectedItemType: nextItem?.itemType || null,
+        detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
+        detectedAt: item.hasTag ? now : null,
+        source
+      });
 
       if (statusChanged || itemChanged || doorChanged) {
         const set = {
@@ -848,19 +883,7 @@ class LockerService extends EventEmitter {
       }
 
       if (statusChanged || itemChanged || doorChanged) {
-        lockerEvents.push(buildLockerStatePayload({
-          locker,
-          hasTag: item.hasTag,
-          isDoorClosed: hasDoorSignal
-            ? isDoorClosed
-            : (existingLocker ? existingLocker.isDoorClosed !== false : true),
-          detectedTagId: nextItem?.tagId || null,
-          detectedItemName: nextItem?.itemName || null,
-          detectedItemType: nextItem?.itemType || null,
-          detectedItemKnown: typeof nextItem?.itemKnown === "boolean" ? nextItem.itemKnown : null,
-          detectedAt: item.hasTag ? now : null,
-          source
-        }));
+        lockerEvents.push(resolvedLockerState);
       }
 
       storedLockers.set(locker, {
@@ -875,7 +898,12 @@ class LockerService extends EventEmitter {
       accepted.push({
         locker,
         accepted: true,
-        version: incomingVersion
+        version: incomingVersion,
+        hasTag: resolvedLockerState.hasTag,
+        isDoorClosed: resolvedLockerState.isDoorClosed,
+        itemStatus: resolvedLockerState.itemStatus,
+        detectedItemKnown: resolvedLockerState.detectedItemKnown,
+        severity: resolvedLockerState.severity
       });
     }
 

@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { WebSocket, WebSocketServer } = require("ws");
 const {
   buildAck,
+  buildLockerStatusResult,
   buildTagVerifyResult,
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
@@ -122,7 +123,7 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
         }));
 
         lockerService.processDeviceEnvelope(envelope, context)
-          .then(response => {
+          .then(async response => {
             if (response?.ok === false) {
               console.error("Asynchroniczne state.batch urzadzenia zostalo odrzucone.", {
                 deviceId: ws.deviceId,
@@ -130,7 +131,10 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
                 messageId: envelope.messageId || null,
                 error: response.error || "unknown"
               });
+              return;
             }
+
+            await sendJson(ws, buildLockerStatusResult(envelope, response?.state || {}));
           })
           .catch(error => {
             console.error("Nie udalo sie asynchronicznie zapisac state.batch urzadzenia.", {

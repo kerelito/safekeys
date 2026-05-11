@@ -127,6 +127,31 @@ function buildTagVerifyResult(message = {}, verification = {}, extra = {}) {
   return result;
 }
 
+function buildLockerStatusResult(message = {}, state = {}) {
+  const lockers = Array.isArray(state?.accepted)
+    ? state.accepted
+      .filter(item => item?.accepted !== false)
+      .map(item => ({
+        locker: Number(item.locker),
+        version: Number(item.version) || 0,
+        hasTag: item.hasTag === true,
+        isDoorClosed: item.isDoorClosed !== false,
+        itemStatus: normalizeString(item.itemStatus, null),
+        detectedItemKnown: typeof item.detectedItemKnown === "boolean" ? item.detectedItemKnown : null,
+        severity: normalizeString(item.severity, "warn")
+      }))
+      .filter(item => Number.isInteger(item.locker) && item.locker >= 1 && item.locker <= 31)
+    : [];
+
+  return {
+    type: "locker.status.result",
+    messageId: normalizeMessageId(message?.messageId),
+    serverTime: new Date().toISOString(),
+    full: state?.full === true,
+    lockers
+  };
+}
+
 function normalizeCommandAckPayload(payload = {}) {
   const status = normalizeString(payload.status);
   const success = payload.success !== false && status !== "failed";
@@ -145,6 +170,7 @@ module.exports = {
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   buildAck,
+  buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
