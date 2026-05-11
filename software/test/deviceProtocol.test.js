@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildAck,
+  buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
@@ -85,4 +86,35 @@ test("builds protocol ack with stable envelope metadata", () => {
   assert.equal(ack.ok, true);
   assert.deepEqual(ack.state, { accepted: [] });
   assert.match(ack.serverTime, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("builds RFID verification result separate from transport ack", () => {
+  const result = buildTagVerifyResult({
+    messageId: "tagverify-7",
+    payload: { tagId: "9A644335" }
+  }, {
+    valid: true,
+    isMaster: true,
+    item: {
+      tagId: "9A644335",
+      itemName: "Master"
+    },
+    user: {
+      id: null,
+      name: "Master",
+      tagId: "9A644335"
+    },
+    allowedLockers: [1, 2, 3],
+    accessibleLockersMask: 7
+  });
+
+  assert.equal(result.type, "tag.verify.result");
+  assert.equal(result.requestId, "tagverify-7");
+  assert.equal(result.uid, "9A644335");
+  assert.equal(result.ok, true);
+  assert.equal(result.known, true);
+  assert.equal(result.isMaster, true);
+  assert.equal(result.accessibleLockersMask, 7);
+  assert.deepEqual(result.lockers, [1, 2, 3]);
+  assert.equal(result.displayName, "Master");
 });

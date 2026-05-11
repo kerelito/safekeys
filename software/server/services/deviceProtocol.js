@@ -63,6 +63,70 @@ function buildAck(message, extra = {}) {
   };
 }
 
+function normalizeLockerList(lockers = []) {
+  if (!Array.isArray(lockers)) {
+    return [];
+  }
+
+  return [...new Set(lockers
+    .map(locker => Number(locker))
+    .filter(locker => Number.isInteger(locker) && locker >= 1 && locker <= 31)
+  )].sort((a, b) => a - b);
+}
+
+function buildAccessMaskFromLockers(lockers = []) {
+  return normalizeLockerList(lockers).reduce(
+    (mask, locker) => mask | (1 << (locker - 1)),
+    0
+  );
+}
+
+function buildTagVerifyResult(message = {}, verification = {}, extra = {}) {
+  const payload = message.payload || {};
+  const user = verification?.user || null;
+  const item = verification?.item || null;
+  const lockers = normalizeLockerList(verification?.allowedLockers);
+  const maskValue = Number(verification?.accessibleLockersMask);
+  const accessibleLockersMask = Number.isInteger(maskValue)
+    ? (maskValue & 0xFF)
+    : (buildAccessMaskFromLockers(lockers) & 0xFF);
+  const uid = normalizeString(
+    extra.uid
+      || item?.tagId
+      || user?.tagId
+      || payload.tagId
+      || payload.uid
+  );
+  const known = verification?.valid === true;
+  const ok = extra.ok !== false && known;
+  const displayName = normalizeString(
+    extra.displayName
+      || user?.name
+      || item?.itemName,
+    null
+  );
+
+  const result = {
+    type: "tag.verify.result",
+    requestId: normalizeString(message?.messageId || payload.requestId, null),
+    uid,
+    ok,
+    known,
+    isMaster: verification?.isMaster === true,
+    accessibleLockersMask,
+    lockers,
+    userId: normalizeString(user?.id, null),
+    displayName,
+    serverTime: new Date().toISOString()
+  };
+
+  if (extra.error) {
+    result.error = String(extra.error);
+  }
+
+  return result;
+}
+
 function normalizeCommandAckPayload(payload = {}) {
   const status = normalizeString(payload.status);
   const success = payload.success !== false && status !== "failed";
@@ -81,6 +145,7 @@ module.exports = {
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   buildAck,
+  buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,

@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { WebSocket, WebSocketServer } = require("ws");
 const {
   buildAck,
+  buildTagVerifyResult,
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   normalizeDeviceId
@@ -141,6 +142,43 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
           });
 
         await sendPendingCommands(ws);
+        return;
+      }
+
+      if (envelope.type === "tag.verify") {
+        await sendJson(ws, buildAck(envelope));
+
+        lockerService.processDeviceEnvelope(envelope, context)
+          .then(async response => {
+            const result = buildTagVerifyResult(envelope, response?.tagVerification || {}, {
+              ok: response?.ok !== false,
+              error: response?.ok === false ? response?.error : null
+            });
+            await sendJson(ws, result);
+            try {
+              await sendPendingCommands(ws);
+            } catch (error) {
+              console.error("Nie udalo sie wyslac polecen po weryfikacji RFID.", {
+                deviceId: ws.deviceId,
+                connectionId: ws.connectionId,
+                messageId: envelope.messageId || null,
+                error: error.message
+              });
+            }
+          })
+          .catch(async error => {
+            console.error("Nie udalo sie zweryfikowac taga RFID przez WebSocket.", {
+              deviceId: ws.deviceId,
+              connectionId: ws.connectionId,
+              messageId: envelope.messageId || null,
+              error: error.message
+            });
+            await sendJson(ws, buildTagVerifyResult(envelope, {}, {
+              ok: false,
+              error: error.message || "tag_verify_failed"
+            }));
+          });
+
         return;
       }
 

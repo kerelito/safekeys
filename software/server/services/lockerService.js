@@ -2178,7 +2178,8 @@ class LockerService extends EventEmitter {
         valid: false,
         item: access.item,
         isMaster: false,
-        allowedLockers: []
+        allowedLockers: [],
+        accessibleLockersMask: 0
       };
     }
 
@@ -2226,6 +2227,7 @@ class LockerService extends EventEmitter {
       user: access.user,
       isMaster: access.isMaster,
       allowedLockers: [...access.allowedLockers],
+      accessibleLockersMask: accessMask,
       openedLockers: []
     };
   }
@@ -2235,6 +2237,7 @@ class LockerService extends EventEmitter {
     const tagId = normalizeString(payload.tagId, null);
     const userId = normalizeString(payload.userId, null);
     const userName = normalizeString(payload.userName, null);
+    const requestId = normalizeString(payload.requestId, null);
     const source = context.source || "device";
     const actor = buildAccessSelectionActor(userName, tagId, context.actor || "device");
     const accessibleLockersMask = Number(payload.accessibleLockersMask) & ((1 << ALLOWED_LOCKERS.length) - 1);
@@ -2255,6 +2258,7 @@ class LockerService extends EventEmitter {
         userName,
         accessibleLockersMask,
         isMaster,
+        requestId,
         selectionKey
       }
     };
