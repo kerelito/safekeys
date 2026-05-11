@@ -105,9 +105,12 @@ static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS = 20000;
+static const unsigned long DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS = 5000;
+static const unsigned long VERIFY_DUPLICATE_COOLDOWN_MS = 5000;
 static const unsigned long ACCESS_SELECTION_TIMEOUT_MS = 60000;
 static const unsigned long ACCESS_SELECTION_DENIED_BLINK_MS = 500;
-static const unsigned long ACCESS_SELECTION_ALLOWED_FRAME_MS = 80;
+static const unsigned long ACCESS_SELECTION_ALLOWED_FRAME_MS = 70;
+static const uint8_t ACCESS_SELECTION_TAIL_LENGTH = 3;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
@@ -120,7 +123,6 @@ static const unsigned long LOCKER_INPUT_SCAN_INTERVAL_MS = 50;
 static const unsigned long LOCKER_INPUT_DEBOUNCE_MS = 250;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
-static const unsigned long RFID_VERIFY_COOLDOWN_MS = 4000;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
 static const uint8_t KEYPAD_RELEASE_CONFIRM_SCANS = 3;
 static const unsigned long KEYPAD_RELEASE_DEBOUNCE_MS = 25;
@@ -232,23 +234,41 @@ struct TagAssignmentMode {
   unsigned long animationFrame;
 };
 
-enum class AccessSelectionState : uint8_t {
-  ACCESS_SELECTION_INACTIVE,
-  ACCESS_SELECTION_ACTIVE
+enum LedMode : uint8_t {
+  LED_MODE_NORMAL,
+  LED_MODE_ACCESS_SELECTION,
+  LED_MODE_ERROR_FLASH
 };
 
 struct AccessSelectionSession {
-  AccessSelectionState state;
-  unsigned long startedMs;
-  unsigned long timeoutMs;
-  uint32_t sessionId;
+  bool active;
+  String uid;
   bool isMaster;
-  uint8_t accessibleLockersMask;
-  String tagId;
+  uint8_t accessibleMask;
+  uint32_t startedAtMs;
+  uint32_t timeoutMs;
   String requestId;
+  uint32_t sessionId;
   String userId;
   String userName;
-  String lastBusyTagId;
+  String lastBusyUid;
+};
+
+struct ErrorFlashEffect {
+  bool active;
+  uint32_t startedAtMs;
+  uint32_t durationMs;
+};
+
+struct RfidVerifyRequest {
+  bool active;
+  bool timedOut;
+  bool acked;
+  String uid;
+  String requestId;
+  uint32_t sentAtMs;
+  uint32_t timeoutMs;
+  uint32_t graceMs;
 };
 
 enum class NetworkJobType : uint8_t {
@@ -378,20 +398,32 @@ StatusLedEffect statusLedEffect = { false, false, false, 0, 0, 0, 0 };
 CodeResultFlashEffect codeResultFlash = { false, false, 0, 0, 0 };
 TagAssignmentMode tagAssignmentMode = { false, "", "", "", 0, 0 };
 AccessSelectionSession accessSelection = {
-  AccessSelectionState::ACCESS_SELECTION_INACTIVE,
-  0,
-  ACCESS_SELECTION_TIMEOUT_MS,
-  0,
+  false,
+  "",
   false,
   0,
+  0,
+  ACCESS_SELECTION_TIMEOUT_MS,
   "",
-  "",
+  0,
   "",
   "",
   ""
 };
+ErrorFlashEffect ledErrorFlash = { false, 0, 0 };
+RfidVerifyRequest pendingMasterTagVerify = {
+  false,
+  false,
+  false,
+  "",
+  "",
+  0,
+  DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS,
+  DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS
+};
 String lastVerifiedUid;
 unsigned long lastVerifyStartedAtMs = 0;
+LedMode ledMode = LED_MODE_NORMAL;
 bool visualStateDirty = true;
 unsigned long lastRfidServiceMs = 0;
 uint8_t nextRfidReaderIndex = 0;
@@ -411,6 +443,8 @@ char pendingCode[CODE_LENGTH + 1] = "";
 char pendingCodeMessageId[64] = "";
 char pendingMasterTagId[32] = "";
 char pendingMasterTagMessageId[64] = "";
+char expiredMasterTagId[32] = "";
+char expiredMasterTagMessageId[64] = "";
 char pendingStateMessageId[64] = "";
 bool taskWatchdogReady = false;
 volatile uint8_t consecutiveNetworkFailureCount = 0;
@@ -519,6 +553,8 @@ bool maybeReportLockerStatuses(unsigned long now);
 bool maybeQueueDeviceStateBatch(unsigned long now);
 void serviceLockerInputChanges(unsigned long now);
 void serviceAccessSelection(unsigned long now);
+void tickAccessSelection(uint32_t nowMs);
+void servicePendingMasterTagVerification(uint32_t nowMs);
 void processEnteredCode(const String& code);
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
 bool sendHeartbeat();
@@ -540,6 +576,9 @@ void setPendingMasterTag(const String& tagId);
 void clearPendingMasterTag();
 void failPendingCodeVerification(const char* reason);
 void failPendingMasterTagVerification(const char* reason);
+void markPendingMasterTagTimedOut(const char* reason);
+bool isPendingMasterTagResultExpired(uint32_t nowMs);
+bool isPendingMasterTagResultWindowOpen(uint32_t nowMs);
 bool fetchDeviceActionsForTask(NetworkResult& result);
 void printUsage();
 void printStatus();
@@ -557,10 +596,15 @@ bool hasAccessToLocker(uint8_t mask, int lockerNumber);
 uint8_t lockerNumberToMask(int lockerNumber);
 LockerLedSegment getLockerLedSegment(uint8_t lockerNumber);
 void formatLockerMaskBinary(uint8_t mask, char* buffer, size_t bufferSize);
+void setLedMode(LedMode nextMode);
+void updateLeds(uint32_t nowMs);
 void updateVisualState();
 void updateAccessSelectionLeds(unsigned long nowMs);
 void renderAllowedSegmentAnimation(uint8_t lockerNumber, unsigned long nowMs);
 void renderDeniedSegmentBlink(uint8_t lockerNumber, unsigned long nowMs);
+void startLedErrorFlash(uint32_t durationMs = 700);
+void renderErrorFlashLeds(uint32_t nowMs);
+void serviceLedErrorFlash(uint32_t nowMs);
 void restoreNormalLedMode();
 void renderLockerStatus();
 void renderCodeEntry();
@@ -581,8 +625,8 @@ void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool
 void cancelAccessSelection(const char* reason);
 void finishAccessSelection(const char* reason);
 void handleAccessSelectionKey(char key);
-bool openSelectedLocker(int lockerNumber);
-bool openAllAccessibleLockers();
+void openSelectedLocker(uint8_t lockerNumber);
+void openAllAccessibleLockers();
 bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber = 0);
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName);
 void stopTagAssignmentMode();
@@ -632,7 +676,7 @@ uint32_t colorPurple(uint8_t brightness = EFFECT_BRIGHTNESS) {
 }
 
 uint32_t colorViolet(uint8_t brightness = EFFECT_BRIGHTNESS) {
-  return strip.Color(brightness / 2, 0, brightness);
+  return strip.Color(static_cast<uint8_t>((140U * brightness) / 255U), 0, brightness);
 }
 
 void setup() {
@@ -698,11 +742,13 @@ void reserveStringBuffers() {
   tagAssignmentMode.assignmentId.reserve(32);
   tagAssignmentMode.tagId.reserve(16);
   tagAssignmentMode.itemName.reserve(64);
-  accessSelection.tagId.reserve(24);
+  accessSelection.uid.reserve(24);
   accessSelection.requestId.reserve(64);
   accessSelection.userId.reserve(32);
   accessSelection.userName.reserve(64);
-  accessSelection.lastBusyTagId.reserve(24);
+  accessSelection.lastBusyUid.reserve(24);
+  pendingMasterTagVerify.uid.reserve(24);
+  pendingMasterTagVerify.requestId.reserve(64);
   lastVerifiedUid.reserve(24);
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -956,8 +1002,10 @@ void loop() {
 
   serviceStatusLed(now);
   serviceWifiConnection(now);
+  serviceLedErrorFlash(now);
   serviceCodeResultFlash(now);
   serviceAccessSelection(now);
+  servicePendingMasterTagVerification(now);
   handleSerialDebug();
   if (ENABLE_KEYPAD && keypadReady) {
     handleKeypad();
@@ -969,10 +1017,6 @@ void loop() {
 
   if (codeVerificationPending && pendingCodeSentMs != 0 && now - pendingCodeSentMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
     failPendingCodeVerification("Code verification timed out.");
-  }
-
-  if (masterTagVerificationPending && pendingMasterTagSentMs != 0 && now - pendingMasterTagSentMs >= DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS) {
-    failPendingMasterTagVerification("Master tag verification timed out.");
   }
 
   if (!isWifiReady()) {
@@ -1378,6 +1422,8 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
       return;
     }
     if (masterTagVerificationPending && pendingMasterTagMessageId[0] != '\0' && strcmp(messageId, pendingMasterTagMessageId) == 0) {
+      pendingMasterTagVerify.acked = ok;
+      Serial.printf("[WS] ack %s for %s\n", ok ? "ok" : "failed", messageId);
       Serial.printf("[WS ACK] request delivered requestId=%s ok=%s\n", messageId, ok ? "true" : "false");
       if (!ok) {
         NetworkResult result = {};
@@ -1457,6 +1503,7 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
 }
 
 void handleTagVerifyResultMessage(JsonDocument& doc) {
+  const uint32_t now = millis();
   const char* requestId = doc["requestId"] | "";
   const char* uid = doc["uid"] | "";
   if (strlen(uid) == 0) {
@@ -1522,6 +1569,18 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   );
 
   if (!masterTagVerificationPending) {
+    if (
+      strlen(requestId) > 0 &&
+      expiredMasterTagMessageId[0] != '\0' &&
+      strcmp(requestId, expiredMasterTagMessageId) == 0
+    ) {
+      Serial.printf("[RFID VERIFY RESULT] stale result ignored uid=%s requestId=%s reason=expired_result_window\n",
+        result.text1,
+        requestId
+      );
+      return;
+    }
+
     Serial.printf("[RFID VERIFY RESULT] stale result ignored uid=%s requestId=%s reason=no_pending_request\n",
       result.text1,
       strlen(requestId) > 0 ? requestId : "(none)"
@@ -1544,6 +1603,23 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
       pendingMasterTagId
     );
     return;
+  }
+
+  if (isPendingMasterTagResultExpired(now)) {
+    Serial.printf("[RFID VERIFY RESULT] stale result ignored uid=%s requestId=%s reason=expired_result_window\n",
+      result.text1,
+      strlen(requestId) > 0 ? requestId : "(none)"
+    );
+    clearPendingMasterTag();
+    startLedErrorFlash(700);
+    return;
+  }
+
+  if (pendingMasterTagVerify.timedOut) {
+    Serial.printf("[RFID VERIFY RESULT] late result accepted uid=%s requestId=%s\n",
+      result.text1,
+      strlen(requestId) > 0 ? requestId : "(none)"
+    );
   }
 
   if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
@@ -1896,7 +1972,7 @@ void handleKeypad() {
   Serial.printf("Key pressed: %c\n", key);
   pulseLed(30);
 
-  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+  if (accessSelection.active) {
     handleAccessSelectionKey(key);
     return;
   }
@@ -2234,6 +2310,7 @@ void handleNetworkResult(const NetworkResult& result) {
           strlen(result.text1) > 0 ? result.text1 : "(unknown)",
           strlen(result.requestId) > 0 ? result.requestId : "(none)"
         );
+        startLedErrorFlash(700);
         blinkLed(4, 70, 70);
         break;
       }
@@ -2254,6 +2331,7 @@ void handleNetworkResult(const NetworkResult& result) {
           result.boolValue3 ? "true" : "false",
           maskText
         );
+        startLedErrorFlash(700);
         blinkLed(4, 90, 80);
         break;
       }
@@ -2264,6 +2342,7 @@ void handleNetworkResult(const NetworkResult& result) {
           strlen(result.requestId) > 0 ? result.requestId : "(none)",
           maskText
         );
+        startLedErrorFlash(700);
         blinkLed(4, 90, 80);
         break;
       }
@@ -2696,6 +2775,16 @@ void clearPendingCode() {
 void setPendingMasterTag(const String& tagId) {
   masterTagVerificationPending = true;
   copyStringToBuffer(tagId, pendingMasterTagId, sizeof(pendingMasterTagId));
+  pendingMasterTagVerify.active = true;
+  pendingMasterTagVerify.timedOut = false;
+  pendingMasterTagVerify.acked = false;
+  pendingMasterTagVerify.uid = tagId;
+  pendingMasterTagVerify.requestId = "";
+  pendingMasterTagVerify.sentAtMs = 0;
+  pendingMasterTagVerify.timeoutMs = DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS;
+  pendingMasterTagVerify.graceMs = DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS;
+  expiredMasterTagId[0] = '\0';
+  expiredMasterTagMessageId[0] = '\0';
 }
 
 void clearPendingMasterTag() {
@@ -2703,6 +2792,14 @@ void clearPendingMasterTag() {
   pendingMasterTagId[0] = '\0';
   pendingMasterTagMessageId[0] = '\0';
   pendingMasterTagSentMs = 0;
+  pendingMasterTagVerify.active = false;
+  pendingMasterTagVerify.timedOut = false;
+  pendingMasterTagVerify.acked = false;
+  pendingMasterTagVerify.uid = "";
+  pendingMasterTagVerify.requestId = "";
+  pendingMasterTagVerify.sentAtMs = 0;
+  pendingMasterTagVerify.timeoutMs = DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS;
+  pendingMasterTagVerify.graceMs = DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS;
 }
 
 void failPendingCodeVerification(const char* reason) {
@@ -2748,6 +2845,55 @@ void failPendingMasterTagVerification(const char* reason) {
 
   if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
     recoverFromDroppedNetworkResult(result);
+  }
+}
+
+void markPendingMasterTagTimedOut(const char* reason) {
+  if (!masterTagVerificationPending || pendingMasterTagVerify.timedOut) {
+    return;
+  }
+
+  pendingMasterTagVerify.timedOut = true;
+  Serial.printf("[RFID VERIFY] %s uid=%s requestId=%s\n",
+    reason != nullptr && strlen(reason) > 0 ? reason : "verification timed out",
+    pendingMasterTagId[0] != '\0' ? pendingMasterTagId : "(unknown)",
+    pendingMasterTagMessageId[0] != '\0' ? pendingMasterTagMessageId : "(none)"
+  );
+}
+
+bool isPendingMasterTagResultExpired(uint32_t nowMs) {
+  if (!masterTagVerificationPending || pendingMasterTagSentMs == 0) {
+    return false;
+  }
+
+  const uint32_t windowMs = static_cast<uint32_t>(DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS + DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS);
+  return nowMs - pendingMasterTagSentMs >= windowMs;
+}
+
+bool isPendingMasterTagResultWindowOpen(uint32_t nowMs) {
+  return masterTagVerificationPending
+    && pendingMasterTagSentMs != 0
+    && !isPendingMasterTagResultExpired(nowMs);
+}
+
+void servicePendingMasterTagVerification(uint32_t nowMs) {
+  if (!masterTagVerificationPending || pendingMasterTagSentMs == 0) {
+    return;
+  }
+
+  if (!pendingMasterTagVerify.timedOut && nowMs - pendingMasterTagSentMs >= DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS) {
+    markPendingMasterTagTimedOut("verification timed out");
+  }
+
+  if (isPendingMasterTagResultExpired(nowMs)) {
+    copyCStringToBuffer(pendingMasterTagId, expiredMasterTagId, sizeof(expiredMasterTagId));
+    copyCStringToBuffer(pendingMasterTagMessageId, expiredMasterTagMessageId, sizeof(expiredMasterTagMessageId));
+    Serial.printf("[RFID VERIFY] result window expired uid=%s requestId=%s\n",
+      pendingMasterTagId[0] != '\0' ? pendingMasterTagId : "(unknown)",
+      pendingMasterTagMessageId[0] != '\0' ? pendingMasterTagMessageId : "(none)"
+    );
+    clearPendingMasterTag();
+    startLedErrorFlash(700);
   }
 }
 
@@ -3175,8 +3321,12 @@ bool sendVerifyMasterTagWs(const NetworkJob& job) {
   if (sent) {
     copyCStringToBuffer(messageId, pendingMasterTagMessageId, sizeof(pendingMasterTagMessageId));
     pendingMasterTagSentMs = millis();
+    pendingMasterTagVerify.requestId = messageId;
+    pendingMasterTagVerify.sentAtMs = pendingMasterTagSentMs;
+    pendingMasterTagVerify.timedOut = false;
+    pendingMasterTagVerify.acked = false;
   }
-  Serial.printf("[RFID VERIFY] uid=%s requestId=%s sent=%s\n", job.text1, messageId, sent ? "true" : "false");
+  Serial.printf("[RFID VERIFY] sent uid=%s requestId=%s ok=%s\n", job.text1, messageId, sent ? "true" : "false");
   return sent;
 }
 
@@ -3615,7 +3765,7 @@ void printRfidSnapshot() {
 }
 
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName) {
-  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+  if (accessSelection.active) {
     finishAccessSelection("tag_assignment_override");
   }
 
@@ -3812,31 +3962,35 @@ void formatLockerMaskBinary(uint8_t mask, char* buffer, size_t bufferSize) {
 }
 
 void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool isMaster, const String& requestId, const String& userId, const String& userName) {
-  accessSelection.state = AccessSelectionState::ACCESS_SELECTION_ACTIVE;
-  accessSelection.startedMs = millis();
+  accessSelection.active = true;
+  accessSelection.startedAtMs = millis();
   accessSelection.timeoutMs = ACCESS_SELECTION_TIMEOUT_MS;
   accessSelection.sessionId += 1;
+  accessSelection.uid = uid;
   accessSelection.isMaster = isMaster;
-  accessSelection.accessibleLockersMask = accessibleLockersMask;
-  accessSelection.tagId = uid;
+  accessSelection.accessibleMask = accessibleLockersMask;
   accessSelection.requestId = requestId;
   accessSelection.userId = userId;
   accessSelection.userName = userName;
-  accessSelection.lastBusyTagId = "";
+  accessSelection.lastBusyUid = "";
   enteredCode = "";
+  codeResultFlash.active = false;
+  ledErrorFlash.active = false;
   masterReaderRuntime.lastTriggeredUid = uid;
+  setLedMode(LED_MODE_ACCESS_SELECTION);
 
   char maskText[8];
   formatLockerMaskBinary(accessibleLockersMask, maskText, sizeof(maskText));
   Serial.printf(
-    "[ACCESS SELECTION] started session=%lu uid=%s requestId=%s mask=%s master=%s timeout=%lums\n",
-    static_cast<unsigned long>(accessSelection.sessionId),
+    "[ACCESS SELECTION] started uid=%s requestId=%s master=%s mask=%s timeout=%lums session=%lu\n",
     uid.c_str(),
     requestId.length() > 0 ? requestId.c_str() : "(none)",
-    maskText,
     isMaster ? "true" : "false",
-    static_cast<unsigned long>(accessSelection.timeoutMs)
+    maskText,
+    static_cast<unsigned long>(accessSelection.timeoutMs),
+    static_cast<unsigned long>(accessSelection.sessionId)
   );
+  Serial.printf("[LED] access selection mode active mask=%s\n", maskText);
 
   queueAccessSelectionEvent("access_selection_started");
   markVisualStateDirty();
@@ -3844,60 +3998,73 @@ void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool
 }
 
 void cancelAccessSelection(const char* reason) {
-  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+  if (!accessSelection.active) {
     return;
   }
 
-  if (reason != nullptr && strlen(reason) > 0) {
-    queueAccessSelectionEvent(reason);
+  const char* eventName = reason;
+  if (reason != nullptr && strcmp(reason, "user_cancelled") == 0) {
+    eventName = "access_selection_cancelled";
+  } else if (reason != nullptr && strcmp(reason, "timeout") == 0) {
+    eventName = "access_selection_timeout";
+  }
+
+  if (eventName != nullptr && strlen(eventName) > 0) {
+    queueAccessSelectionEvent(eventName);
   }
 
   finishAccessSelection(reason);
 }
 
 void finishAccessSelection(const char* reason) {
-  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+  if (!accessSelection.active) {
     return;
   }
 
   Serial.printf(
-    "Access selection finished. session=%lu reason=%s\n",
-    static_cast<unsigned long>(accessSelection.sessionId),
-    reason != nullptr && strlen(reason) > 0 ? reason : "(none)"
+    "[ACCESS SELECTION] finished reason=%s session=%lu\n",
+    reason != nullptr && strlen(reason) > 0 ? reason : "(none)",
+    static_cast<unsigned long>(accessSelection.sessionId)
   );
 
-  accessSelection.state = AccessSelectionState::ACCESS_SELECTION_INACTIVE;
-  accessSelection.startedMs = 0;
+  accessSelection.active = false;
+  accessSelection.startedAtMs = 0;
   accessSelection.timeoutMs = ACCESS_SELECTION_TIMEOUT_MS;
+  accessSelection.uid = "";
   accessSelection.isMaster = false;
-  accessSelection.accessibleLockersMask = 0;
-  accessSelection.tagId = "";
+  accessSelection.accessibleMask = 0;
   accessSelection.requestId = "";
   accessSelection.userId = "";
   accessSelection.userName = "";
-  accessSelection.lastBusyTagId = "";
+  accessSelection.lastBusyUid = "";
 
   restoreNormalLedMode();
 }
 
 void serviceAccessSelection(unsigned long now) {
-  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
+  tickAccessSelection(static_cast<uint32_t>(now));
+}
+
+void tickAccessSelection(uint32_t nowMs) {
+  if (!accessSelection.active) {
     return;
   }
 
-  if (now - accessSelection.startedMs >= accessSelection.timeoutMs) {
-    cancelAccessSelection("access_selection_timeout");
+  if (nowMs - accessSelection.startedAtMs >= accessSelection.timeoutMs) {
+    cancelAccessSelection("timeout");
   }
 }
 
 void handleAccessSelectionKey(char key) {
+  Serial.printf("[KEYPAD] selection key=%c\n", key);
+
   if (key >= '1' && key <= '3') {
-    openSelectedLocker(static_cast<int>(key - '0'));
+    openSelectedLocker(static_cast<uint8_t>(key - '0'));
     return;
   }
 
   if (key == '*') {
-    cancelAccessSelection("access_selection_cancelled");
+    cancelAccessSelection("user_cancelled");
     blinkLed(1, 80, 80);
     return;
   }
@@ -3907,56 +4074,60 @@ void handleAccessSelectionKey(char key) {
     return;
   }
 
-  Serial.printf("Ignored invalid access selection key: %c\n", key);
+  Serial.printf("[ACCESS SELECTION] ignored key=%c\n", key);
   queueAccessSelectionEvent("invalid_selection_key");
   blinkLed(2, 60, 60);
 }
 
-bool openSelectedLocker(int lockerNumber) {
-  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
-    return false;
+void openSelectedLocker(uint8_t lockerNumber) {
+  if (!accessSelection.active) {
+    return;
   }
 
-  if (!hasAccessToLocker(accessSelection.accessibleLockersMask, lockerNumber)) {
-    Serial.printf("Access selection rejected locker S%d for UID %s\n", lockerNumber, accessSelection.tagId.c_str());
+  char maskText[8];
+  formatLockerMaskBinary(accessSelection.accessibleMask, maskText, sizeof(maskText));
+  if (!hasAccessToLocker(accessSelection.accessibleMask, lockerNumber)) {
+    Serial.printf("[ACCESS SELECTION] denied locker=%d mask=%s uid=%s\n", lockerNumber, maskText, accessSelection.uid.c_str());
     queueAccessSelectionEvent("access_selection_invalid_locker", static_cast<uint8_t>(lockerNumber));
+    startLedErrorFlash(350);
     blinkLed(3, 70, 70);
-    return false;
+    return;
   }
 
   if (!queueAccessSelectionEvent("access_selection_open_single", static_cast<uint8_t>(lockerNumber))) {
     blinkLed(4, 70, 70);
-    return false;
+    return;
   }
 
-  Serial.printf("Access selection opening locker S%d for UID %s\n", lockerNumber, accessSelection.tagId.c_str());
-  finishAccessSelection("access_selection_open_single");
+  Serial.printf("[LOCKER] opening locker=%d reason=access_selection uid=%s\n", lockerNumber, accessSelection.uid.c_str());
+  finishAccessSelection("open_single");
   blinkLed(2, 220, 120);
-  return true;
 }
 
-bool openAllAccessibleLockers() {
-  if (accessSelection.state != AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
-    return false;
+void openAllAccessibleLockers() {
+  if (!accessSelection.active) {
+    return;
   }
 
-  if (accessSelection.accessibleLockersMask == 0) {
+  if (accessSelection.accessibleMask == 0) {
+    startLedErrorFlash(350);
     blinkLed(4, 70, 70);
-    return false;
+    return;
   }
 
   if (!queueAccessSelectionEvent("access_selection_open_all")) {
     blinkLed(4, 70, 70);
-    return false;
+    return;
   }
 
-  Serial.printf("Access selection opening all accessible lockers. uid=%s mask=0x%02X\n",
-    accessSelection.tagId.c_str(),
-    accessSelection.accessibleLockersMask
+  char maskText[8];
+  formatLockerMaskBinary(accessSelection.accessibleMask, maskText, sizeof(maskText));
+  Serial.printf("[LOCKER] opening all reason=access_selection uid=%s mask=%s\n",
+    accessSelection.uid.c_str(),
+    maskText
   );
-  finishAccessSelection("access_selection_open_all");
+  finishAccessSelection("open_all");
   blinkLed(3, 180, 90);
-  return true;
 }
 
 bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber) {
@@ -3968,8 +4139,8 @@ bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber) {
   job.type = NetworkJobType::AccessSelectionEvent;
   job.lockerNumber = lockerNumber;
   job.boolValue = accessSelection.isMaster;
-  job.numberValue = accessSelection.accessibleLockersMask;
-  copyStringToBuffer(accessSelection.tagId, job.text1, sizeof(job.text1));
+  job.numberValue = accessSelection.accessibleMask;
+  copyStringToBuffer(accessSelection.uid, job.text1, sizeof(job.text1));
   copyStringToBuffer(accessSelection.userId, job.text2, sizeof(job.text2));
   copyCStringToBuffer(eventName, job.text3, sizeof(job.text3));
   copyStringToBuffer(accessSelection.userName, job.text4, sizeof(job.text4));
@@ -3983,22 +4154,39 @@ bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber) {
   return true;
 }
 
-void updateVisualState() {
-  if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
-    updateAccessSelectionLeds(millis());
+void setLedMode(LedMode nextMode) {
+  if (ledMode == nextMode) {
     return;
   }
 
-  if (codeResultFlash.active || wifiConnectInProgress) {
+  ledMode = nextMode;
+  markVisualStateDirty();
+}
+
+void updateLeds(uint32_t nowMs) {
+  if (accessSelection.active) {
+    ledMode = LED_MODE_ACCESS_SELECTION;
+    updateAccessSelectionLeds(nowMs);
+    strip.show();
+    return;
+  }
+
+  if (ledMode == LED_MODE_ERROR_FLASH && ledErrorFlash.active) {
+    renderErrorFlashLeds(nowMs);
+    strip.show();
     return;
   }
 
   if (tagAssignmentMode.active) {
-    const uint8_t frame = static_cast<uint8_t>((millis() / 140) % (TOTAL_LEDS / 2));
+    const uint8_t frame = static_cast<uint8_t>((nowMs / 140) % (TOTAL_LEDS / 2));
     if (frame != lastTagAssignmentFrame) {
       lastTagAssignmentFrame = frame;
       renderTagAssignmentFrame(frame);
     }
+    return;
+  }
+
+  if (codeResultFlash.active || wifiConnectInProgress) {
     return;
   }
 
@@ -4015,6 +4203,10 @@ void updateVisualState() {
   visualStateDirty = false;
 }
 
+void updateVisualState() {
+  updateLeds(millis());
+}
+
 void markVisualStateDirty() {
   visualStateDirty = true;
 }
@@ -4023,14 +4215,12 @@ void updateAccessSelectionLeds(unsigned long nowMs) {
   clearStrip();
 
   for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
-    if (hasAccessToLocker(accessSelection.accessibleLockersMask, lockerNumber)) {
+    if (hasAccessToLocker(accessSelection.accessibleMask, lockerNumber)) {
       renderAllowedSegmentAnimation(lockerNumber, nowMs);
     } else {
       renderDeniedSegmentBlink(lockerNumber, nowMs);
     }
   }
-
-  strip.show();
 }
 
 void renderAllowedSegmentAnimation(uint8_t lockerNumber, unsigned long nowMs) {
@@ -4050,7 +4240,7 @@ void renderAllowedSegmentAnimation(uint8_t lockerNumber, unsigned long nowMs) {
   const bool forward = frame < segment.length;
   const uint16_t localPosition = forward ? frame : (cycleLength - frame);
 
-  for (uint8_t offset = 0; offset < 4; offset += 1) {
+  for (uint8_t offset = 0; offset < ACCESS_SELECTION_TAIL_LENGTH; offset += 1) {
     int16_t tailPosition = forward
       ? static_cast<int16_t>(localPosition) - static_cast<int16_t>(offset)
       : static_cast<int16_t>(localPosition) + static_cast<int16_t>(offset);
@@ -4061,8 +4251,8 @@ void renderAllowedSegmentAnimation(uint8_t lockerNumber, unsigned long nowMs) {
 
     const uint16_t ledIndex = static_cast<uint16_t>(segment.start + tailPosition);
     const uint8_t brightness = offset == 0
-      ? 160
-      : (offset == 1 ? 96 : (offset == 2 ? 48 : 20));
+      ? 255
+      : (offset == 1 ? 140 : 70);
     strip.setPixelColor(ledIndex, colorViolet(brightness));
   }
 }
@@ -4083,7 +4273,47 @@ void renderDeniedSegmentBlink(uint8_t lockerNumber, unsigned long nowMs) {
   }
 }
 
+void startLedErrorFlash(uint32_t durationMs) {
+  if (accessSelection.active) {
+    blinkLed(2, 50, 50);
+    return;
+  }
+
+  ledErrorFlash = { true, millis(), durationMs };
+  setLedMode(LED_MODE_ERROR_FLASH);
+  markVisualStateDirty();
+  updateVisualState();
+}
+
+void renderErrorFlashLeds(uint32_t nowMs) {
+  clearStrip();
+  const bool visible = ((nowMs / 120) % 2) == 0;
+  if (!visible) {
+    return;
+  }
+
+  for (uint16_t led = 0; led < TOTAL_LEDS; led += 1) {
+    strip.setPixelColor(led, colorRed(EFFECT_BRIGHTNESS));
+  }
+}
+
+void serviceLedErrorFlash(uint32_t nowMs) {
+  if (!ledErrorFlash.active) {
+    return;
+  }
+
+  if (nowMs - ledErrorFlash.startedAtMs < ledErrorFlash.durationMs) {
+    return;
+  }
+
+  ledErrorFlash.active = false;
+  setLedMode(accessSelection.active ? LED_MODE_ACCESS_SELECTION : LED_MODE_NORMAL);
+  markVisualStateDirty();
+}
+
 void restoreNormalLedMode() {
+  setLedMode(LED_MODE_NORMAL);
+  Serial.println("[LED] restored normal mode");
   markVisualStateDirty();
   updateVisualState();
 }
@@ -4362,12 +4592,12 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
           stopTagAssignmentMode();
         }
       } else if (runtime.stableUid.length() > 0 && runtime.stableUid != runtime.lastTriggeredUid) {
-        if (accessSelection.state == AccessSelectionState::ACCESS_SELECTION_ACTIVE) {
-          if (runtime.stableUid != accessSelection.lastBusyTagId) {
-            accessSelection.lastBusyTagId = runtime.stableUid;
-            Serial.printf("[RFID VERIFY] ignored uid=%s reason=access_selection_busy activeUid=%s\n",
+        if (accessSelection.active) {
+          if (runtime.stableUid != accessSelection.lastBusyUid) {
+            accessSelection.lastBusyUid = runtime.stableUid;
+            Serial.printf("[RFID VERIFY] ignored uid=%s reason=access_selection_active activeUid=%s\n",
               runtime.stableUid.c_str(),
-              accessSelection.tagId.c_str()
+              accessSelection.uid.c_str()
             );
             queueAccessSelectionEvent("access_selection_busy");
             blinkLed(2, 60, 60);
@@ -4377,7 +4607,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         }
 
         if (masterTagVerificationPending) {
-          Serial.printf("[RFID VERIFY] ignored uid=%s reason=pending_request pendingUid=%s requestId=%s\n",
+          Serial.printf("[RFID VERIFY] duplicate ignored uid=%s reason=pending pendingUid=%s requestId=%s\n",
             runtime.stableUid.c_str(),
             pendingMasterTagId,
             pendingMasterTagMessageId[0] != '\0' ? pendingMasterTagMessageId : "(none)"
@@ -4389,11 +4619,11 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         if (
           lastVerifiedUid.length() > 0 &&
           runtime.stableUid == lastVerifiedUid &&
-          now - lastVerifyStartedAtMs < RFID_VERIFY_COOLDOWN_MS
+          now - lastVerifyStartedAtMs < VERIFY_DUPLICATE_COOLDOWN_MS
         ) {
           Serial.printf("[RFID VERIFY] ignored uid=%s reason=duplicate_tag_detected cooldownRemainingMs=%lu\n",
             runtime.stableUid.c_str(),
-            static_cast<unsigned long>(RFID_VERIFY_COOLDOWN_MS - (now - lastVerifyStartedAtMs))
+            static_cast<unsigned long>(VERIFY_DUPLICATE_COOLDOWN_MS - (now - lastVerifyStartedAtMs))
           );
           runtime.lastTriggeredUid = runtime.stableUid;
           return;
@@ -4449,6 +4679,9 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
     markLockerStateChanged(runtime, now);
   } else {
     runtime.lastTriggeredUid = "";
+    if (accessSelection.active) {
+      Serial.println("[ACCESS SELECTION] still active after UID removed");
+    }
   }
 
   runtime.stableUid = "";
