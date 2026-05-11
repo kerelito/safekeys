@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { WebSocket, WebSocketServer } = require("ws");
 const {
   buildAck,
+  buildCodeVerifyResult,
   buildLockerStatusResult,
   buildTagVerifyResult,
   DEFAULT_DEVICE_ID,
@@ -180,6 +181,43 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
             await sendJson(ws, buildTagVerifyResult(envelope, {}, {
               ok: false,
               error: error.message || "tag_verify_failed"
+            }));
+          });
+
+        return;
+      }
+
+      if (envelope.type === "code.verify") {
+        await sendJson(ws, buildAck(envelope));
+
+        lockerService.processDeviceEnvelope(envelope, context)
+          .then(async response => {
+            const result = buildCodeVerifyResult(envelope, response?.verification || {}, {
+              ok: response?.ok !== false,
+              error: response?.ok === false ? response?.error : null
+            });
+            await sendJson(ws, result);
+            try {
+              await sendPendingCommands(ws);
+            } catch (error) {
+              console.error("Nie udalo sie wyslac polecen po weryfikacji kodu.", {
+                deviceId: ws.deviceId,
+                connectionId: ws.connectionId,
+                messageId: envelope.messageId || null,
+                error: error.message
+              });
+            }
+          })
+          .catch(async error => {
+            console.error("Nie udalo sie zweryfikowac kodu przez WebSocket.", {
+              deviceId: ws.deviceId,
+              connectionId: ws.connectionId,
+              messageId: envelope.messageId || null,
+              error: error.message
+            });
+            await sendJson(ws, buildCodeVerifyResult(envelope, {}, {
+              ok: false,
+              error: error.message || "code_verify_failed"
             }));
           });
 

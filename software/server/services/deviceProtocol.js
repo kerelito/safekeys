@@ -127,6 +127,32 @@ function buildTagVerifyResult(message = {}, verification = {}, extra = {}) {
   return result;
 }
 
+function buildCodeVerifyResult(message = {}, verification = {}, extra = {}) {
+  const payload = message.payload || {};
+  const code = normalizeString(
+    extra.code
+      || verification?.code
+      || payload.code
+  );
+  const valid = verification?.valid === true;
+  const locker = Number(verification?.locker);
+  const result = {
+    type: "code.verify.result",
+    requestId: normalizeString(message?.messageId || payload.requestId, null),
+    code,
+    ok: extra.ok !== false,
+    valid,
+    locker: Number.isInteger(locker) ? locker : null,
+    serverTime: new Date().toISOString()
+  };
+
+  if (extra.error) {
+    result.error = String(extra.error);
+  }
+
+  return result;
+}
+
 function buildLockerStatusResult(message = {}, state = {}) {
   const lockers = Array.isArray(state?.accepted)
     ? state.accepted
@@ -170,6 +196,7 @@ module.exports = {
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   buildAck,
+  buildCodeVerifyResult,
   buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,

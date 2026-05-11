@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildAck,
+  buildCodeVerifyResult,
   buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,
@@ -156,4 +157,22 @@ test("builds RFID verification result separate from transport ack", () => {
   assert.equal(result.accessibleLockersMask, 7);
   assert.deepEqual(result.lockers, [1, 2, 3]);
   assert.equal(result.displayName, "Master");
+});
+
+test("builds code verification result separate from transport ack", () => {
+  const result = buildCodeVerifyResult({
+    messageId: "verify-9",
+    payload: { code: "6996" }
+  }, {
+    valid: true,
+    locker: 2
+  });
+
+  assert.equal(result.type, "code.verify.result");
+  assert.equal(result.requestId, "verify-9");
+  assert.equal(result.code, "6996");
+  assert.equal(result.ok, true);
+  assert.equal(result.valid, true);
+  assert.equal(result.locker, 2);
+  assert.match(result.serverTime, /^\d{4}-\d{2}-\d{2}T/);
 });

@@ -72,7 +72,12 @@ static const uint8_t LOCKER_COUNT = 3;
 static const uint8_t LEDS_PER_LOCKER = 20;
 
 static const uint8_t CODE_LENGTH = 4;
-static const uint8_t CODE_ENTRY_LED_POSITIONS[CODE_LENGTH] = { 9, 19, 29, 39 };
+static const uint8_t CODE_ENTRY_GROUP_SIZE = 3;
+static const uint16_t CODE_ENTRY_LED_GROUP_STARTS[CODE_LENGTH] = { 8, 22, 36, 50 };
+static const unsigned long CODE_VERIFY_PENDING_PULSE_MS = 900;
+static const unsigned long CODE_RESULT_ON_MS = 180;
+static const unsigned long CODE_RESULT_OFF_MS = 120;
+static const uint8_t CODE_RESULT_BLINKS = 3;
 
 static const uint8_t STATUS_BRIGHTNESS = 48;
 static const uint8_t EFFECT_BRIGHTNESS = 72;
@@ -103,7 +108,8 @@ static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
-static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 8000;
+static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 20000;
+static const unsigned long DEVICE_VERIFY_CODE_RESULT_GRACE_MS = 5000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS = 20000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS = 5000;
 static const unsigned long VERIFY_DUPLICATE_COOLDOWN_MS = 5000;
@@ -111,6 +117,18 @@ static const unsigned long ACCESS_SELECTION_TIMEOUT_MS = 60000;
 static const unsigned long ACCESS_SELECTION_DENIED_BLINK_MS = 500;
 static const unsigned long ACCESS_SELECTION_ALLOWED_FRAME_MS = 70;
 static const uint8_t ACCESS_SELECTION_TAIL_LENGTH = 3;
+static const unsigned long LED_FRAME_INTERVAL_MS = 70;
+static const unsigned long LED_STARTUP_EFFECT_MS = 1800;
+static const unsigned long LED_SYNC_OK_EFFECT_MS = 900;
+static const unsigned long LED_REMOTE_FLASH_MS = 900;
+static const unsigned long LED_TAG_ASSIGNMENT_SUCCESS_MS = 1000;
+static const unsigned long LED_UNKNOWN_TAG_PULSE_MS = 1600;
+static const unsigned long LED_DOOR_BLINK_MS = 500;
+static const unsigned long LED_BACKEND_OFFLINE_PULSE_MS = 1100;
+static const unsigned long LED_ONLINE_BREATH_MS = 2600;
+static const unsigned long LED_READER_ERROR_BLINK_MS = 160;
+static const unsigned long LED_STATE_SYNC_PENDING_MS = 180;
+static const unsigned long LED_PANEL_STATUS_RESULT_WAIT_MS = 5000;
 static const unsigned long DEVICE_STATE_BATCH_ACK_TIMEOUT_MS = 8000;
 static const unsigned long DEVICE_STATE_BATCH_FALLBACK_DELAY_MS = 500;
 static const unsigned long DEVICE_STATE_BATCH_RETRY_BASE_MS = 5000;
@@ -124,6 +142,7 @@ static const unsigned long LOCKER_INPUT_DEBOUNCE_MS = 250;
 static const unsigned long RFID_REMOVAL_DEBOUNCE_MS = 900;
 static const unsigned long RFID_MASTER_REARM_DELAY_MS = 1500;
 static const unsigned long RFID_SCAN_INTERVAL_MS = 5;
+static const unsigned long RFID_HEALTH_CHECK_INTERVAL_MS = 5000;
 static const uint8_t KEYPAD_RELEASE_CONFIRM_SCANS = 3;
 static const unsigned long KEYPAD_RELEASE_DEBOUNCE_MS = 25;
 static const uint8_t RFID_PRESENT_CONFIRM_SCANS = 3;
@@ -246,6 +265,36 @@ enum class LockerLedStatus : uint8_t {
   Ok,
   Warning,
   Error
+};
+
+enum class LockerItemStatus : uint8_t {
+  Unknown,
+  Missing,
+  Known,
+  UnknownTag
+};
+
+enum LedStripEffectKind : uint8_t {
+  LED_STRIP_EFFECT_NONE,
+  LED_STRIP_EFFECT_STARTUP,
+  LED_STRIP_EFFECT_SYNC_OK,
+  LED_STRIP_EFFECT_TAG_ASSIGN_SUCCESS,
+  LED_STRIP_EFFECT_REMOTE_ALL
+};
+
+struct LedStripEffect {
+  bool active;
+  LedStripEffectKind kind;
+  uint32_t startedAtMs;
+  uint32_t durationMs;
+};
+
+struct LedSegmentFlashEffect {
+  bool active;
+  uint8_t lockerNumber;
+  uint32_t startedAtMs;
+  uint32_t durationMs;
+  uint32_t color;
 };
 
 struct AccessSelectionSession {
@@ -443,6 +492,7 @@ TaskHandle_t networkTaskHandle = nullptr;
 bool heartbeatQueued = false;
 bool deviceActionsPollQueued = false;
 bool codeVerificationPending = false;
+bool codeVerificationTimedOut = false;
 bool masterTagVerificationPending = false;
 bool lockerStatusQueued[LOCKER_COUNT] = { false, false, false };
 bool deviceStateBatchQueued = false;
@@ -477,6 +527,8 @@ unsigned long pendingMasterTagSentMs = 0;
 unsigned long nextFullStateResyncDueMs = 0;
 unsigned long pendingStateBatchSentMs = 0;
 unsigned long nextDeviceStateBatchAttemptMs = 0;
+volatile bool panelStatusResultPending = false;
+volatile unsigned long panelStatusResultPendingStartedMs = 0;
 uint32_t deviceMessageSequence = 0;
 uint32_t lockerStateVersions[LOCKER_COUNT] = { 1, 1, 1 };
 uint32_t pendingStateVersions[LOCKER_COUNT] = { 0, 0, 0 };
@@ -487,6 +539,14 @@ LockerLedStatus panelLockerLedStatuses[LOCKER_COUNT] = {
 };
 bool panelLockerLedStatusKnown[LOCKER_COUNT] = { false, false, false };
 uint32_t panelLockerLedStatusVersions[LOCKER_COUNT] = { 0, 0, 0 };
+LockerItemStatus panelLockerItemStatuses[LOCKER_COUNT] = {
+  LockerItemStatus::Unknown,
+  LockerItemStatus::Unknown,
+  LockerItemStatus::Unknown
+};
+bool panelLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
+bool lockerReaderHealthy[LOCKER_COUNT] = { true, true, true };
+bool masterReaderHealthy = true;
 bool fullStateResyncPending = true;
 bool pendingStateWasFull = false;
 uint32_t fullStateResyncGeneration = 1;
@@ -507,8 +567,12 @@ bool candidateLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
 bool candidateLockerLockClosed[LOCKER_COUNT] = { true, true, true };
 unsigned long lockerInputCandidateSinceMs[LOCKER_COUNT] = { 0, 0, 0 };
 unsigned long lastLockerInputServiceMs = 0;
+unsigned long lastRfidHealthCheckMs = 0;
 char processedCommandIds[COMMAND_DEDUP_CACHE_SIZE][32] = {};
 uint8_t nextProcessedCommandSlot = 0;
+LedStripEffect ledStripEffect = { false, LED_STRIP_EFFECT_NONE, 0, 0 };
+LedSegmentFlashEffect ledSegmentFlashEffect = { false, 0, 0, 0, 0 };
+unsigned long lastLedFrameMs = 0;
 
 void configureWiFiRuntime();
 void connectWifi();
@@ -526,6 +590,7 @@ bool shouldUseHttpsFallback(unsigned long now);
 void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length);
 void handleDeviceWebSocketMessage(const char* payload, size_t length);
 void handleTagVerifyResultMessage(JsonDocument& doc);
+void handleCodeVerifyResultMessage(JsonDocument& doc);
 void handleLockerStatusResultMessage(JsonDocument& doc);
 bool sendDeviceHello();
 bool sendDeviceHeartbeatWs();
@@ -592,6 +657,7 @@ void clearPendingCode();
 void setPendingMasterTag(const String& tagId);
 void clearPendingMasterTag();
 void failPendingCodeVerification(const char* reason);
+void markPendingCodeVerificationTimedOut();
 void failPendingMasterTagVerification(const char* reason);
 void markPendingMasterTagTimedOut(const char* reason);
 bool isPendingMasterTagResultExpired(uint32_t nowMs);
@@ -612,9 +678,28 @@ bool isLockerComplete(const LockerState& state);
 LockerLedStatus getLockerLedStatus(uint8_t lockerIndex, const LockerState& state);
 LockerLedStatus getProvisionalLockerLedStatus(const LockerState& state);
 bool parseLockerLedStatus(const char* value, LockerLedStatus& status);
+LockerItemStatus parseLockerItemStatus(const char* value);
 const char* lockerLedStatusName(LockerLedStatus status);
-bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, const char* severity);
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, const char* severity);
 uint32_t colorForLockerLedStatus(LockerLedStatus status);
+bool hasAnimatedNormalLedState(uint32_t nowMs);
+bool isStateSyncPending();
+bool isBackendOfflineSignalActive();
+void startLedStripEffect(LedStripEffectKind kind, uint32_t durationMs);
+void startLedSegmentFlash(uint8_t lockerNumber, uint32_t color, uint32_t durationMs);
+void serviceLedTimedEffects(uint32_t nowMs);
+void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, uint32_t nowMs);
+void renderStartupLeds(uint32_t nowMs);
+void applyNormalLedOverlays(uint32_t nowMs);
+void applyStateSyncPendingOverlay(uint32_t nowMs);
+void applySyncOkOverlay(uint32_t nowMs);
+void applyRemoteAllOverlay(uint32_t nowMs);
+void applyTagAssignmentSuccessOverlay(uint32_t nowMs);
+void applySegmentFlashOverlay(uint32_t nowMs);
+void applyBackendOfflineOverlay(uint32_t nowMs);
+void applyOnlineBreathOverlay(uint32_t nowMs);
+void fillSegment(const LockerLedSegment& segment, uint32_t color);
+void clearSegment(const LockerLedSegment& segment);
 bool hasAccessToLocker(uint8_t mask, int lockerNumber);
 uint8_t lockerNumberToMask(int lockerNumber);
 LockerLedSegment getLockerLedSegment(uint8_t lockerNumber);
@@ -629,8 +714,10 @@ void startLedErrorFlash(uint32_t durationMs = 700);
 void renderErrorFlashLeds(uint32_t nowMs);
 void serviceLedErrorFlash(uint32_t nowMs);
 void restoreNormalLedMode();
-void renderLockerStatus();
-void renderCodeEntry();
+void renderLockerStatus(uint32_t nowMs);
+void renderCodeEntry(uint32_t nowMs);
+void renderCodeEntryProgress(uint8_t count, bool verificationPending, uint32_t nowMs);
+void setCodeEntryGroup(uint8_t index, uint32_t color);
 void renderWifiLoadingFrame(uint8_t frameIndex);
 void flashCodeResult(const String& code, bool success);
 void serviceCodeResultFlash(unsigned long now);
@@ -638,12 +725,14 @@ void renderCodeResultFrame(bool success, uint8_t count, bool visible);
 void clearStrip();
 char mapRawKeyToChar(uint8_t rawKey);
 void initializeRfidReaders();
+void serviceRfidReaderHealth(unsigned long now);
 void serviceRfidReaders(unsigned long now);
 bool scanRfidReader(RfidReaderRuntime& runtime, unsigned long now);
 void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scanResult, unsigned long now);
 RfidScanResult readTagFromReader(RfidReaderRuntime& runtime);
 String uidToString(const MFRC522::Uid& uid);
-void debugPrintReaderChipVersion(const RfidReaderRuntime& runtime);
+byte debugPrintReaderChipVersion(const RfidReaderRuntime& runtime);
+bool isHealthyRfidVersion(byte version);
 void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool isMaster, const String& requestId = "", const String& userId = "", const String& userName = "");
 void cancelAccessSelection(const char* reason);
 void finishAccessSelection(const char* reason);
@@ -690,6 +779,14 @@ uint32_t colorBlue(uint8_t brightness = EFFECT_BRIGHTNESS) {
   return strip.Color(0, 0, brightness);
 }
 
+uint32_t colorCyan(uint8_t brightness = EFFECT_BRIGHTNESS) {
+  return strip.Color(0, brightness, brightness);
+}
+
+uint32_t colorWhite(uint8_t brightness = EFFECT_BRIGHTNESS) {
+  return strip.Color(brightness, brightness, brightness);
+}
+
 uint32_t colorYellow(uint8_t brightness = EFFECT_BRIGHTNESS) {
   return strip.Color(brightness, brightness, 0);
 }
@@ -730,6 +827,7 @@ void setup() {
   configureWiFiRuntime();
   configureLockerInputs();
   initializeRfidReaders();
+  startLedStripEffect(LED_STRIP_EFFECT_STARTUP, LED_STARTUP_EFFECT_MS);
   initializeTaskWatchdog();
   initializeNetworkTask();
 
@@ -1026,6 +1124,7 @@ void loop() {
   serviceStatusLed(now);
   serviceWifiConnection(now);
   serviceLedErrorFlash(now);
+  serviceLedTimedEffects(static_cast<uint32_t>(now));
   serviceCodeResultFlash(now);
   serviceAccessSelection(now);
   servicePendingMasterTagVerification(now);
@@ -1034,12 +1133,19 @@ void loop() {
     handleKeypad();
   }
   serviceRfidReaders(now);
+  serviceRfidReaderHealth(now);
   serviceLockerInputChanges(now);
   serviceNetworkResults();
   updateVisualState();
 
-  if (codeVerificationPending && pendingCodeSentMs != 0 && now - pendingCodeSentMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
-    failPendingCodeVerification("Code verification timed out.");
+  if (codeVerificationPending && pendingCodeSentMs != 0) {
+    const unsigned long codeVerifyElapsedMs = now - pendingCodeSentMs;
+    if (!codeVerificationTimedOut && codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
+      markPendingCodeVerificationTimedOut();
+    }
+    if (codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS) {
+      failPendingCodeVerification("Code verification expired after grace period.");
+    }
   }
 
   if (!isWifiReady()) {
@@ -1081,7 +1187,7 @@ void connectWifi() {
   lastWifiRetryMs = wifiConnectStartedMs;
   lastWifiLoadingFrameMs = 0;
   wifiLoadingFrame = 0;
-  renderWifiLoadingFrame(wifiLoadingFrame);
+  markVisualStateDirty();
   pulseLed(35);
 }
 
@@ -1233,8 +1339,8 @@ void serviceWifiConnection(unsigned long now) {
 
   if (lastWifiLoadingFrameMs == 0 || now - lastWifiLoadingFrameMs >= WIFI_LOADING_FRAME_MS) {
     lastWifiLoadingFrameMs = now;
-    renderWifiLoadingFrame(wifiLoadingFrame);
     wifiLoadingFrame = static_cast<uint8_t>((wifiLoadingFrame + 1) % (TOTAL_LEDS / 2));
+    markVisualStateDirty();
     pulseLed(35);
     Serial.print(".");
   }
@@ -1425,6 +1531,11 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
     return;
   }
 
+  if (strcmp(type, "code.verify.result") == 0) {
+    handleCodeVerifyResultMessage(doc);
+    return;
+  }
+
   if (strcmp(type, "locker.status.result") == 0) {
     handleLockerStatusResultMessage(doc);
     return;
@@ -1434,14 +1545,34 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
     if (codeVerificationPending && pendingCodeMessageId[0] != '\0' && strcmp(messageId, pendingCodeMessageId) == 0) {
+      Serial.printf("[WS ACK] code verify delivered requestId=%s ok=%s\n", messageId, ok ? "true" : "false");
+      const JsonObject verification = doc["verification"];
+      if (ok && verification.isNull()) {
+        return;
+      }
+
       NetworkResult result = {};
       result.type = NetworkResultType::VerifyCode;
       result.requestOk = ok;
       copyCStringToBuffer(pendingCode, result.text1, sizeof(result.text1));
-      const JsonObject verification = doc["verification"];
+      copyCStringToBuffer(messageId, result.requestId, sizeof(result.requestId));
       if (!verification.isNull()) {
         result.boolValue1 = ok && (verification["valid"] | false);
         result.lockerNumber = static_cast<uint8_t>(verification["locker"] | 0);
+        if (codeVerificationTimedOut) {
+          Serial.printf("[CODE VERIFY RESULT] late legacy ack result accepted code=%s requestId=%s\n",
+            pendingCode,
+            messageId
+          );
+        }
+        Serial.printf(
+          "[CODE VERIFY RESULT] legacy ack result accepted code=%s requestId=%s valid=%s locker=%u ok=%s\n",
+          pendingCode,
+          messageId,
+          result.boolValue1 ? "true" : "false",
+          result.lockerNumber,
+          ok ? "true" : "false"
+        );
       }
       if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
         Serial.printf("[WS] verify code result queue full for %s\n", messageId);
@@ -1656,6 +1787,97 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   }
 }
 
+void handleCodeVerifyResultMessage(JsonDocument& doc) {
+  const char* requestId = doc["requestId"] | "";
+  if (strlen(requestId) == 0) {
+    requestId = doc["messageId"] | "";
+  }
+
+  const char* code = doc["code"] | "";
+  if (strlen(code) == 0) {
+    code = pendingCode;
+  }
+
+  const bool ok = doc["ok"] | false;
+  const bool valid = doc["valid"] | false;
+  const uint8_t lockerNumber = static_cast<uint8_t>(doc["locker"] | 0);
+  const char* error = doc["error"] | "";
+
+  Serial.printf(
+    "[CODE VERIFY RESULT] code=%s requestId=%s valid=%s locker=%u ok=%s%s%s\n",
+    strlen(code) > 0 ? code : "(none)",
+    strlen(requestId) > 0 ? requestId : "(none)",
+    valid ? "true" : "false",
+    lockerNumber,
+    ok ? "true" : "false",
+    strlen(error) > 0 ? " error=" : "",
+    strlen(error) > 0 ? error : ""
+  );
+
+  if (!codeVerificationPending) {
+    Serial.printf(
+      "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s reason=no_pending_request\n",
+      strlen(code) > 0 ? code : "(none)",
+      strlen(requestId) > 0 ? requestId : "(none)"
+    );
+    return;
+  }
+
+  if (strlen(requestId) > 0 && pendingCodeMessageId[0] != '\0' && strcmp(requestId, pendingCodeMessageId) != 0) {
+    Serial.printf(
+      "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s expected=%s\n",
+      strlen(code) > 0 ? code : "(none)",
+      requestId,
+      pendingCodeMessageId
+    );
+    return;
+  }
+
+  if (strlen(code) > 0 && strcmp(code, pendingCode) != 0) {
+    Serial.printf(
+      "[CODE VERIFY RESULT] stale result ignored code=%s expectedCode=%s\n",
+      code,
+      pendingCode
+    );
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (
+    pendingCodeSentMs != 0 &&
+    now - pendingCodeSentMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS
+  ) {
+    Serial.printf(
+      "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s reason=expired_result_window\n",
+      strlen(code) > 0 ? code : pendingCode,
+      strlen(requestId) > 0 ? requestId : "(none)"
+    );
+    failPendingCodeVerification("Code verification result arrived after grace period.");
+    return;
+  }
+
+  if (codeVerificationTimedOut) {
+    Serial.printf(
+      "[CODE VERIFY RESULT] late result accepted code=%s requestId=%s\n",
+      strlen(code) > 0 ? code : pendingCode,
+      strlen(requestId) > 0 ? requestId : "(none)"
+    );
+  }
+
+  NetworkResult result = {};
+  result.type = NetworkResultType::VerifyCode;
+  result.requestOk = ok;
+  result.boolValue1 = ok && valid;
+  result.lockerNumber = lockerNumber;
+  copyCStringToBuffer(strlen(code) > 0 ? code : pendingCode, result.text1, sizeof(result.text1));
+  copyCStringToBuffer(requestId, result.requestId, sizeof(result.requestId));
+
+  if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+    Serial.printf("[WS] code verify result queue full requestId=%s\n", strlen(requestId) > 0 ? requestId : "(none)");
+    recoverFromDroppedNetworkResult(result);
+  }
+}
+
 void handleLockerStatusResultMessage(JsonDocument& doc) {
   const char* messageId = doc["messageId"] | "(none)";
   JsonArray lockers = doc["lockers"];
@@ -1680,6 +1902,8 @@ void handleLockerStatusResultMessage(JsonDocument& doc) {
     const uint8_t lockerNumber = static_cast<uint8_t>(item["locker"] | 0);
     const uint32_t version = static_cast<uint32_t>(item["version"] | 0);
     const char* severity = item["severity"] | "";
+    const LockerItemStatus itemStatus = parseLockerItemStatus(item["itemStatus"] | "");
+    const bool doorClosed = item["isDoorClosed"] | true;
     LockerLedStatus status;
     if (!parseLockerLedStatus(severity, status)) {
       Serial.printf("[LED STATUS] locker=%u ignored reason=unknown_severity value=%s\n",
@@ -1689,13 +1913,16 @@ void handleLockerStatusResultMessage(JsonDocument& doc) {
       continue;
     }
 
-    if (applyPanelLockerLedStatus(lockerNumber, version, status, severity)) {
+    if (applyPanelLockerLedStatus(lockerNumber, version, status, itemStatus, doorClosed, severity)) {
       applied += 1;
     }
   }
 
   if (applied > 0) {
+    panelStatusResultPending = false;
+    panelStatusResultPendingStartedMs = 0;
     Serial.printf("[LED STATUS] applied panel statuses count=%u messageId=%s\n", applied, messageId);
+    startLedStripEffect(LED_STRIP_EFFECT_SYNC_OK, LED_SYNC_OK_EFFECT_MS);
     markVisualStateDirty();
     updateVisualState();
   }
@@ -2060,7 +2287,7 @@ void handleKeypad() {
     enteredCode += key;
     Serial.printf("Current code buffer: %s\n", enteredCode.c_str());
     markVisualStateDirty();
-    renderCodeEntry();
+    renderCodeEntry(now);
     return;
   }
 
@@ -2078,7 +2305,7 @@ void handleKeypad() {
       Serial.println("Enter exactly 4 digits before sending the code.");
       blinkLed(3, 70, 70);
       markVisualStateDirty();
-      renderCodeEntry();
+      renderCodeEntry(now);
       return;
     }
 
@@ -2198,7 +2425,7 @@ void processEnteredCode(const String& code) {
   Serial.printf("Queueing code %s for backend verification...\n", code.c_str());
   setPendingCode(code);
   setStatusLed(true);
-  renderCodeEntry();
+  renderCodeEntry(millis());
 
   NetworkJob job = {};
   job.type = NetworkJobType::VerifyCode;
@@ -2290,6 +2517,9 @@ void handleNetworkResult(const NetworkResult& result) {
         resetStateBatchRetry();
         forceNextStateBatchHttps = false;
         rememberAckedStateFingerprint(static_cast<uint32_t>(result.numberValue), result.boolValue1, fullStateResyncGeneration, now);
+        if (!panelStatusResultPending) {
+          startLedStripEffect(LED_STRIP_EFFECT_SYNC_OK, LED_SYNC_OK_EFFECT_MS);
+        }
         Serial.printf("Device state batch delivered via %s\n", isDeviceWebSocketReady() ? "WebSocket" : "HTTPS fallback");
       } else {
         for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -2355,20 +2585,30 @@ void handleNetworkResult(const NetworkResult& result) {
       clearPendingCode();
 
       if (!result.requestOk) {
-        Serial.println("Code verification request failed.");
+        Serial.printf("[CODE VERIFY] request failed code=%s requestId=%s\n",
+          result.text1,
+          strlen(result.requestId) > 0 ? result.requestId : "(none)"
+        );
         flashCodeResult(String(result.text1), false);
         blinkLed(5, 80, 80);
         break;
       }
 
       if (!result.boolValue1) {
-        Serial.printf("Code %s is invalid.\n", result.text1);
+        Serial.printf("[CODE VERIFY] invalid code=%s requestId=%s\n",
+          result.text1,
+          strlen(result.requestId) > 0 ? result.requestId : "(none)"
+        );
         flashCodeResult(String(result.text1), false);
         blinkLed(4, 120, 90);
         break;
       }
 
-      Serial.printf("Code %s is valid for locker S%u.\n", result.text1, result.lockerNumber);
+      Serial.printf("[CODE VERIFY] valid code=%s locker=S%u requestId=%s\n",
+        result.text1,
+        result.lockerNumber,
+        strlen(result.requestId) > 0 ? result.requestId : "(none)"
+      );
       flashCodeResult(String(result.text1), true);
       blinkLed(2, 260, 140);
       break;
@@ -2572,12 +2812,14 @@ void handleRemoteCommand(const NetworkResult& result) {
       message = "Invalid locker number.";
     } else {
       Serial.printf("Remote open command applied for locker S%u (relay output not configured in this firmware).\n", result.lockerNumber);
+      startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
       blinkLed(2, 120, 80);
       status = "acknowledged";
       message = "Command acknowledged; relay output is not configured in this firmware.";
     }
   } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
     Serial.println("Remote release-all command applied (relay outputs not configured in this firmware).");
+    startLedStripEffect(LED_STRIP_EFFECT_REMOTE_ALL, LED_REMOTE_FLASH_MS);
     blinkLed(3, 120, 80);
     status = "acknowledged";
     message = "Command acknowledged; relay outputs are not configured in this firmware.";
@@ -2813,6 +3055,7 @@ void handleDeviceStateAck(const NetworkResult& result) {
     fullStateResyncPending = false;
   }
   Serial.printf("[WS] state ack ok for %s\n", result.text1);
+  startLedStripEffect(LED_STRIP_EFFECT_SYNC_OK, LED_SYNC_OK_EFFECT_MS);
   clearPendingStateBatch();
 }
 
@@ -2835,11 +3078,15 @@ void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize) {
 
 void setPendingCode(const String& code) {
   codeVerificationPending = true;
+  codeVerificationTimedOut = false;
   copyStringToBuffer(code, pendingCode, sizeof(pendingCode));
+  pendingCodeMessageId[0] = '\0';
+  pendingCodeSentMs = 0;
 }
 
 void clearPendingCode() {
   codeVerificationPending = false;
+  codeVerificationTimedOut = false;
   pendingCode[0] = '\0';
   pendingCodeMessageId[0] = '\0';
   pendingCodeSentMs = 0;
@@ -2884,6 +3131,7 @@ void failPendingCodeVerification(const char* reason) {
   result.type = NetworkResultType::VerifyCode;
   result.requestOk = false;
   copyCStringToBuffer(pendingCode, result.text1, sizeof(result.text1));
+  copyCStringToBuffer(pendingCodeMessageId, result.requestId, sizeof(result.requestId));
   clearPendingCode();
   setStatusLed(false);
 
@@ -2894,6 +3142,21 @@ void failPendingCodeVerification(const char* reason) {
   if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
     recoverFromDroppedNetworkResult(result);
   }
+}
+
+void markPendingCodeVerificationTimedOut() {
+  if (!codeVerificationPending) {
+    return;
+  }
+
+  codeVerificationTimedOut = true;
+  Serial.printf(
+    "[CODE VERIFY] verification timed out code=%s requestId=%s elapsed=%lums grace=%lums\n",
+    pendingCode[0] != '\0' ? pendingCode : "(none)",
+    pendingCodeMessageId[0] != '\0' ? pendingCodeMessageId : "(none)",
+    pendingCodeSentMs != 0 ? static_cast<unsigned long>(millis() - pendingCodeSentMs) : 0UL,
+    static_cast<unsigned long>(DEVICE_VERIFY_CODE_RESULT_GRACE_MS)
+  );
 }
 
 void failPendingMasterTagVerification(const char* reason) {
@@ -3260,6 +3523,10 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
 
   const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
   Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
+  if (sent) {
+    panelStatusResultPending = true;
+    panelStatusResultPendingStartedMs = millis();
+  }
   if (sent && DEVICE_STATE_WS_ACK_REQUIRED) {
     rememberPendingStateBatch(job, messageId, millis());
   }
@@ -3362,7 +3629,11 @@ bool sendVerifyCodeWs(const NetworkJob& job) {
     copyCStringToBuffer(messageId, pendingCodeMessageId, sizeof(pendingCodeMessageId));
     pendingCodeSentMs = millis();
   }
-  Serial.printf("[WS] verify code %s code=%s\n", sent ? "sent" : "failed", job.text1);
+  Serial.printf("[WS] verify code %s code=%s requestId=%s\n",
+    sent ? "sent" : "failed",
+    job.text1,
+    messageId
+  );
   return sent;
 }
 
@@ -3741,9 +4012,17 @@ void printUsage() {
   Serial.println("  - green  -> OK: programmed tag present and locker closed");
   Serial.println("  - yellow -> warning: missing key or locker not fully closed");
   Serial.println("  - red    -> error: unknown tag or missing key with open locker");
-  Serial.println("  - blue   -> keypad code entry");
+  Serial.println("  - red pulse -> unknown RFID item in locker");
+  Serial.println("  - yellow/red blink -> open locker according to panel severity");
+  Serial.println("  - blue breath -> backend WebSocket online");
+  Serial.println("  - red dotted pulse -> backend/WiFi offline");
+  Serial.println("  - cyan sweep -> state synchronized with panel");
+  Serial.println("  - white flash -> remote/open action");
+  Serial.println("  - blue groups -> keypad code entry progress");
+  Serial.println("  - cyan pulse -> keypad code verification pending");
+  Serial.println("  - 3x green/red blink -> code accepted/rejected");
   Serial.println("  - yellow chase -> WiFi connecting");
-  Serial.println("  - green chase  -> master reader in tag assignment mode");
+  Serial.println("  - cyan/green chase -> master reader in tag assignment mode");
 }
 
 void printStatus() {
@@ -3810,9 +4089,10 @@ void printRfidSnapshot() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     const RfidReaderRuntime& runtime = lockerReaders[i];
     Serial.printf(
-      "[%s] ss=%u present=%s programmed=%s uid=%s physical=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
+      "[%s] ss=%u healthy=%s present=%s programmed=%s uid=%s physical=%s candidate=%s seen=%u missing=%u dirty=%s dirtySince=%lu nextRetry=%lu failCount=%u lastSeen=%lu\n",
       runtime.label,
       runtime.ssPin,
+      lockerReaderHealthy[i] ? "yes" : "no",
       runtime.hasCard ? "yes" : "no",
       runtime.stableHasCustomTag ? "yes" : "no",
       runtime.hasCard ? runtime.stableUid.c_str() : "(none)",
@@ -3829,9 +4109,10 @@ void printRfidSnapshot() {
   }
 
   Serial.printf(
-    "[%s] ss=%u present=%s uid=%s candidate=%s seen=%u missing=%u armedUid=%s lastSeen=%lu\n",
+    "[%s] ss=%u healthy=%s present=%s uid=%s candidate=%s seen=%u missing=%u armedUid=%s lastSeen=%lu\n",
     masterReaderRuntime.label,
     masterReaderRuntime.ssPin,
+    masterReaderHealthy ? "yes" : "no",
     masterReaderRuntime.hasCard ? "yes" : "no",
     masterReaderRuntime.hasCard ? masterReaderRuntime.stableUid.c_str() : "(none)",
     masterReaderRuntime.candidateUid.length() > 0 ? masterReaderRuntime.candidateUid.c_str() : "(none)",
@@ -4039,6 +4320,26 @@ bool parseLockerLedStatus(const char* value, LockerLedStatus& status) {
   return false;
 }
 
+LockerItemStatus parseLockerItemStatus(const char* value) {
+  if (value == nullptr || strlen(value) == 0) {
+    return LockerItemStatus::Unknown;
+  }
+
+  if (strcmp(value, "known") == 0) {
+    return LockerItemStatus::Known;
+  }
+
+  if (strcmp(value, "missing") == 0) {
+    return LockerItemStatus::Missing;
+  }
+
+  if (strcmp(value, "unknown") == 0) {
+    return LockerItemStatus::UnknownTag;
+  }
+
+  return LockerItemStatus::Unknown;
+}
+
 const char* lockerLedStatusName(LockerLedStatus status) {
   switch (status) {
     case LockerLedStatus::Ok:
@@ -4051,7 +4352,7 @@ const char* lockerLedStatusName(LockerLedStatus status) {
   }
 }
 
-bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, const char* severity) {
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, const char* severity) {
   if (lockerNumber < 1 || lockerNumber > LOCKER_COUNT) {
     return false;
   }
@@ -4069,6 +4370,8 @@ bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLed
   }
 
   panelLockerLedStatuses[index] = status;
+  panelLockerItemStatuses[index] = itemStatus;
+  panelLockerDoorClosed[index] = doorClosed;
   panelLockerLedStatusKnown[index] = true;
   panelLockerLedStatusVersions[index] = currentVersion;
   Serial.printf("[LED STATUS] locker=%u severity=%s color=%s version=%lu source=panel\n",
@@ -4089,6 +4392,90 @@ uint32_t colorForLockerLedStatus(LockerLedStatus status) {
     case LockerLedStatus::Error:
     default:
       return colorRed(STATUS_BRIGHTNESS);
+  }
+}
+
+bool hasAnimatedNormalLedState(uint32_t nowMs) {
+  (void) nowMs;
+  if (
+    ledStripEffect.active ||
+    ledSegmentFlashEffect.active ||
+    wifiConnectInProgress ||
+    tagAssignmentMode.active ||
+    isStateSyncPending() ||
+    isBackendOfflineSignalActive() ||
+    isDeviceWebSocketReady()
+  ) {
+    return true;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (!lockerReaderHealthy[i]) {
+      return true;
+    }
+    if (
+      panelLockerLedStatusKnown[i] &&
+      panelLockerLedStatusVersions[i] == lockerStateVersions[i] &&
+      (panelLockerItemStatuses[i] == LockerItemStatus::UnknownTag || !panelLockerDoorClosed[i])
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool isStateSyncPending() {
+  return deviceStateBatchQueued || deviceStateAckPending || panelStatusResultPending;
+}
+
+bool isBackendOfflineSignalActive() {
+  if (wifiConnectInProgress) {
+    return false;
+  }
+
+  if (!isWifiReady()) {
+    return true;
+  }
+
+  return !isDeviceWebSocketReady() && (consecutiveNetworkFailureCount > 0 || !deviceWsServerHelloSeen);
+}
+
+void startLedStripEffect(LedStripEffectKind kind, uint32_t durationMs) {
+  ledStripEffect = { true, kind, millis(), durationMs };
+  markVisualStateDirty();
+}
+
+void startLedSegmentFlash(uint8_t lockerNumber, uint32_t color, uint32_t durationMs) {
+  ledSegmentFlashEffect = { true, lockerNumber, millis(), durationMs, color };
+  markVisualStateDirty();
+}
+
+void serviceLedTimedEffects(uint32_t nowMs) {
+  bool changed = false;
+
+  if (ledStripEffect.active && nowMs - ledStripEffect.startedAtMs >= ledStripEffect.durationMs) {
+    ledStripEffect = { false, LED_STRIP_EFFECT_NONE, 0, 0 };
+    changed = true;
+  }
+
+  if (ledSegmentFlashEffect.active && nowMs - ledSegmentFlashEffect.startedAtMs >= ledSegmentFlashEffect.durationMs) {
+    ledSegmentFlashEffect = { false, 0, 0, 0, 0 };
+    changed = true;
+  }
+
+  if (
+    panelStatusResultPending &&
+    panelStatusResultPendingStartedMs != 0 &&
+    nowMs - panelStatusResultPendingStartedMs >= LED_PANEL_STATUS_RESULT_WAIT_MS
+  ) {
+    panelStatusResultPending = false;
+    panelStatusResultPendingStartedMs = 0;
+    changed = true;
+  }
+
+  if (changed) {
+    markVisualStateDirty();
   }
 }
 
@@ -4277,6 +4664,7 @@ void openSelectedLocker(uint8_t lockerNumber) {
   }
 
   Serial.printf("[LOCKER] opening locker=%d reason=access_selection uid=%s\n", lockerNumber, accessSelection.uid.c_str());
+  startLedSegmentFlash(lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
   finishAccessSelection("open_single");
   blinkLed(2, 220, 120);
 }
@@ -4303,6 +4691,7 @@ void openAllAccessibleLockers() {
     accessSelection.uid.c_str(),
     maskText
   );
+  startLedStripEffect(LED_STRIP_EFFECT_REMOTE_ALL, LED_REMOTE_FLASH_MS);
   finishAccessSelection("open_all");
   blinkLed(3, 180, 90);
 }
@@ -4355,7 +4744,7 @@ void updateLeds(uint32_t nowMs) {
   }
 
   if (tagAssignmentMode.active) {
-    const uint8_t frame = static_cast<uint8_t>((nowMs / 140) % (TOTAL_LEDS / 2));
+    const uint8_t frame = static_cast<uint8_t>((nowMs / LED_FRAME_INTERVAL_MS) % (TOTAL_LEDS / 2));
     if (frame != lastTagAssignmentFrame) {
       lastTagAssignmentFrame = frame;
       renderTagAssignmentFrame(frame);
@@ -4363,18 +4752,26 @@ void updateLeds(uint32_t nowMs) {
     return;
   }
 
-  if (codeResultFlash.active || wifiConnectInProgress) {
+  if (codeResultFlash.active) {
     return;
   }
 
-  if (!visualStateDirty) {
+  const bool codeEntryVisible = enteredCode.length() > 0 || codeVerificationPending;
+  const bool codeEntryAnimated = codeVerificationPending;
+  const bool animated = codeEntryAnimated || hasAnimatedNormalLedState(nowMs);
+  if (!visualStateDirty && (!animated || nowMs - lastLedFrameMs < LED_FRAME_INTERVAL_MS)) {
     return;
   }
+  lastLedFrameMs = nowMs;
 
-  if (enteredCode.length() > 0) {
-    renderCodeEntry();
+  if (codeEntryVisible) {
+    renderCodeEntry(nowMs);
+  } else if (ledStripEffect.active && ledStripEffect.kind == LED_STRIP_EFFECT_STARTUP) {
+    renderStartupLeds(nowMs);
+  } else if (wifiConnectInProgress) {
+    renderWifiLoadingFrame(wifiLoadingFrame);
   } else {
-    renderLockerStatus();
+    renderLockerStatus(nowMs);
   }
 
   visualStateDirty = false;
@@ -4495,36 +4892,264 @@ void restoreNormalLedMode() {
   updateVisualState();
 }
 
-void renderLockerStatus() {
+void fillSegment(const LockerLedSegment& segment, uint32_t color) {
+  if (!segment.valid) {
+    return;
+  }
+
+  for (uint16_t led = segment.start; led <= segment.end; led += 1) {
+    strip.setPixelColor(led, color);
+  }
+}
+
+void clearSegment(const LockerLedSegment& segment) {
+  fillSegment(segment, 0);
+}
+
+void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, uint32_t nowMs) {
+  const LockerLedSegment segment = getLockerLedSegment(lockerIndex + 1);
+  if (!segment.valid) {
+    return;
+  }
+
+  if (!lockerReaderHealthy[lockerIndex]) {
+    if (((nowMs / LED_READER_ERROR_BLINK_MS) % 2) == 0) {
+      fillSegment(segment, colorRed(EFFECT_BRIGHTNESS));
+    } else {
+      clearSegment(segment);
+    }
+    return;
+  }
+
+  const bool panelStatusFresh = panelLockerLedStatusKnown[lockerIndex]
+    && panelLockerLedStatusVersions[lockerIndex] == lockerStateVersions[lockerIndex];
+  const LockerLedStatus ledStatus = getLockerLedStatus(lockerIndex, state);
+  const uint32_t statusColor = colorForLockerLedStatus(ledStatus);
+
+  if (panelStatusFresh && panelLockerItemStatuses[lockerIndex] == LockerItemStatus::UnknownTag) {
+    const uint32_t phase = nowMs % LED_UNKNOWN_TAG_PULSE_MS;
+    const uint32_t half = LED_UNKNOWN_TAG_PULSE_MS / 2;
+    const uint8_t brightness = static_cast<uint8_t>(24 + (phase < half
+      ? (96UL * phase / half)
+      : (96UL * (LED_UNKNOWN_TAG_PULSE_MS - phase) / half)));
+    fillSegment(segment, colorRed(brightness));
+    return;
+  }
+
+  const bool doorClosed = panelStatusFresh
+    ? panelLockerDoorClosed[lockerIndex]
+    : (state.doorClosed && state.lockClosed);
+  if (!doorClosed) {
+    if (((nowMs / LED_DOOR_BLINK_MS) % 2) == 0) {
+      fillSegment(segment, statusColor);
+    } else {
+      clearSegment(segment);
+    }
+    return;
+  }
+
+  fillSegment(segment, statusColor);
+}
+
+void applyStateSyncPendingOverlay(uint32_t nowMs) {
+  if (!isStateSyncPending()) {
+    return;
+  }
+
+  const uint16_t pos = static_cast<uint16_t>((nowMs / LED_STATE_SYNC_PENDING_MS) % TOTAL_LEDS);
+  strip.setPixelColor(pos, colorYellow(180));
+  if (pos > 0) {
+    strip.setPixelColor(pos - 1, colorYellow(60));
+  }
+}
+
+void applySyncOkOverlay(uint32_t nowMs) {
+  if (!ledStripEffect.active || ledStripEffect.kind != LED_STRIP_EFFECT_SYNC_OK) {
+    return;
+  }
+
+  const uint32_t elapsed = nowMs - ledStripEffect.startedAtMs;
+  const uint16_t pos = static_cast<uint16_t>(min<uint32_t>(
+    static_cast<uint32_t>(TOTAL_LEDS - 1),
+    (elapsed * TOTAL_LEDS) / max<uint32_t>(1, ledStripEffect.durationMs)
+  ));
+  strip.setPixelColor(pos, colorCyan(180));
+  if (pos > 0) {
+    strip.setPixelColor(pos - 1, colorWhite(70));
+  }
+  if (pos + 1 < TOTAL_LEDS) {
+    strip.setPixelColor(pos + 1, colorCyan(80));
+  }
+}
+
+void applyRemoteAllOverlay(uint32_t nowMs) {
+  if (!ledStripEffect.active || ledStripEffect.kind != LED_STRIP_EFFECT_REMOTE_ALL) {
+    return;
+  }
+
+  const bool visible = ((nowMs / 120) % 2) == 0;
+  if (visible) {
+    for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
+      fillSegment(getLockerLedSegment(lockerNumber), colorWhite(170));
+    }
+  }
+}
+
+void applyTagAssignmentSuccessOverlay(uint32_t nowMs) {
+  if (!ledStripEffect.active || ledStripEffect.kind != LED_STRIP_EFFECT_TAG_ASSIGN_SUCCESS) {
+    return;
+  }
+
+  const bool visible = ((nowMs / 140) % 2) == 0;
+  fillSegment(getLockerLedSegment(1), visible ? colorGreen(150) : colorCyan(80));
+  fillSegment(getLockerLedSegment(2), visible ? colorCyan(120) : colorGreen(90));
+  fillSegment(getLockerLedSegment(3), visible ? colorGreen(150) : colorCyan(80));
+}
+
+void applySegmentFlashOverlay(uint32_t nowMs) {
+  if (!ledSegmentFlashEffect.active) {
+    return;
+  }
+
+  const bool visible = ((nowMs / 110) % 2) == 0;
+  if (!visible) {
+    return;
+  }
+
+  if (ledSegmentFlashEffect.lockerNumber == 0) {
+    for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
+      fillSegment(getLockerLedSegment(lockerNumber), ledSegmentFlashEffect.color);
+    }
+    return;
+  }
+
+  fillSegment(getLockerLedSegment(ledSegmentFlashEffect.lockerNumber), ledSegmentFlashEffect.color);
+}
+
+void applyBackendOfflineOverlay(uint32_t nowMs) {
+  if (!isBackendOfflineSignalActive()) {
+    return;
+  }
+
+  const uint32_t phase = nowMs % LED_BACKEND_OFFLINE_PULSE_MS;
+  const uint32_t half = LED_BACKEND_OFFLINE_PULSE_MS / 2;
+  const uint8_t brightness = static_cast<uint8_t>(20 + (phase < half
+    ? (120UL * phase / half)
+    : (120UL * (LED_BACKEND_OFFLINE_PULSE_MS - phase) / half)));
+
+  for (uint16_t led = 0; led < TOTAL_LEDS; led += 6) {
+    strip.setPixelColor(led, colorRed(brightness));
+  }
+}
+
+void applyOnlineBreathOverlay(uint32_t nowMs) {
+  if (!isDeviceWebSocketReady() || isStateSyncPending() || isBackendOfflineSignalActive()) {
+    return;
+  }
+
+  const uint32_t phase = nowMs % LED_ONLINE_BREATH_MS;
+  const uint32_t half = LED_ONLINE_BREATH_MS / 2;
+  const uint8_t brightness = static_cast<uint8_t>(10 + (phase < half
+    ? (44UL * phase / half)
+    : (44UL * (LED_ONLINE_BREATH_MS - phase) / half)));
+
+  for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
+    const LockerLedSegment segment = getLockerLedSegment(lockerNumber);
+    if (segment.valid) {
+      strip.setPixelColor(segment.start, colorBlue(brightness));
+      strip.setPixelColor(segment.end, colorBlue(brightness));
+    }
+  }
+}
+
+void applyNormalLedOverlays(uint32_t nowMs) {
+  applyOnlineBreathOverlay(nowMs);
+  applyBackendOfflineOverlay(nowMs);
+  applyStateSyncPendingOverlay(nowMs);
+  applySyncOkOverlay(nowMs);
+  applyRemoteAllOverlay(nowMs);
+  applyTagAssignmentSuccessOverlay(nowMs);
+  applySegmentFlashOverlay(nowMs);
+}
+
+void renderStartupLeds(uint32_t nowMs) {
+  clearStrip();
+
+  for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
+    const bool healthy = lockerReaderHealthy[lockerNumber - 1];
+    fillSegment(
+      getLockerLedSegment(lockerNumber),
+      healthy ? strip.Color(0, 28, 12) : colorRed(70)
+    );
+  }
+
+  const uint16_t pos = static_cast<uint16_t>((nowMs / 45) % TOTAL_LEDS);
+  strip.setPixelColor(pos, colorWhite(180));
+
+  const uint32_t masterColor = masterReaderHealthy ? colorCyan(100) : colorRed(130);
+  for (uint8_t i = 0; i < 3 && i < TOTAL_LEDS; i += 1) {
+    strip.setPixelColor(i, masterColor);
+    strip.setPixelColor(TOTAL_LEDS - 1 - i, masterColor);
+  }
+
+  strip.show();
+}
+
+void renderLockerStatus(uint32_t nowMs) {
   clearStrip();
 
   for (uint8_t lockerIndex = 0; lockerIndex < LOCKER_COUNT; lockerIndex += 1) {
     const LockerState state = readLockerState(lockerIndex);
-    const uint32_t color = colorForLockerLedStatus(getLockerLedStatus(lockerIndex, state));
+    renderLockerStatusSegment(lockerIndex, state, nowMs);
+  }
 
-    const LockerLedSegment segment = getLockerLedSegment(lockerIndex + 1);
-    if (!segment.valid) {
-      continue;
-    }
+  applyNormalLedOverlays(nowMs);
+  strip.show();
+  visualStateDirty = false;
+}
 
-    for (uint16_t led = segment.start; led <= segment.end; led += 1) {
-      strip.setPixelColor(led, color);
+void setCodeEntryGroup(uint8_t index, uint32_t color) {
+  if (index >= CODE_LENGTH) {
+    return;
+  }
+
+  const uint16_t start = CODE_ENTRY_LED_GROUP_STARTS[index];
+  for (uint8_t offset = 0; offset < CODE_ENTRY_GROUP_SIZE; offset += 1) {
+    const uint16_t ledIndex = start + offset;
+    if (ledIndex < TOTAL_LEDS) {
+      strip.setPixelColor(ledIndex, color);
     }
+  }
+}
+
+void renderCodeEntryProgress(uint8_t count, bool verificationPending, uint32_t nowMs) {
+  clearStrip();
+
+  uint8_t visibleCount = count < CODE_LENGTH ? count : CODE_LENGTH;
+  uint32_t color = colorBlue(EFFECT_BRIGHTNESS);
+
+  if (verificationPending) {
+    visibleCount = CODE_LENGTH;
+    const uint32_t phase = nowMs % CODE_VERIFY_PENDING_PULSE_MS;
+    const uint32_t half = CODE_VERIFY_PENDING_PULSE_MS / 2;
+    const uint8_t brightness = static_cast<uint8_t>(36 + (phase < half
+      ? (84UL * phase / half)
+      : (84UL * (CODE_VERIFY_PENDING_PULSE_MS - phase) / half)));
+    color = colorCyan(brightness);
+  }
+
+  for (uint8_t i = 0; i < visibleCount; i += 1) {
+    setCodeEntryGroup(i, color);
   }
 
   strip.show();
   visualStateDirty = false;
 }
 
-void renderCodeEntry() {
-  clearStrip();
-
-  for (uint8_t i = 0; i < enteredCode.length() && i < CODE_LENGTH; i += 1) {
-    strip.setPixelColor(CODE_ENTRY_LED_POSITIONS[i], colorBlue());
-  }
-
-  strip.show();
-  visualStateDirty = false;
+void renderCodeEntry(uint32_t nowMs) {
+  const size_t rawCount = codeVerificationPending ? strlen(pendingCode) : enteredCode.length();
+  const uint8_t count = rawCount < CODE_LENGTH ? static_cast<uint8_t>(rawCount) : CODE_LENGTH;
+  renderCodeEntryProgress(count, codeVerificationPending, nowMs);
 }
 
 void renderWifiLoadingFrame(uint8_t frameIndex) {
@@ -4552,7 +5177,7 @@ void renderTagAssignmentFrame(uint8_t frameIndex) {
   for (uint8_t i = 0; i < litDots; i += 1) {
     const uint16_t ledIndex = i * 2;
     if (ledIndex < TOTAL_LEDS) {
-      strip.setPixelColor(ledIndex, colorGreen(EFFECT_BRIGHTNESS));
+      strip.setPixelColor(ledIndex, (i % 2 == 0) ? colorCyan(EFFECT_BRIGHTNESS) : colorGreen(EFFECT_BRIGHTNESS));
     }
   }
 
@@ -4560,10 +5185,16 @@ void renderTagAssignmentFrame(uint8_t frameIndex) {
 }
 
 void flashCodeResult(const String& code, bool success) {
+  const size_t rawCount = code.length();
+  uint8_t count = rawCount < CODE_LENGTH ? static_cast<uint8_t>(rawCount) : CODE_LENGTH;
+  if (count == 0) {
+    count = CODE_LENGTH;
+  }
+
   codeResultFlash = {
     true,
     success,
-    static_cast<uint8_t>(min(static_cast<size_t>(CODE_LENGTH), code.length())),
+    count,
     0,
     millis()
   };
@@ -4575,26 +5206,27 @@ void serviceCodeResultFlash(unsigned long now) {
     return;
   }
 
-  static const unsigned long STAGE_DURATIONS_MS[] = { 180, 120, 180 };
-  if (now - codeResultFlash.stageStartedMs < STAGE_DURATIONS_MS[codeResultFlash.stage]) {
+  const bool visibleStage = (codeResultFlash.stage % 2) == 0;
+  const unsigned long stageDuration = visibleStage ? CODE_RESULT_ON_MS : CODE_RESULT_OFF_MS;
+  if (now - codeResultFlash.stageStartedMs < stageDuration) {
     return;
   }
 
   codeResultFlash.stageStartedMs = now;
   codeResultFlash.stage += 1;
 
-  if (codeResultFlash.stage == 1) {
-    renderCodeResultFrame(codeResultFlash.success, codeResultFlash.count, false);
+  if (codeResultFlash.stage >= CODE_RESULT_BLINKS * 2) {
+    codeResultFlash.active = false;
+    markVisualStateDirty();
+    updateVisualState();
     return;
   }
 
-  if (codeResultFlash.stage == 2) {
-    renderCodeResultFrame(codeResultFlash.success, codeResultFlash.count, true);
-    return;
-  }
-
-  codeResultFlash.active = false;
-  updateVisualState();
+  renderCodeResultFrame(
+    codeResultFlash.success,
+    codeResultFlash.count,
+    (codeResultFlash.stage % 2) == 0
+  );
 }
 
 void renderCodeResultFrame(bool success, uint8_t count, bool visible) {
@@ -4603,7 +5235,7 @@ void renderCodeResultFrame(bool success, uint8_t count, bool visible) {
   if (visible) {
     const uint32_t resultColor = success ? colorGreen(EFFECT_BRIGHTNESS) : colorRed(EFFECT_BRIGHTNESS);
     for (uint8_t i = 0; i < count; i += 1) {
-      strip.setPixelColor(CODE_ENTRY_LED_POSITIONS[i], resultColor);
+      setCodeEntryGroup(i, resultColor);
     }
   }
 
@@ -4636,12 +5268,50 @@ void initializeRfidReaders() {
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
     lockerReaders[i].reader->PCD_Init();
     lockerReaders[i].reader->PCD_SetAntennaGain(RFID_ANTENNA_GAIN);
-    debugPrintReaderChipVersion(lockerReaders[i]);
+    const byte version = debugPrintReaderChipVersion(lockerReaders[i]);
+    lockerReaderHealthy[i] = isHealthyRfidVersion(version);
   }
 
   masterReaderRuntime.reader->PCD_Init();
   masterReaderRuntime.reader->PCD_SetAntennaGain(RFID_ANTENNA_GAIN);
-  debugPrintReaderChipVersion(masterReaderRuntime);
+  masterReaderHealthy = isHealthyRfidVersion(debugPrintReaderChipVersion(masterReaderRuntime));
+}
+
+void serviceRfidReaderHealth(unsigned long now) {
+  if (lastRfidHealthCheckMs != 0 && now - lastRfidHealthCheckMs < RFID_HEALTH_CHECK_INTERVAL_MS) {
+    return;
+  }
+  lastRfidHealthCheckMs = now;
+
+  bool changed = false;
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const byte version = lockerReaders[i].reader->PCD_ReadRegister(MFRC522::VersionReg);
+    const bool healthy = isHealthyRfidVersion(version);
+    if (healthy != lockerReaderHealthy[i]) {
+      lockerReaderHealthy[i] = healthy;
+      changed = true;
+      Serial.printf("[RFID HEALTH] locker=%u version=0x%02X healthy=%s\n",
+        i + 1,
+        version,
+        healthy ? "true" : "false"
+      );
+    }
+  }
+
+  const byte masterVersion = masterReaderRuntime.reader->PCD_ReadRegister(MFRC522::VersionReg);
+  const bool masterHealthy = isHealthyRfidVersion(masterVersion);
+  if (masterHealthy != masterReaderHealthy) {
+    masterReaderHealthy = masterHealthy;
+    changed = true;
+    Serial.printf("[RFID HEALTH] master version=0x%02X healthy=%s\n",
+      masterVersion,
+      masterHealthy ? "true" : "false"
+    );
+  }
+
+  if (changed) {
+    markVisualStateDirty();
+  }
 }
 
 void serviceRfidReaders(unsigned long now) {
@@ -4756,8 +5426,10 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
           }
 
           if (writeOk) {
+            startLedStripEffect(LED_STRIP_EFFECT_TAG_ASSIGN_SUCCESS, LED_TAG_ASSIGNMENT_SUCCESS_MS);
             blinkLed(2, 220, 120);
           } else {
+            startLedErrorFlash(700);
             blinkLed(4, 90, 80);
           }
 
@@ -4907,9 +5579,19 @@ String uidToString(const MFRC522::Uid& uid) {
   return value;
 }
 
-void debugPrintReaderChipVersion(const RfidReaderRuntime& runtime) {
+byte debugPrintReaderChipVersion(const RfidReaderRuntime& runtime) {
   const byte version = runtime.reader->PCD_ReadRegister(MFRC522::VersionReg);
-  Serial.printf("[%s] SS=%u, MFRC522 version=0x%02X\n", runtime.label, runtime.ssPin, version);
+  Serial.printf("[%s] SS=%u, MFRC522 version=0x%02X%s\n",
+    runtime.label,
+    runtime.ssPin,
+    version,
+    isHealthyRfidVersion(version) ? "" : " [reader error]"
+  );
+  return version;
+}
+
+bool isHealthyRfidVersion(byte version) {
+  return version != 0x00 && version != 0xFF;
 }
 
 void configureHttpClient(HTTPClient& http, uint16_t responseTimeoutMs) {
