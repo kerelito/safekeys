@@ -10,6 +10,7 @@ const { Server } = require("socket.io");
 
 const { createDiscordBot } = require("./bot/discordBot");
 const { attachDeviceWebSocketTransport } = require("./services/deviceWebSocketTransport");
+const { DEVICE_PROTOCOL_VERSION } = require("./services/deviceProtocol");
 const { createEmailService } = require("./services/emailService");
 const { lockerService } = require("./services/lockerService");
 const { panelUserService } = require("./services/panelUserService");
@@ -345,6 +346,10 @@ lockerService.on("device-status-changed", ({ status, wasConnected }) => {
   }
 });
 
+lockerService.on("device-config-updated", config => {
+  io.emit("device-config-updated", config);
+});
+
 app.use(express.static(PUBLIC_DIR));
 
 app.get("/", (req, res) => {
@@ -423,6 +428,7 @@ app.use([
   "/logs/clear",
   "/alerts",
   "/export/backup",
+  "/device/config/admin",
   "/device/actions/history"
 ], requireAuth);
 
@@ -434,6 +440,7 @@ app.use([
   "/users",
   "/rfid-items",
   "/panel-users",
+  "/device/config/admin",
   "/logs/clear"
 ], mutationRateLimit);
 
@@ -694,14 +701,50 @@ app.post("/device/heartbeat", requireDeviceKey, asyncHandler(async (req, res) =>
     transport: "https",
     deviceId: req.body.deviceId
   });
+  const deviceConfig = await lockerService.getDeviceConfig(req.body.deviceId);
 
   res.json({
     ok: true,
     serverTime: new Date().toISOString(),
-    protocolVersion: 1,
-    websocketPath: deviceTransport.path
+    protocolVersion: DEVICE_PROTOCOL_VERSION,
+    websocketPath: deviceTransport.path,
+    configVersion: deviceConfig.configVersion,
+    config: deviceConfig.config
   });
 }));
+
+app.get("/device/config", requireDeviceKey, asyncHandler(async (req, res) => {
+  res.json(await lockerService.getDeviceConfig(req.query.deviceId || req.get("x-device-id") || undefined));
+}));
+
+app.post("/device/logs", requireDeviceKey, asyncHandler(async (req, res) => {
+  const log = await lockerService.recordDeviceLog(req.body, {
+    source: "device",
+    deviceId: req.body.deviceId
+  });
+  res.status(201).json({ ok: true, id: log._id, serverTime: new Date().toISOString() });
+}));
+
+app.post("/device/diagnostics", requireDeviceKey, asyncHandler(async (req, res) => {
+  const log = await lockerService.recordDeviceDiagnostic(req.body, {
+    source: "device",
+    deviceId: req.body.deviceId
+  });
+  res.status(201).json({ ok: true, id: log._id, serverTime: new Date().toISOString() });
+}));
+
+app.get("/device/ota/manifest", requireDeviceKey, (req, res) => {
+  res.json({
+    ok: true,
+    deviceId: req.query.deviceId || null,
+    protocolVersion: DEVICE_PROTOCOL_VERSION,
+    version: process.env.DEVICE_FIRMWARE_VERSION || null,
+    url: process.env.DEVICE_FIRMWARE_URL || null,
+    sha256: process.env.DEVICE_FIRMWARE_SHA256 || null,
+    updateAvailable: Boolean(process.env.DEVICE_FIRMWARE_VERSION && process.env.DEVICE_FIRMWARE_URL),
+    serverTime: new Date().toISOString()
+  });
+});
 
 app.post("/device/sync", requireDeviceKey, asyncHandler(async (req, res) => {
   const result = await lockerService.processDeviceSync(req.body.messages, {
@@ -753,6 +796,18 @@ app.get("/device/actions", requireDeviceKey, asyncHandler(async (req, res) => {
 
 app.get("/device/actions/history", asyncHandler(async (req, res) => {
   res.json(await lockerService.getRemoteActionHistory());
+}));
+
+app.get("/device/config/admin", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
+  res.json(await lockerService.getDeviceConfig(req.query.deviceId));
+}));
+
+app.put("/device/config/admin", requireRoles("master", "admin"), asyncHandler(async (req, res) => {
+  const result = await lockerService.updateDeviceConfig(req.body, {
+    source: "web",
+    actor: getSessionActor(req)
+  });
+  res.json(result);
 }));
 
 app.get("/system-status", (req, res) => {

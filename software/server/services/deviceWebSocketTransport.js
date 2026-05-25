@@ -262,9 +262,12 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       });
     });
 
+    const deviceConfig = await lockerService.getDeviceConfig(ws.deviceId);
     await sendJson(ws, {
       type: "server.hello",
       protocolVersion: DEVICE_PROTOCOL_VERSION,
+      configVersion: deviceConfig.configVersion,
+      config: deviceConfig.config,
       serverTime: new Date().toISOString(),
       connectionId: ws.connectionId,
       resyncRequired: true

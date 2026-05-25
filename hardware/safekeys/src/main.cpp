@@ -2,6 +2,10 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Update.h>
+#include <Preferences.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -40,8 +44,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "TP-Link_70FC";
-static const char* WIFI_PASSWORD = "13793814";
+static const char* WIFI_SSID = "iPhone (Karol)";
+static const char* WIFI_PASSWORD = "123456789";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -49,6 +53,20 @@ static const char* DEVICE_ID = "esp32-main";
 static const char* DEVICE_WS_HOST = "www.safekeys.pl";
 static const uint16_t DEVICE_WS_PORT = 443;
 static const char* DEVICE_WS_PATH = "/device/ws?deviceId=esp32-main";
+static const uint16_t DEVICE_PROTOCOL_VERSION = 2;
+static const char* FIRMWARE_VERSION = "safekeys-esp32-v4-service-panel";
+
+static const char* SERVICE_PANEL_USERNAME = "admin";
+static const char* SERVICE_PANEL_PASSWORD = "safekeys-admin";
+static const char* SERVICE_SETUP_AP_PASSWORD = "safekeys-setup";
+static const uint16_t SERVICE_PANEL_PORT = 80;
+static const uint16_t SERVICE_DNS_PORT = 53;
+static const uint8_t WIFI_SETUP_FAILURE_THRESHOLD = 3;
+static const unsigned long WIFI_SETUP_AUTO_START_MS = 45000;
+static const unsigned long SERVICE_SETUP_TIMEOUT_MS = 10UL * 60UL * 1000UL;
+static const unsigned long SERVICE_WIFI_RECONNECT_DELAY_MS = 1000;
+static const unsigned long REMOTE_CONFIG_FETCH_INTERVAL_MS = 300000;
+static const unsigned long REMOTE_CONFIG_FETCH_RETRY_MS = 30000;
 
 static const bool ENABLE_KEYPAD = true;
 static const bool ENABLE_LOCKER_SWITCH_INPUTS = false;
@@ -69,7 +87,19 @@ static const uint8_t KEYPAD_I2C_ADDRESS = 0x20;
 static const uint8_t STRIP_PIN = 4;
 static const uint16_t TOTAL_LEDS = 60;
 static const uint8_t LOCKER_COUNT = 3;
+static const uint8_t LOCK_RELAY_COUNT = 4;
 static const uint8_t LEDS_PER_LOCKER = 20;
+static const uint8_t LOCK_RELAY_PINS[LOCK_RELAY_COUNT] = {
+  27, // locker 1
+  26, // locker 2
+  25, // locker 3
+  33  // locker 4
+};
+static const bool RELAY_ACTIVE_LOW = true;
+static const uint32_t LOCK_UNLOCK_PULSE_MS = 700;
+static const bool OPEN_LOCKS_PARALLEL = true;
+
+static_assert(LOCKER_COUNT <= LOCK_RELAY_COUNT, "Logical lockers exceed configured relay outputs.");
 
 static const uint8_t CODE_LENGTH = 4;
 static const uint8_t CODE_ENTRY_GROUP_SIZE = 3;
@@ -113,6 +143,9 @@ static const unsigned long DEVICE_VERIFY_CODE_RESULT_GRACE_MS = 5000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS = 20000;
 static const unsigned long DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS = 5000;
 static const unsigned long VERIFY_DUPLICATE_COOLDOWN_MS = 5000;
+static const uint8_t CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT = 5;
+static const unsigned long CODE_RATE_LIMIT_WINDOW_MS_DEFAULT = 300000;
+static const unsigned long CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT = 30000;
 static const unsigned long ACCESS_SELECTION_TIMEOUT_MS = 60000;
 static const unsigned long ACCESS_SELECTION_DENIED_BLINK_MS = 500;
 static const unsigned long ACCESS_SELECTION_ALLOWED_FRAME_MS = 70;
@@ -190,6 +223,18 @@ struct LockerState {
   String tagUid;
   bool doorClosed;
   bool lockClosed;
+};
+
+struct LockRelayState {
+  bool active;
+  bool pulsed;
+  uint32_t startedAtMs;
+  uint32_t durationMs;
+};
+
+struct LockOpenAllSequenceState {
+  bool active;
+  uint8_t pendingMask;
 };
 
 struct LockerLedSegment {
@@ -337,7 +382,10 @@ enum class NetworkJobType : uint8_t {
   VerifyCode,
   VerifyMasterTag,
   AccessSelectionEvent,
-  TagAssignmentResult
+  TagAssignmentResult,
+  DeviceLog,
+  DeviceDiagnostic,
+  FetchRemoteConfig
 };
 
 struct NetworkJob {
@@ -368,7 +416,8 @@ enum class NetworkResultType : uint8_t {
   CommandAck,
   DeviceActionsPoll,
   VerifyCode,
-  VerifyMasterTag
+  VerifyMasterTag,
+  RemoteConfig
 };
 
 struct NetworkResult {
@@ -377,6 +426,9 @@ struct NetworkResult {
   bool boolValue1;
   bool boolValue2;
   bool boolValue3;
+  bool boolValue4;
+  bool boolValue5;
+  bool boolValue6;
   uint8_t lockerNumber;
   uint8_t count;
   long numberValue;
@@ -389,6 +441,13 @@ struct NetworkResult {
   char actionType[32];
   uint8_t lockers[LOCKER_COUNT];
   uint32_t lockerVersions[LOCKER_COUNT];
+  uint32_t configVersion;
+  uint32_t heartbeatIntervalMs;
+  uint32_t deviceActionsPollIntervalMs;
+  uint32_t lockPulseMs;
+  uint32_t codeRateLimitWindowMs;
+  uint32_t codeRateLimitLockoutMs;
+  uint8_t codeRateLimitMaxFailures;
 };
 
 static const LockerHardwareConfig LOCKERS[LOCKER_COUNT] = {
@@ -404,6 +463,9 @@ MFRC522 lockerReader2(RFID_LOCKER_SS_PINS[1], RFID_RST_PIN);
 MFRC522 lockerReader3(RFID_LOCKER_SS_PINS[2], RFID_RST_PIN);
 MFRC522 masterReader(RFID_MASTER_SS_PIN, RFID_RST_PIN);
 WebSocketsClient deviceWebSocket;
+WebServer serviceServer(SERVICE_PANEL_PORT);
+DNSServer setupDnsServer;
+Preferences devicePreferences;
 
 RfidReaderRuntime lockerReaders[LOCKER_COUNT] = {
   { "locker-rfid-1", RFID_LOCKER_SS_PINS[0], false, 1, &lockerReader1, false, false, "", "", "", "", 0, 0, 0, 0, true, 0, 0, 0 },
@@ -435,6 +497,9 @@ RfidReaderRuntime masterReaderRuntime = {
 
 String enteredCode;
 String serialCommandBuffer;
+String configuredWifiSsid;
+String configuredWifiPassword;
+String setupApSsid;
 
 unsigned long lastWifiRetryMs = 0;
 unsigned long lastHeartbeatMs = 0;
@@ -447,10 +512,36 @@ unsigned long keypadReleaseStartedMs = 0;
 bool keypadReady = false;
 bool wifiConnectInProgress = false;
 unsigned long wifiConnectStartedMs = 0;
+unsigned long wifiFirstConnectAttemptMs = 0;
 unsigned long lastWifiLoadingFrameMs = 0;
 unsigned long wifiRetryIntervalMs = WIFI_RETRY_MS;
 uint8_t consecutiveWifiFailureCount = 0;
 uint8_t wifiLoadingFrame = 0;
+bool wifiConfigLoadedFromNvs = false;
+bool servicePanelStarted = false;
+bool serviceSetupPortalActive = false;
+bool serviceSetupPortalStartRequested = false;
+char serviceSetupPortalRequestedReason[48] = "";
+unsigned long serviceSetupPortalStartedMs = 0;
+bool serviceWifiReconnectRequested = false;
+unsigned long serviceWifiReconnectAtMs = 0;
+bool remoteConfigQueued = false;
+unsigned long nextRemoteConfigFetchMs = 0;
+uint32_t remoteConfigVersion = 0;
+uint32_t runtimeHeartbeatIntervalMs = HEARTBEAT_INTERVAL_MS;
+uint32_t runtimeDeviceActionsPollBaseMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
+uint32_t runtimeLockUnlockPulseMs = LOCK_UNLOCK_PULSE_MS;
+bool runtimeRemoteLoggingEnabled = true;
+bool runtimeCodeRateLimitEnabled = true;
+bool runtimeServicePanelEnabled = true;
+bool runtimeOtaEnabled = true;
+bool runtimeDiagnosticsEnabled = true;
+uint8_t runtimeCodeRateLimitMaxFailures = CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT;
+uint32_t runtimeCodeRateLimitWindowMs = CODE_RATE_LIMIT_WINDOW_MS_DEFAULT;
+uint32_t runtimeCodeRateLimitLockoutMs = CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT;
+uint8_t codeRateLimitFailureCount = 0;
+unsigned long codeRateLimitWindowStartedMs = 0;
+unsigned long codeRateLimitLockedUntilMs = 0;
 bool statusLedBaseEnabled = false;
 StatusLedEffect statusLedEffect = { false, false, false, 0, 0, 0, 0 };
 CodeResultFlashEffect codeResultFlash = { false, false, 0, 0, 0 };
@@ -468,6 +559,8 @@ AccessSelectionSession accessSelection = {
   "",
   ""
 };
+LockRelayState lockRelayStates[LOCK_RELAY_COUNT] = {};
+LockOpenAllSequenceState lockOpenAllSequence = { false, 0 };
 ErrorFlashEffect ledErrorFlash = { false, 0, 0 };
 RfidVerifyRequest pendingMasterTagVerify = {
   false,
@@ -500,6 +593,8 @@ bool deviceStateAckPending = false;
 bool forceNextStateBatchHttps = false;
 char pendingCode[CODE_LENGTH + 1] = "";
 char pendingCodeMessageId[64] = "";
+char expiredCode[CODE_LENGTH + 1] = "";
+char expiredCodeMessageId[64] = "";
 char pendingMasterTagId[32] = "";
 char pendingMasterTagMessageId[64] = "";
 char expiredMasterTagId[32] = "";
@@ -575,8 +670,38 @@ LedSegmentFlashEffect ledSegmentFlashEffect = { false, 0, 0, 0, 0 };
 unsigned long lastLedFrameMs = 0;
 
 void configureWiFiRuntime();
+void loadPersistentSettings();
+void saveWifiCredentials(const String& ssid, const String& password);
+void clearWifiCredentials();
+const String& getActiveWifiSsid();
+const String& getActiveWifiPassword();
 void connectWifi();
 void serviceWifiConnection(unsigned long now);
+void maybeStartSetupPortalAfterWifiFailures(unsigned long now);
+void requestServiceSetupPortal(const char* reason);
+void startServicePanel();
+void serviceServicePanel(unsigned long now);
+void startServiceSetupPortal(const char* reason);
+void stopServiceSetupPortal();
+void scheduleServiceWifiReconnect(unsigned long delayMs);
+void serviceScheduledWifiReconnect(unsigned long now);
+bool requireServiceAuth();
+void handleServiceRoot();
+void handleServiceStatusJson();
+void handleServiceDiagnosticsPage();
+void handleServiceDiagnosticAction();
+void handleServiceWifiPage();
+void handleServiceWifiSave();
+void handleServiceWifiScanJson();
+void handleServiceOtaPage();
+void handleServiceOtaUpload();
+void handleServiceOtaFinished();
+void handleServiceFactoryReset();
+void handleServiceCaptivePortal();
+void handleServiceFavicon();
+void handleServiceNotFound();
+String buildStatusJson();
+String htmlEscape(const String& value);
 void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void logWiFiSnapshot(const char* prefix);
 bool isWifiReady();
@@ -600,6 +725,11 @@ bool sendTagAssignmentResultWs(const NetworkJob& job);
 bool sendVerifyCodeWs(const NetworkJob& job);
 bool sendVerifyMasterTagWs(const NetworkJob& job);
 bool sendAccessSelectionEventWs(const NetworkJob& job);
+bool sendDeviceLogWs(const NetworkJob& job);
+bool sendDeviceDiagnosticWs(const NetworkJob& job);
+bool fetchRemoteConfigForTask(NetworkResult& result);
+bool postDeviceLog(const NetworkJob& job);
+bool postDeviceDiagnostic(const NetworkJob& job);
 bool postDeviceStateBatch(const NetworkJob& job);
 bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postVerifyMasterTag(const char* tagId, NetworkResult& result);
@@ -609,6 +739,10 @@ bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
 uint32_t nextDeviceSequence();
 void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence);
 void buildHeartbeatPayload(JsonObject payload);
+void applyRemoteConfigResult(const NetworkResult& result);
+void maybeFetchRemoteConfig(unsigned long now);
+void queueDeviceLog(const char* level, const char* event, const char* message);
+void queueDeviceDiagnostic(const char* name, bool ok, const char* message);
 void buildLockerStateBatchJob(NetworkJob& job, bool full);
 void buildStateBatchMessage(const NetworkJob& job, JsonDocument& doc, uint32_t sequence, const char* messageId);
 uint32_t calculateJobStateFingerprint(const NetworkJob& job);
@@ -638,6 +772,9 @@ void serviceAccessSelection(unsigned long now);
 void tickAccessSelection(uint32_t nowMs);
 void servicePendingMasterTagVerification(uint32_t nowMs);
 void processEnteredCode(const String& code);
+bool isCodeEntryRateLimited(unsigned long now);
+void registerCodeVerificationFailure(unsigned long now);
+void resetCodeRateLimit();
 bool postLockerStatus(uint8_t lockerNumber, bool hasTag, const String& tagId);
 bool sendHeartbeat();
 void serviceNetworkResults();
@@ -654,6 +791,9 @@ void copyStringToBuffer(const String& value, char* buffer, size_t bufferSize);
 void copyCStringToBuffer(const char* value, char* buffer, size_t bufferSize);
 void setPendingCode(const String& code);
 void clearPendingCode();
+void rememberExpiredPendingCode();
+bool matchesExpiredCodeRequest(const char* requestId, const char* code);
+void clearExpiredCode();
 void setPendingMasterTag(const String& tagId);
 void clearPendingMasterTag();
 void failPendingCodeVerification(const char* reason);
@@ -733,6 +873,12 @@ RfidScanResult readTagFromReader(RfidReaderRuntime& runtime);
 String uidToString(const MFRC522::Uid& uid);
 byte debugPrintReaderChipVersion(const RfidReaderRuntime& runtime);
 bool isHealthyRfidVersion(byte version);
+void initializeLockController();
+bool unlockLocker(uint8_t lockerId);
+bool lockLocker(uint8_t lockerId);
+bool pulseUnlockLocker(uint8_t lockerId, uint32_t durationMs = LOCK_UNLOCK_PULSE_MS);
+void updateLockController(uint32_t nowMs);
+void allLocksOff();
 void startAccessSelection(const String& uid, uint8_t accessibleLockersMask, bool isMaster, const String& requestId = "", const String& userId = "", const String& userName = "");
 void cancelAccessSelection(const char* reason);
 void finishAccessSelection(const char* reason);
@@ -799,8 +945,222 @@ uint32_t colorViolet(uint8_t brightness = EFFECT_BRIGHTNESS) {
   return strip.Color(static_cast<uint8_t>((140U * brightness) / 255U), 0, brightness);
 }
 
+bool isRelayPin(uint8_t pin) {
+  for (uint8_t i = 0; i < LOCK_RELAY_COUNT; i += 1) {
+    if (LOCK_RELAY_PINS[i] == pin) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool isValidRelayLockerId(uint8_t lockerId) {
+  if (lockerId >= 1 && lockerId <= LOCK_RELAY_COUNT) {
+    return true;
+  }
+
+  Serial.printf("[LOCK] invalid lockerId=%u\n", lockerId);
+  return false;
+}
+
+uint8_t lockerRelayIndex(uint8_t lockerId) {
+  return static_cast<uint8_t>(lockerId - 1);
+}
+
+uint8_t lockerRelayPin(uint8_t lockerId) {
+  return LOCK_RELAY_PINS[lockerRelayIndex(lockerId)];
+}
+
+uint8_t relayMaskForLocker(uint8_t lockerId) {
+  if (!isValidRelayLockerId(lockerId)) {
+    return 0;
+  }
+
+  return static_cast<uint8_t>(1U << lockerRelayIndex(lockerId));
+}
+
+uint8_t allRelayLockersMask() {
+  return static_cast<uint8_t>((1U << LOCK_RELAY_COUNT) - 1U);
+}
+
+void writeRelayLevel(uint8_t pin, bool active) {
+  const uint8_t level = RELAY_ACTIVE_LOW
+    ? (active ? LOW : HIGH)
+    : (active ? HIGH : LOW);
+  digitalWrite(pin, level);
+}
+
+void relayOn(uint8_t pin) {
+  writeRelayLevel(pin, true);
+}
+
+void relayOff(uint8_t pin) {
+  writeRelayLevel(pin, false);
+}
+
+bool anyRelayActive() {
+  for (uint8_t i = 0; i < LOCK_RELAY_COUNT; i += 1) {
+    if (lockRelayStates[i].active) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool pulseUnlockLockerMask(uint8_t lockerMask);
+void startNextSequentialLockerPulse();
+
+void initializeLockController() {
+  for (uint8_t i = 0; i < LOCK_RELAY_COUNT; i += 1) {
+    const uint8_t pin = LOCK_RELAY_PINS[i];
+    pinMode(pin, OUTPUT);
+    relayOff(pin);
+    lockRelayStates[i] = { false, false, 0, 0 };
+  }
+
+  lockOpenAllSequence = { false, 0 };
+  allLocksOff();
+  Serial.printf(
+    "[LOCK] init relay pins: L1=%u L2=%u L3=%u L4=%u activeLow=%s\n",
+    LOCK_RELAY_PINS[0],
+    LOCK_RELAY_PINS[1],
+    LOCK_RELAY_PINS[2],
+    LOCK_RELAY_PINS[3],
+    RELAY_ACTIVE_LOW ? "true" : "false"
+  );
+
+  if (ENABLE_LOCKER_SWITCH_INPUTS) {
+    Serial.println("[LOCK] warning: locker switch inputs share GPIO25/GPIO26/GPIO27 with relay outputs in this build.");
+  }
+}
+
+bool unlockLocker(uint8_t lockerId) {
+  if (!isValidRelayLockerId(lockerId)) {
+    return false;
+  }
+
+  const uint8_t index = lockerRelayIndex(lockerId);
+  const uint8_t pin = lockerRelayPin(lockerId);
+  relayOn(pin);
+  lockRelayStates[index] = { true, false, millis(), 0 };
+  Serial.printf("[LOCK] locker=%u relay GPIO%u ON duration=manual\n", lockerId, pin);
+  return true;
+}
+
+bool lockLocker(uint8_t lockerId) {
+  if (!isValidRelayLockerId(lockerId)) {
+    return false;
+  }
+
+  const uint8_t index = lockerRelayIndex(lockerId);
+  const uint8_t pin = lockerRelayPin(lockerId);
+  relayOff(pin);
+  lockRelayStates[index] = { false, false, 0, 0 };
+  Serial.printf("[LOCK] locker=%u relay GPIO%u OFF reason=lock_request\n", lockerId, pin);
+  return true;
+}
+
+bool pulseUnlockLocker(uint8_t lockerId, uint32_t durationMs) {
+  if (!isValidRelayLockerId(lockerId)) {
+    return false;
+  }
+
+  const uint8_t index = lockerRelayIndex(lockerId);
+  const uint8_t pin = lockerRelayPin(lockerId);
+  relayOn(pin);
+  lockRelayStates[index] = { true, true, millis(), durationMs };
+  Serial.printf("[LOCK] locker=%u relay GPIO%u ON duration=%lums\n",
+    lockerId,
+    pin,
+    static_cast<unsigned long>(durationMs)
+  );
+  return true;
+}
+
+void allLocksOff() {
+  lockOpenAllSequence = { false, 0 };
+
+  for (uint8_t i = 0; i < LOCK_RELAY_COUNT; i += 1) {
+    relayOff(LOCK_RELAY_PINS[i]);
+    lockRelayStates[i] = { false, false, 0, 0 };
+  }
+
+  Serial.println("[LOCK] all locks off");
+}
+
+void startNextSequentialLockerPulse() {
+  if (OPEN_LOCKS_PARALLEL || !lockOpenAllSequence.active || anyRelayActive()) {
+    return;
+  }
+
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    const uint8_t mask = relayMaskForLocker(lockerId);
+    if ((lockOpenAllSequence.pendingMask & mask) == 0) {
+      continue;
+    }
+
+    lockOpenAllSequence.pendingMask = static_cast<uint8_t>(lockOpenAllSequence.pendingMask & ~mask);
+    pulseUnlockLocker(lockerId, runtimeLockUnlockPulseMs);
+    if (lockOpenAllSequence.pendingMask == 0) {
+      lockOpenAllSequence.active = false;
+    }
+    return;
+  }
+
+  lockOpenAllSequence.active = false;
+}
+
+void updateLockController(uint32_t nowMs) {
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    const uint8_t index = lockerRelayIndex(lockerId);
+    LockRelayState& state = lockRelayStates[index];
+    if (!state.active || !state.pulsed) {
+      continue;
+    }
+
+    if (nowMs - state.startedAtMs < state.durationMs) {
+      continue;
+    }
+
+    const uint8_t pin = lockerRelayPin(lockerId);
+    relayOff(pin);
+    state = { false, false, 0, 0 };
+    Serial.printf("[LOCK] locker=%u relay GPIO%u OFF reason=pulse_complete\n", lockerId, pin);
+  }
+
+  if (!OPEN_LOCKS_PARALLEL) {
+    startNextSequentialLockerPulse();
+  }
+}
+
+bool pulseUnlockLockerMask(uint8_t lockerMask) {
+  if (lockerMask == 0) {
+    return false;
+  }
+
+  if (OPEN_LOCKS_PARALLEL) {
+    bool openedAny = false;
+    for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+      if ((lockerMask & relayMaskForLocker(lockerId)) == 0) {
+        continue;
+      }
+
+      openedAny = pulseUnlockLocker(lockerId, runtimeLockUnlockPulseMs) || openedAny;
+    }
+    return openedAny;
+  }
+
+  lockOpenAllSequence.active = true;
+  lockOpenAllSequence.pendingMask = lockerMask;
+  startNextSequentialLockerPulse();
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);
+  initializeLockController();
   delay(300);
 
   pinMode(STATUS_LED_PIN, OUTPUT);
@@ -824,7 +1184,9 @@ void setup() {
 
   reserveStringBuffers();
   initializeDeviceIdentity();
+  loadPersistentSettings();
   configureWiFiRuntime();
+  startServicePanel();
   configureLockerInputs();
   initializeRfidReaders();
   startLedStripEffect(LED_STRIP_EFFECT_STARTUP, LED_STARTUP_EFFECT_MS);
@@ -832,21 +1194,36 @@ void setup() {
   initializeNetworkTask();
 
   Serial.println();
-  Serial.println("=== SafeKeys ESP32 v3 TEST ===");
+  Serial.printf("=== SafeKeys ESP32 %s ===\n", FIRMWARE_VERSION);
   Serial.printf("LED pin: %u\n", STATUS_LED_PIN);
   Serial.printf("Keypad I2C address: 0x%02X\n", KEYPAD_I2C_ADDRESS);
   Serial.printf("Keypad enabled: %s\n", ENABLE_KEYPAD ? "yes" : "no");
   Serial.printf("Keypad ready: %s\n", ENABLE_KEYPAD ? (keypadReady ? "yes" : "no") : "skipped");
   Serial.printf("ARGB strip pin: %u, leds: %u\n", STRIP_PIN, TOTAL_LEDS);
   Serial.printf("RFID SPI pins -> SCK=%u, MISO=%u, MOSI=%u, RST=%u\n", RFID_SPI_SCK_PIN, RFID_SPI_MISO_PIN, RFID_SPI_MOSI_PIN, RFID_RST_PIN);
+  Serial.printf("Lock relays -> L1=%u L2=%u L3=%u L4=%u pulse=%lums mode=%s activeLow=%s\n",
+    LOCK_RELAY_PINS[0],
+    LOCK_RELAY_PINS[1],
+    LOCK_RELAY_PINS[2],
+    LOCK_RELAY_PINS[3],
+    static_cast<unsigned long>(runtimeLockUnlockPulseMs),
+    OPEN_LOCKS_PARALLEL ? "parallel" : "sequential",
+    RELAY_ACTIVE_LOW ? "yes" : "no"
+  );
   Serial.printf("API base URL: %s\n", API_BASE_URL);
   Serial.printf("Device WebSocket: wss://%s:%u%s\n", DEVICE_WS_HOST, DEVICE_WS_PORT, DEVICE_WS_PATH);
+  Serial.printf("Protocol version: %u, remote config version: %lu\n", DEVICE_PROTOCOL_VERSION, static_cast<unsigned long>(remoteConfigVersion));
+  Serial.printf("WiFi config: ssid=%s source=%s\n",
+    configuredWifiSsid.length() > 0 ? configuredWifiSsid.c_str() : "(empty)",
+    wifiConfigLoadedFromNvs ? "nvs" : "firmware fallback"
+  );
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
   printUsage();
   printRfidSnapshot();
 
   updateVisualState();
   connectWifi();
+  queueDeviceLog("info", "BOOT", "Firmware started.");
 }
 
 void configureWiFiRuntime() {
@@ -855,6 +1232,64 @@ void configureWiFiRuntime() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
   WiFi.onEvent(handleWiFiEvent);
+}
+
+void loadPersistentSettings() {
+  if (!devicePreferences.begin("safekeys", false)) {
+    configuredWifiSsid = WIFI_SSID;
+    configuredWifiPassword = WIFI_PASSWORD;
+    Serial.println("[NVS] failed to open preferences, using firmware WiFi fallback.");
+    return;
+  }
+
+  configuredWifiSsid = devicePreferences.getString("wifiSsid", WIFI_SSID);
+  configuredWifiPassword = devicePreferences.getString("wifiPass", WIFI_PASSWORD);
+  wifiConfigLoadedFromNvs = devicePreferences.isKey("wifiSsid");
+
+  remoteConfigVersion = devicePreferences.getUInt("cfgVersion", 0);
+  runtimeHeartbeatIntervalMs = devicePreferences.getUInt("hbMs", HEARTBEAT_INTERVAL_MS);
+  runtimeDeviceActionsPollBaseMs = devicePreferences.getUInt("pollMs", DEVICE_ACTIONS_POLL_INTERVAL_MS);
+  runtimeLockUnlockPulseMs = devicePreferences.getUInt("pulseMs", LOCK_UNLOCK_PULSE_MS);
+  runtimeRemoteLoggingEnabled = devicePreferences.getBool("logEnabled", true);
+  runtimeCodeRateLimitEnabled = devicePreferences.getBool("rlEnabled", true);
+  runtimeCodeRateLimitMaxFailures = devicePreferences.getUChar("rlMax", CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT);
+  runtimeCodeRateLimitWindowMs = devicePreferences.getUInt("rlWindow", CODE_RATE_LIMIT_WINDOW_MS_DEFAULT);
+  runtimeCodeRateLimitLockoutMs = devicePreferences.getUInt("rlLockout", CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT);
+  runtimeServicePanelEnabled = devicePreferences.getBool("panelEnabled", true);
+  runtimeOtaEnabled = devicePreferences.getBool("otaEnabled", true);
+  runtimeDiagnosticsEnabled = devicePreferences.getBool("diagEnabled", true);
+
+  runtimeHeartbeatIntervalMs = constrain(runtimeHeartbeatIntervalMs, 10000UL, 600000UL);
+  runtimeDeviceActionsPollBaseMs = constrain(runtimeDeviceActionsPollBaseMs, 2000UL, 120000UL);
+  runtimeLockUnlockPulseMs = constrain(runtimeLockUnlockPulseMs, 100UL, 5000UL);
+  runtimeCodeRateLimitMaxFailures = constrain(runtimeCodeRateLimitMaxFailures, static_cast<uint8_t>(1), static_cast<uint8_t>(20));
+  runtimeCodeRateLimitWindowMs = constrain(runtimeCodeRateLimitWindowMs, 30000UL, 3600000UL);
+  runtimeCodeRateLimitLockoutMs = constrain(runtimeCodeRateLimitLockoutMs, 5000UL, 3600000UL);
+  deviceActionsPollIntervalMs = runtimeDeviceActionsPollBaseMs;
+}
+
+void saveWifiCredentials(const String& ssid, const String& password) {
+  devicePreferences.putString("wifiSsid", ssid);
+  devicePreferences.putString("wifiPass", password);
+  configuredWifiSsid = ssid;
+  configuredWifiPassword = password;
+  wifiConfigLoadedFromNvs = true;
+}
+
+void clearWifiCredentials() {
+  devicePreferences.remove("wifiSsid");
+  devicePreferences.remove("wifiPass");
+  configuredWifiSsid = WIFI_SSID;
+  configuredWifiPassword = WIFI_PASSWORD;
+  wifiConfigLoadedFromNvs = false;
+}
+
+const String& getActiveWifiSsid() {
+  return configuredWifiSsid;
+}
+
+const String& getActiveWifiPassword() {
+  return configuredWifiPassword;
 }
 
 void reserveStringBuffers() {
@@ -1097,6 +1532,35 @@ void networkTaskMain(void* parameter) {
         }
         break;
       }
+
+      case NetworkJobType::DeviceLog: {
+        bool requestOk = sendDeviceLogWs(job);
+        if (!requestOk && shouldUseHttpsFallback(millis())) {
+          requestOk = postDeviceLog(job);
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        }
+        break;
+      }
+
+      case NetworkJobType::DeviceDiagnostic: {
+        bool requestOk = sendDeviceDiagnosticWs(job);
+        if (!requestOk && shouldUseHttpsFallback(millis())) {
+          requestOk = postDeviceDiagnostic(job);
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        }
+        break;
+      }
+
+      case NetworkJobType::FetchRemoteConfig: {
+        result.type = NetworkResultType::RemoteConfig;
+        result.requestOk = fetchRemoteConfigForTask(result);
+        shouldPublishResult = true;
+        break;
+      }
     }
 
     if (shouldPublishResult) {
@@ -1121,6 +1585,8 @@ void loop() {
 
   resetTaskWatchdog();
 
+  updateLockController(static_cast<uint32_t>(now));
+  serviceServicePanel(now);
   serviceStatusLed(now);
   serviceWifiConnection(now);
   serviceLedErrorFlash(now);
@@ -1139,25 +1605,34 @@ void loop() {
   updateVisualState();
 
   if (codeVerificationPending && pendingCodeSentMs != 0) {
-    const unsigned long codeVerifyElapsedMs = now - pendingCodeSentMs;
-    if (!codeVerificationTimedOut && codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
-      markPendingCodeVerificationTimedOut();
-    }
-    if (codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS) {
-      failPendingCodeVerification("Code verification expired after grace period.");
+    const unsigned long codeVerifyNowMs = millis();
+    const unsigned long codeVerifySentMs = pendingCodeSentMs;
+    // The network task can set pendingCodeSentMs after loop() captured now.
+    // Skip this pass instead of letting unsigned subtraction look like a huge timeout.
+    if (static_cast<long>(codeVerifyNowMs - codeVerifySentMs) >= 0) {
+      const unsigned long codeVerifyElapsedMs = codeVerifyNowMs - codeVerifySentMs;
+      if (!codeVerificationTimedOut && codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS) {
+        markPendingCodeVerificationTimedOut();
+      }
+      if (codeVerifyElapsedMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS) {
+        rememberExpiredPendingCode();
+        failPendingCodeVerification("Code verification expired after grace period.");
+      }
     }
   }
 
   if (!isWifiReady()) {
-    if (!wifiConnectInProgress && now - lastWifiRetryMs >= wifiRetryIntervalMs) {
+    maybeStartSetupPortalAfterWifiFailures(now);
+    if (!serviceSetupPortalActive && !wifiConnectInProgress && now - lastWifiRetryMs >= wifiRetryIntervalMs) {
       connectWifi();
     }
     return;
   }
 
   maybeRecoverWifiAfterNetworkFailures(now);
+  maybeFetchRemoteConfig(now);
 
-  if (lastHeartbeatMs == 0 || now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+  if (lastHeartbeatMs == 0 || now - lastHeartbeatMs >= runtimeHeartbeatIntervalMs) {
     maybeSendHeartbeat(now);
   } else if (maybeQueueDeviceStateBatch(now)) {
     // Limit background network traffic to one request per loop.
@@ -1171,19 +1646,26 @@ void connectWifi() {
     return;
   }
 
+  if (serviceSetupPortalActive) {
+    return;
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
 
-  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+  Serial.printf("Connecting to WiFi: %s\n", getActiveWifiSsid().c_str());
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(getActiveWifiSsid().c_str(), getActiveWifiPassword().c_str());
 
   wifiConnectInProgress = true;
   wifiConnectStartedMs = millis();
+  if (wifiFirstConnectAttemptMs == 0) {
+    wifiFirstConnectAttemptMs = wifiConnectStartedMs;
+  }
   lastWifiRetryMs = wifiConnectStartedMs;
   lastWifiLoadingFrameMs = 0;
   wifiLoadingFrame = 0;
@@ -1210,6 +1692,7 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       wifiConnectInProgress = false;
+      wifiFirstConnectAttemptMs = 0;
       consecutiveWifiFailureCount = 0;
       wifiRetryIntervalMs = WIFI_RETRY_MS;
       lastHeartbeatMs = 0;
@@ -1226,7 +1709,12 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       deviceStateBatchQueued = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = 0;
+      nextRemoteConfigFetchMs = 0;
       resetDeviceActionsPollCadence();
+      if (serviceSetupPortalActive) {
+        stopServiceSetupPortal();
+      }
+      queueDeviceLog("info", "WIFI_CONNECTED", "ESP32 connected to WiFi.");
       break;
 
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:
@@ -1249,6 +1737,7 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       clearPendingStateBatch();
       disconnectDeviceWebSocket();
       resetDeviceActionsPollCadence();
+      maybeStartSetupPortalAfterWifiFailures(millis());
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -1285,6 +1774,7 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       clearPendingStateBatch();
       disconnectDeviceWebSocket();
       resetDeviceActionsPollCadence();
+      maybeStartSetupPortalAfterWifiFailures(millis());
       break;
     }
 
@@ -1334,6 +1824,7 @@ void serviceWifiConnection(unsigned long now) {
     blinkLed(4, 150, 120);
     markVisualStateDirty();
     updateVisualState();
+    maybeStartSetupPortalAfterWifiFailures(now);
     return;
   }
 
@@ -1343,6 +1834,544 @@ void serviceWifiConnection(unsigned long now) {
     markVisualStateDirty();
     pulseLed(35);
     Serial.print(".");
+  }
+}
+
+void maybeStartSetupPortalAfterWifiFailures(unsigned long now) {
+  if (serviceSetupPortalActive || isWifiReady()) {
+    return;
+  }
+
+  const bool tooManyFailures = consecutiveWifiFailureCount >= WIFI_SETUP_FAILURE_THRESHOLD;
+  const bool waitingTooLong = wifiFirstConnectAttemptMs != 0
+    && now - wifiFirstConnectAttemptMs >= WIFI_SETUP_AUTO_START_MS;
+  if (!tooManyFailures && !waitingTooLong) {
+    return;
+  }
+
+  requestServiceSetupPortal(tooManyFailures ? "wifi failures" : "wifi setup timeout");
+}
+
+void requestServiceSetupPortal(const char* reason) {
+  if (serviceSetupPortalActive) {
+    return;
+  }
+
+  copyCStringToBuffer(
+    reason != nullptr && strlen(reason) > 0 ? reason : "manual",
+    serviceSetupPortalRequestedReason,
+    sizeof(serviceSetupPortalRequestedReason)
+  );
+  serviceSetupPortalStartRequested = true;
+}
+
+void scheduleServiceWifiReconnect(unsigned long delayMs) {
+  serviceWifiReconnectRequested = true;
+  serviceWifiReconnectAtMs = millis() + delayMs;
+}
+
+void serviceScheduledWifiReconnect(unsigned long now) {
+  if (!serviceWifiReconnectRequested) {
+    return;
+  }
+
+  if (static_cast<long>(now - serviceWifiReconnectAtMs) < 0) {
+    return;
+  }
+
+  serviceWifiReconnectRequested = false;
+  disconnectDeviceWebSocket();
+  if (serviceSetupPortalActive) {
+    stopServiceSetupPortal();
+  }
+  WiFi.disconnect(false, false);
+  wifiConnectInProgress = false;
+  wifiFirstConnectAttemptMs = 0;
+  consecutiveWifiFailureCount = 0;
+  wifiRetryIntervalMs = WIFI_RETRY_MS;
+  lastWifiRetryMs = 0;
+  connectWifi();
+}
+
+bool requireServiceAuth() {
+  if (!runtimeServicePanelEnabled && !serviceSetupPortalActive) {
+    serviceServer.send(503, "text/plain", "Service panel disabled by remote config.");
+    return false;
+  }
+
+  if (serviceServer.authenticate(SERVICE_PANEL_USERNAME, SERVICE_PANEL_PASSWORD)) {
+    return true;
+  }
+
+  serviceServer.requestAuthentication(BASIC_AUTH, "SafeKeys Service");
+  return false;
+}
+
+String htmlEscape(const String& value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i += 1) {
+    const char ch = value.charAt(i);
+    switch (ch) {
+      case '&': escaped += F("&amp;"); break;
+      case '<': escaped += F("&lt;"); break;
+      case '>': escaped += F("&gt;"); break;
+      case '"': escaped += F("&quot;"); break;
+      default: escaped += ch; break;
+    }
+  }
+  return escaped;
+}
+
+String buildStatusJson() {
+  JsonDocument doc;
+  doc["deviceId"] = DEVICE_ID;
+  doc["firmware"] = FIRMWARE_VERSION;
+  doc["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  doc["bootId"] = deviceBootId;
+  doc["uptimeMs"] = millis();
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["minFreeHeap"] = ESP.getMinFreeHeap();
+  doc["wifiStatus"] = static_cast<int>(WiFi.status());
+  doc["wifiSsid"] = getActiveWifiSsid();
+  doc["wifiSource"] = wifiConfigLoadedFromNvs ? "nvs" : "firmware";
+  doc["staIp"] = WiFi.localIP().toString();
+  doc["apActive"] = serviceSetupPortalActive;
+  doc["apSsid"] = setupApSsid;
+  doc["apIp"] = WiFi.softAPIP().toString();
+  doc["rssi"] = isWifiReady() ? WiFi.RSSI() : 0;
+  doc["wsConnected"] = deviceWsConnected;
+  doc["configVersion"] = remoteConfigVersion;
+  doc["heartbeatIntervalMs"] = runtimeHeartbeatIntervalMs;
+  doc["actionsPollIntervalMs"] = runtimeDeviceActionsPollBaseMs;
+  doc["lockPulseMs"] = runtimeLockUnlockPulseMs;
+  doc["codeRateLimitEnabled"] = runtimeCodeRateLimitEnabled;
+  doc["codeRateLimitFailures"] = codeRateLimitFailureCount;
+  doc["codeRateLimitLockedUntilMs"] = codeRateLimitLockedUntilMs;
+
+  JsonArray relays = doc["relays"].to<JsonArray>();
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    JsonObject relay = relays.add<JsonObject>();
+    const LockRelayState& state = lockRelayStates[lockerRelayIndex(lockerId)];
+    relay["locker"] = lockerId;
+    relay["pin"] = lockerRelayPin(lockerId);
+    relay["active"] = state.active;
+    relay["pulsed"] = state.pulsed;
+  }
+
+  JsonArray readers = doc["rfid"].to<JsonArray>();
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    JsonObject reader = readers.add<JsonObject>();
+    reader["label"] = lockerReaders[i].label;
+    reader["locker"] = lockerReaders[i].lockerNumber;
+    reader["healthy"] = lockerReaderHealthy[i];
+    reader["hasCard"] = lockerReaders[i].hasCard;
+    reader["uid"] = lockerReaders[i].stableUid;
+  }
+  JsonObject master = doc["masterRfid"].to<JsonObject>();
+  master["healthy"] = masterReaderHealthy;
+  master["hasCard"] = masterReaderRuntime.hasCard;
+  master["uid"] = masterReaderRuntime.stableUid;
+
+  String output;
+  serializeJson(doc, output);
+  return output;
+}
+
+void handleServiceRoot() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  String html;
+  html.reserve(3600);
+  html += F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
+  html += F("<title>SafeKeys Service</title><style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:24px;background:#f7f8fa;color:#111}main{max-width:920px;margin:auto}section{margin:18px 0;padding:16px;border:1px solid #ddd;background:#fff}button,input,select{font:inherit;padding:8px;margin:4px 0}code{background:#eef;padding:2px 5px}a{display:inline-block;margin:6px 10px 6px 0}</style></head><body><main>");
+  html += F("<h1>SafeKeys ESP32 Service</h1>");
+  html += F("<section><h2>Status</h2><p>Firmware: <code>");
+  html += FIRMWARE_VERSION;
+  html += F("</code></p><p>Protocol: <code>");
+  html += String(DEVICE_PROTOCOL_VERSION);
+  html += F("</code>, config: <code>");
+  html += String(remoteConfigVersion);
+  html += F("</code></p><p>WiFi: <code>");
+  html += htmlEscape(getActiveWifiSsid());
+  html += F("</code> ");
+  html += isWifiReady() ? WiFi.localIP().toString() : String("not connected");
+  html += F("</p><p>Setup AP: ");
+  html += serviceSetupPortalActive ? htmlEscape(setupApSsid) : String("off");
+  html += F("</p><p>WebSocket: ");
+  html += deviceWsConnected ? "connected" : "offline";
+  html += F("</p></section>");
+  html += F("<section><h2>Actions</h2><a href='/api/status'>JSON status</a><a href='/diag'>Diagnostics</a><a href='/wifi'>WiFi setup</a><a href='/ota'>OTA upload</a></section>");
+  html += F("<section><h2>Quick relay test</h2>");
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    html += F("<form method='post' action='/diag/action' style='display:inline'><input type='hidden' name='action' value='relay'><input type='hidden' name='locker' value='");
+    html += String(lockerId);
+    html += F("'><button>Pulse L");
+    html += String(lockerId);
+    html += F("</button></form> ");
+  }
+  html += F("</section><section><h2>Safety</h2><form method='post' action='/factory-reset' onsubmit=\"return confirm('Factory reset WiFi/config and restart?')\"><input name='confirm' value='RESET'><button>Factory reset</button></form></section>");
+  html += F("</main></body></html>");
+  serviceServer.send(200, "text/html", html);
+}
+
+void handleServiceStatusJson() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+  serviceServer.send(200, "application/json", buildStatusJson());
+}
+
+void handleServiceDiagnosticsPage() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  String html;
+  html.reserve(2600);
+  html += F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Diagnostics</title><style>body{font-family:system-ui;margin:24px}button{font:inherit;padding:8px;margin:4px}</style></head><body>");
+  html += F("<h1>Diagnostics</h1><p><a href='/'>Back</a> <a href='/api/status'>JSON status</a></p>");
+  html += F("<form method='post' action='/diag/action'><input type='hidden' name='action' value='led-success'><button>LED success</button></form>");
+  html += F("<form method='post' action='/diag/action'><input type='hidden' name='action' value='led-error'><button>LED error</button></form>");
+  html += F("<form method='post' action='/diag/action'><input type='hidden' name='action' value='rfid'><button>RFID health log</button></form>");
+  html += F("<form method='post' action='/diag/action'><input type='hidden' name='action' value='reconnect'><button>Reconnect WiFi</button></form>");
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    html += F("<form method='post' action='/diag/action'><input type='hidden' name='action' value='relay'><input type='hidden' name='locker' value='");
+    html += String(lockerId);
+    html += F("'><button>Pulse relay L");
+    html += String(lockerId);
+    html += F("</button></form>");
+  }
+  html += F("</body></html>");
+  serviceServer.send(200, "text/html", html);
+}
+
+void handleServiceDiagnosticAction() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+  if (!runtimeDiagnosticsEnabled) {
+    serviceServer.send(403, "text/plain", "Diagnostics disabled by remote config.");
+    return;
+  }
+
+  const String action = serviceServer.arg("action");
+  bool ok = true;
+  String message = "ok";
+
+  if (action == "relay") {
+    const uint8_t locker = static_cast<uint8_t>(serviceServer.arg("locker").toInt());
+    ok = pulseUnlockLocker(locker, runtimeLockUnlockPulseMs);
+    message = ok ? String("relay pulsed") : String("invalid relay");
+  } else if (action == "led-success") {
+    flashCodeResult("0000", true);
+    message = "success led shown";
+  } else if (action == "led-error") {
+    flashCodeResult("0000", false);
+    message = "error led shown";
+  } else if (action == "rfid") {
+    printRfidSnapshot();
+    message = "rfid snapshot printed";
+  } else if (action == "reconnect") {
+    wifiRetryIntervalMs = WIFI_RETRY_MS;
+    consecutiveWifiFailureCount = 0;
+    scheduleServiceWifiReconnect(SERVICE_WIFI_RECONNECT_DELAY_MS);
+    message = "wifi reconnect scheduled";
+  } else {
+    ok = false;
+    message = "unknown diagnostic action";
+  }
+
+  queueDeviceDiagnostic(action.c_str(), ok, message.c_str());
+  serviceServer.sendHeader("Location", "/diag");
+  serviceServer.send(303, "text/plain", "");
+}
+
+void handleServiceWifiPage() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  String html;
+  html.reserve(5200);
+  html += F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>WiFi Setup</title><style>body{font-family:system-ui;margin:24px}input,select,button{font:inherit;padding:8px;margin:4px 0;width:100%;max-width:420px}.muted{color:#555}</style></head><body>");
+  html += F("<h1>WiFi Setup</h1><p><a href='/'>Back</a></p><form method='post' action='/wifi/save'><label>SSID</label><select id='ssid' name='ssid'><option value='");
+  html += htmlEscape(getActiveWifiSsid());
+  html += F("'>");
+  html += htmlEscape(getActiveWifiSsid());
+  html += F("</option></select><p id='scanStatus' class='muted'>Scanning networks...</p><label>Or SSID</label><input name='ssidManual' placeholder='Manual SSID'><label>Password</label><input name='password' type='password' autocomplete='new-password'><button>Save and reconnect</button></form>");
+  html += F("<p>Current source: ");
+  html += wifiConfigLoadedFromNvs ? "NVS" : "firmware fallback";
+  html += F("</p><script>const current=");
+  JsonDocument currentDoc;
+  currentDoc["ssid"] = getActiveWifiSsid();
+  String currentJson;
+  serializeJson(currentDoc["ssid"], currentJson);
+  html += currentJson;
+  html += F(";const select=document.getElementById('ssid');const status=document.getElementById('scanStatus');fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{select.textContent='';let found=false;(d.networks||[]).forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';if(n.ssid===current){o.selected=true;found=true;}select.appendChild(o);});if(!found&&current){const o=document.createElement('option');o.value=current;o.textContent=current+' (saved)';o.selected=true;select.insertBefore(o,select.firstChild);}status.textContent=(d.networks||[]).length+' networks found';}).catch(()=>{status.textContent='Scan failed. Use manual SSID.';});</script></body></html>");
+  serviceServer.send(200, "text/html", html);
+}
+
+void handleServiceWifiSave() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  String ssid = serviceServer.arg("ssidManual");
+  if (!ssid.length()) {
+    ssid = serviceServer.arg("ssid");
+  }
+  const String password = serviceServer.arg("password");
+  ssid.trim();
+
+  if (!ssid.length()) {
+    serviceServer.send(400, "text/plain", "SSID is required.");
+    return;
+  }
+
+  saveWifiCredentials(ssid, password);
+  queueDeviceLog("info", "WIFI_CONFIG_UPDATED", "WiFi credentials updated from service panel.");
+  wifiConnectInProgress = false;
+  consecutiveWifiFailureCount = 0;
+  wifiRetryIntervalMs = WIFI_RETRY_MS;
+  lastWifiRetryMs = 0;
+  serviceServer.sendHeader("Connection", "close");
+  serviceServer.send(200, "text/html", "<!doctype html><html><body><p>WiFi saved. ESP32 will close setup WiFi and reconnect in a moment.</p><p><a href='/'>Back</a></p></body></html>");
+  scheduleServiceWifiReconnect(SERVICE_WIFI_RECONNECT_DELAY_MS);
+}
+
+void handleServiceWifiScanJson() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  JsonDocument doc;
+  JsonArray networks = doc["networks"].to<JsonArray>();
+  const int count = WiFi.scanNetworks(false, true);
+  for (int i = 0; i < count; i += 1) {
+    JsonObject item = networks.add<JsonObject>();
+    item["ssid"] = WiFi.SSID(i);
+    item["rssi"] = WiFi.RSSI(i);
+    item["encryption"] = WiFi.encryptionType(i);
+  }
+  WiFi.scanDelete();
+  String output;
+  serializeJson(doc, output);
+  serviceServer.send(200, "application/json", output);
+}
+
+void handleServiceOtaPage() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+  if (!runtimeOtaEnabled) {
+    serviceServer.send(403, "text/plain", "OTA disabled by remote config.");
+    return;
+  }
+
+  serviceServer.send(200, "text/html",
+    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>OTA</title></head><body>"
+    "<h1>OTA firmware upload</h1><p><a href='/'>Back</a></p>"
+    "<form method='post' action='/ota' enctype='multipart/form-data'><input type='file' name='firmware' accept='.bin'><button>Upload firmware</button></form>"
+    "</body></html>"
+  );
+}
+
+void handleServiceOtaUpload() {
+  if (!runtimeOtaEnabled || !serviceServer.authenticate(SERVICE_PANEL_USERNAME, SERVICE_PANEL_PASSWORD)) {
+    return;
+  }
+
+  HTTPUpload& upload = serviceServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("[OTA] upload start: %s\n", upload.filename.c_str());
+    queueDeviceLog("info", "OTA_UPLOAD_STARTED", "OTA upload started from service panel.");
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("[OTA] upload success: %u bytes\n", upload.totalSize);
+      queueDeviceLog("info", "OTA_UPLOAD_COMPLETED", "OTA upload completed; restarting.");
+    } else {
+      Update.printError(Serial);
+      queueDeviceLog("error", "OTA_UPLOAD_FAILED", "OTA update failed.");
+    }
+  }
+}
+
+void handleServiceOtaFinished() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+  if (!runtimeOtaEnabled) {
+    serviceServer.send(403, "text/plain", "OTA disabled by remote config.");
+    return;
+  }
+
+  const bool ok = !Update.hasError();
+  serviceServer.sendHeader("Connection", "close");
+  serviceServer.send(ok ? 200 : 500, "text/plain", ok ? "OTA OK. Restarting." : "OTA failed.");
+  if (ok) {
+    delay(500);
+    ESP.restart();
+  }
+}
+
+void handleServiceFactoryReset() {
+  if (!requireServiceAuth()) {
+    return;
+  }
+
+  if (serviceServer.arg("confirm") != "RESET") {
+    serviceServer.send(400, "text/plain", "Type RESET to confirm.");
+    return;
+  }
+
+  queueDeviceLog("warn", "FACTORY_RESET", "Factory reset requested from service panel.");
+  clearWifiCredentials();
+  devicePreferences.clear();
+  serviceServer.send(200, "text/plain", "Factory reset done. Restarting.");
+  delay(500);
+  ESP.restart();
+}
+
+void handleServiceCaptivePortal() {
+  serviceServer.sendHeader("Cache-Control", "no-store");
+  serviceServer.sendHeader("Location", "/", true);
+  serviceServer.send(302, "text/plain", "");
+}
+
+void handleServiceFavicon() {
+  serviceServer.sendHeader("Cache-Control", "max-age=86400");
+  serviceServer.send(204, "text/plain", "");
+}
+
+void handleServiceNotFound() {
+  if (serviceSetupPortalActive) {
+    handleServiceCaptivePortal();
+    return;
+  }
+
+  serviceServer.send(404, "text/plain", "Not found.");
+}
+
+void startServicePanel() {
+  if (servicePanelStarted) {
+    return;
+  }
+
+  serviceServer.on("/", HTTP_GET, handleServiceRoot);
+  serviceServer.on("/api/status", HTTP_GET, handleServiceStatusJson);
+  serviceServer.on("/diag", HTTP_GET, handleServiceDiagnosticsPage);
+  serviceServer.on("/diag/action", HTTP_POST, handleServiceDiagnosticAction);
+  serviceServer.on("/wifi", HTTP_GET, handleServiceWifiPage);
+  serviceServer.on("/wifi/save", HTTP_POST, handleServiceWifiSave);
+  serviceServer.on("/api/wifi/scan", HTTP_GET, handleServiceWifiScanJson);
+  serviceServer.on("/ota", HTTP_GET, handleServiceOtaPage);
+  serviceServer.on("/ota", HTTP_POST, handleServiceOtaFinished, handleServiceOtaUpload);
+  serviceServer.on("/factory-reset", HTTP_POST, handleServiceFactoryReset);
+  serviceServer.on("/generate_204", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/gen_204", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/hotspot-detect.html", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/library/test/success.html", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/connecttest.txt", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/ncsi.txt", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/fwlink", HTTP_GET, handleServiceCaptivePortal);
+  serviceServer.on("/favicon.ico", HTTP_GET, handleServiceFavicon);
+  serviceServer.onNotFound(handleServiceNotFound);
+  serviceServer.begin();
+  servicePanelStarted = true;
+  Serial.printf("[SERVICE] panel listening on port %u\n", SERVICE_PANEL_PORT);
+}
+
+void startServiceSetupPortal(const char* reason) {
+  if (serviceSetupPortalActive) {
+    return;
+  }
+
+  setupApSsid = String("SafeKeys-Setup-") + String(deviceBootId).substring(0, 4);
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  WiFi.softAPConfig(
+    IPAddress(192, 168, 4, 1),
+    IPAddress(192, 168, 4, 1),
+    IPAddress(255, 255, 255, 0)
+  );
+  const bool apStarted = WiFi.softAP(setupApSsid.c_str(), SERVICE_SETUP_AP_PASSWORD, 1, false, 4);
+  if (!apStarted) {
+    Serial.println("[SERVICE] failed to start setup AP.");
+    return;
+  }
+
+  wifiConnectInProgress = false;
+  wifiFirstConnectAttemptMs = 0;
+  lastWifiRetryMs = millis();
+  setupDnsServer.start(SERVICE_DNS_PORT, "*", WiFi.softAPIP());
+  serviceSetupPortalActive = true;
+  serviceSetupPortalStartRequested = false;
+  serviceSetupPortalRequestedReason[0] = '\0';
+  serviceSetupPortalStartedMs = millis();
+  Serial.printf("[SERVICE] setup AP started ssid=%s ip=%s reason=%s\n",
+    setupApSsid.c_str(),
+    WiFi.softAPIP().toString().c_str(),
+    reason != nullptr ? reason : "manual"
+  );
+  queueDeviceLog("warn", "WIFI_SETUP_PORTAL_STARTED", reason != nullptr ? reason : "setup portal started");
+  markVisualStateDirty();
+}
+
+void stopServiceSetupPortal() {
+  if (!serviceSetupPortalActive) {
+    return;
+  }
+
+  setupDnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  serviceSetupPortalActive = false;
+  serviceSetupPortalStartedMs = 0;
+  setupApSsid = "";
+  WiFi.mode(WIFI_STA);
+  Serial.println("[SERVICE] setup AP stopped.");
+  queueDeviceLog("info", "WIFI_SETUP_PORTAL_STOPPED", "Setup portal stopped.");
+}
+
+void serviceServicePanel(unsigned long now) {
+  if (serviceSetupPortalStartRequested && !serviceSetupPortalActive && !isWifiReady()) {
+    serviceSetupPortalStartRequested = false;
+    startServiceSetupPortal(
+      serviceSetupPortalRequestedReason[0] != '\0'
+        ? serviceSetupPortalRequestedReason
+        : "manual"
+    );
+    serviceSetupPortalRequestedReason[0] = '\0';
+    return;
+  }
+
+  if (servicePanelStarted) {
+    serviceServer.handleClient();
+  }
+
+  serviceScheduledWifiReconnect(millis());
+
+  if (serviceSetupPortalActive) {
+    setupDnsServer.processNextRequest();
+    const unsigned long portalNow = millis();
+    if (
+      SERVICE_SETUP_TIMEOUT_MS > 0 &&
+      !wifiConnectInProgress &&
+      static_cast<long>(portalNow - serviceSetupPortalStartedMs) >= 0 &&
+      portalNow - serviceSetupPortalStartedMs >= SERVICE_SETUP_TIMEOUT_MS
+    ) {
+      stopServiceSetupPortal();
+    }
   }
 }
 
@@ -1544,7 +2573,13 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
   if (strcmp(type, "ack") == 0) {
     const bool ok = doc["ok"] | false;
     const char* messageId = doc["messageId"] | "(none)";
-    if (codeVerificationPending && pendingCodeMessageId[0] != '\0' && strcmp(messageId, pendingCodeMessageId) == 0) {
+    const bool matchesPendingCodeAck = codeVerificationPending
+      && pendingCodeMessageId[0] != '\0'
+      && strcmp(messageId, pendingCodeMessageId) == 0;
+    const bool matchesExpiredCodeAck = !codeVerificationPending
+      && expiredCodeMessageId[0] != '\0'
+      && strcmp(messageId, expiredCodeMessageId) == 0;
+    if (matchesPendingCodeAck || matchesExpiredCodeAck) {
       Serial.printf("[WS ACK] code verify delivered requestId=%s ok=%s\n", messageId, ok ? "true" : "false");
       const JsonObject verification = doc["verification"];
       if (ok && verification.isNull()) {
@@ -1554,25 +2589,28 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
       NetworkResult result = {};
       result.type = NetworkResultType::VerifyCode;
       result.requestOk = ok;
-      copyCStringToBuffer(pendingCode, result.text1, sizeof(result.text1));
+      copyCStringToBuffer(matchesPendingCodeAck ? pendingCode : expiredCode, result.text1, sizeof(result.text1));
       copyCStringToBuffer(messageId, result.requestId, sizeof(result.requestId));
       if (!verification.isNull()) {
         result.boolValue1 = ok && (verification["valid"] | false);
         result.lockerNumber = static_cast<uint8_t>(verification["locker"] | 0);
-        if (codeVerificationTimedOut) {
+        if (codeVerificationTimedOut || matchesExpiredCodeAck) {
           Serial.printf("[CODE VERIFY RESULT] late legacy ack result accepted code=%s requestId=%s\n",
-            pendingCode,
+            matchesPendingCodeAck ? pendingCode : expiredCode,
             messageId
           );
         }
         Serial.printf(
           "[CODE VERIFY RESULT] legacy ack result accepted code=%s requestId=%s valid=%s locker=%u ok=%s\n",
-          pendingCode,
+          matchesPendingCodeAck ? pendingCode : expiredCode,
           messageId,
           result.boolValue1 ? "true" : "false",
           result.lockerNumber,
           ok ? "true" : "false"
         );
+      }
+      if (matchesExpiredCodeAck) {
+        clearExpiredCode();
       }
       if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
         Serial.printf("[WS] verify code result queue full for %s\n", messageId);
@@ -1787,6 +2825,27 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   }
 }
 
+bool matchesExpiredCodeRequest(const char* requestId, const char* code) {
+  const bool requestMatches = (
+    requestId != nullptr &&
+    requestId[0] != '\0' &&
+    expiredCodeMessageId[0] != '\0' &&
+    strcmp(requestId, expiredCodeMessageId) == 0
+  );
+  const bool codeMatches = (
+    code != nullptr &&
+    code[0] != '\0' &&
+    expiredCode[0] != '\0' &&
+    strcmp(code, expiredCode) == 0
+  );
+  return requestMatches || codeMatches;
+}
+
+void clearExpiredCode() {
+  expiredCode[0] = '\0';
+  expiredCodeMessageId[0] = '\0';
+}
+
 void handleCodeVerifyResultMessage(JsonDocument& doc) {
   const char* requestId = doc["requestId"] | "";
   if (strlen(requestId) == 0) {
@@ -1815,43 +2874,55 @@ void handleCodeVerifyResultMessage(JsonDocument& doc) {
   );
 
   if (!codeVerificationPending) {
-    Serial.printf(
-      "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s reason=no_pending_request\n",
-      strlen(code) > 0 ? code : "(none)",
-      strlen(requestId) > 0 ? requestId : "(none)"
-    );
-    return;
+    if (matchesExpiredCodeRequest(requestId, code)) {
+      Serial.printf(
+        "[CODE VERIFY RESULT] late result accepted after local expiry code=%s requestId=%s\n",
+        strlen(code) > 0 ? code : "(none)",
+        strlen(requestId) > 0 ? requestId : "(none)"
+      );
+    } else {
+      Serial.printf(
+        "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s reason=no_pending_request\n",
+        strlen(code) > 0 ? code : "(none)",
+        strlen(requestId) > 0 ? requestId : "(none)"
+      );
+      return;
+    }
+  } else {
+    if (strlen(requestId) > 0 && pendingCodeMessageId[0] != '\0' && strcmp(requestId, pendingCodeMessageId) != 0) {
+      Serial.printf(
+        "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s expected=%s\n",
+        strlen(code) > 0 ? code : "(none)",
+        requestId,
+        pendingCodeMessageId
+      );
+      return;
+    }
+
+    if (strlen(code) > 0 && strcmp(code, pendingCode) != 0) {
+      Serial.printf(
+        "[CODE VERIFY RESULT] stale result ignored code=%s expectedCode=%s\n",
+        code,
+        pendingCode
+      );
+      return;
+    }
   }
 
-  if (strlen(requestId) > 0 && pendingCodeMessageId[0] != '\0' && strcmp(requestId, pendingCodeMessageId) != 0) {
-    Serial.printf(
-      "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s expected=%s\n",
-      strlen(code) > 0 ? code : "(none)",
-      requestId,
-      pendingCodeMessageId
-    );
-    return;
-  }
-
-  if (strlen(code) > 0 && strcmp(code, pendingCode) != 0) {
-    Serial.printf(
-      "[CODE VERIFY RESULT] stale result ignored code=%s expectedCode=%s\n",
-      code,
-      pendingCode
-    );
-    return;
-  }
-
-  const uint32_t now = millis();
+  const unsigned long now = millis();
+  const unsigned long sentAtMs = pendingCodeSentMs;
   if (
-    pendingCodeSentMs != 0 &&
-    now - pendingCodeSentMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS
+    codeVerificationPending &&
+    sentAtMs != 0 &&
+    static_cast<long>(now - sentAtMs) >= 0 &&
+    now - sentAtMs >= DEVICE_VERIFY_CODE_TIMEOUT_MS + DEVICE_VERIFY_CODE_RESULT_GRACE_MS
   ) {
     Serial.printf(
       "[CODE VERIFY RESULT] stale result ignored code=%s requestId=%s reason=expired_result_window\n",
       strlen(code) > 0 ? code : pendingCode,
       strlen(requestId) > 0 ? requestId : "(none)"
     );
+    rememberExpiredPendingCode();
     failPendingCodeVerification("Code verification result arrived after grace period.");
     return;
   }
@@ -1869,8 +2940,15 @@ void handleCodeVerifyResultMessage(JsonDocument& doc) {
   result.requestOk = ok;
   result.boolValue1 = ok && valid;
   result.lockerNumber = lockerNumber;
-  copyCStringToBuffer(strlen(code) > 0 ? code : pendingCode, result.text1, sizeof(result.text1));
+  copyCStringToBuffer(
+    strlen(code) > 0
+      ? code
+      : (codeVerificationPending ? pendingCode : expiredCode),
+    result.text1,
+    sizeof(result.text1)
+  );
   copyCStringToBuffer(requestId, result.requestId, sizeof(result.requestId));
+  clearExpiredCode();
 
   if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
     Serial.printf("[WS] code verify result queue full requestId=%s\n", strlen(requestId) > 0 ? requestId : "(none)");
@@ -1949,7 +3027,7 @@ void maybeSendHeartbeat(unsigned long now) {
     return;
   }
 
-  if (heartbeatQueued || (lastHeartbeatMs != 0 && now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS)) {
+  if (heartbeatQueued || (lastHeartbeatMs != 0 && now - lastHeartbeatMs < runtimeHeartbeatIntervalMs)) {
     return;
   }
 
@@ -2322,8 +3400,12 @@ void handleKeypad() {
     markVisualStateDirty();
     wifiRetryIntervalMs = WIFI_RETRY_MS;
     consecutiveWifiFailureCount = 0;
-    WiFi.disconnect(false, false);
-    connectWifi();
+    if (serviceSetupPortalActive) {
+      scheduleServiceWifiReconnect(0);
+    } else {
+      WiFi.disconnect(false, false);
+      connectWifi();
+    }
     return;
   }
 
@@ -2373,8 +3455,17 @@ void handleSerialDebug() {
       } else if (command == "wifi" || command == "w") {
         wifiRetryIntervalMs = WIFI_RETRY_MS;
         consecutiveWifiFailureCount = 0;
-        WiFi.disconnect(false, false);
-        connectWifi();
+        if (serviceSetupPortalActive) {
+          scheduleServiceWifiReconnect(0);
+        } else {
+          WiFi.disconnect(false, false);
+          connectWifi();
+        }
+      } else if (command == "wifi-setup") {
+        requestServiceSetupPortal("serial command");
+      } else if (command == "config") {
+        nextRemoteConfigFetchMs = 0;
+        maybeFetchRemoteConfig(millis());
       } else if (command == "heartbeat" || command == "h") {
         if (isWifiReady()) {
           maybeSendHeartbeat(millis());
@@ -2397,6 +3488,21 @@ void handleSerialDebug() {
         } else {
           Serial.println("Actions poll skipped: WiFi not connected.");
         }
+      } else if (command == "openall") {
+        if (pulseUnlockLockerMask(allRelayLockersMask())) {
+          Serial.println("Manual relay test: all configured lockers triggered.");
+        } else {
+          Serial.println("Manual relay test failed for openall.");
+        }
+      } else if (command == "locksoff") {
+        allLocksOff();
+      } else if (command.startsWith("open ")) {
+        const int lockerNumber = command.substring(5).toInt();
+        if (lockerNumber <= 0 || !pulseUnlockLocker(static_cast<uint8_t>(lockerNumber), runtimeLockUnlockPulseMs)) {
+          Serial.println("Manual relay test failed. Use: open 1..4");
+        } else {
+          Serial.printf("Manual relay test: locker %d triggered.\n", lockerNumber);
+        }
       } else if (command == "clear" || command == "c") {
         enteredCode = "";
         Serial.println("Code buffer cleared from serial.");
@@ -2416,6 +3522,17 @@ void handleSerialDebug() {
 }
 
 void processEnteredCode(const String& code) {
+  const unsigned long now = millis();
+  if (isCodeEntryRateLimited(now)) {
+    const unsigned long remainingMs = codeRateLimitLockedUntilMs > now ? codeRateLimitLockedUntilMs - now : 0;
+    Serial.printf("[CODE RATE LIMIT] code entry locked for %lu ms\n", remainingMs);
+    queueDeviceLog("warn", "CODE_RATE_LIMITED", "Keypad code entry is temporarily locked.");
+    startLedErrorFlash(700);
+    flashCodeResult(code, false);
+    blinkLed(5, 70, 70);
+    return;
+  }
+
   if (codeVerificationPending) {
     Serial.println("Code verification already in progress.");
     blinkLed(2, 80, 80);
@@ -2438,6 +3555,45 @@ void processEnteredCode(const String& code) {
     flashCodeResult(code, false);
     blinkLed(5, 80, 80);
   }
+}
+
+bool isCodeEntryRateLimited(unsigned long now) {
+  if (!runtimeCodeRateLimitEnabled) {
+    return false;
+  }
+
+  return codeRateLimitLockedUntilMs != 0 && static_cast<long>(now - codeRateLimitLockedUntilMs) < 0;
+}
+
+void registerCodeVerificationFailure(unsigned long now) {
+  if (!runtimeCodeRateLimitEnabled) {
+    return;
+  }
+
+  if (codeRateLimitWindowStartedMs == 0 || now - codeRateLimitWindowStartedMs > runtimeCodeRateLimitWindowMs) {
+    codeRateLimitWindowStartedMs = now;
+    codeRateLimitFailureCount = 0;
+  }
+
+  if (codeRateLimitFailureCount < 255) {
+    codeRateLimitFailureCount += 1;
+  }
+
+  if (codeRateLimitFailureCount >= runtimeCodeRateLimitMaxFailures) {
+    codeRateLimitLockedUntilMs = now + runtimeCodeRateLimitLockoutMs;
+    Serial.printf(
+      "[CODE RATE LIMIT] lockout started failures=%u lockout=%lums\n",
+      codeRateLimitFailureCount,
+      static_cast<unsigned long>(runtimeCodeRateLimitLockoutMs)
+    );
+    queueDeviceLog("warn", "CODE_RATE_LIMIT_LOCKOUT", "Too many invalid keypad codes; lockout started.");
+  }
+}
+
+void resetCodeRateLimit() {
+  codeRateLimitFailureCount = 0;
+  codeRateLimitWindowStartedMs = 0;
+  codeRateLimitLockedUntilMs = 0;
 }
 
 void serviceNetworkResults() {
@@ -2578,11 +3734,16 @@ void handleNetworkResult(const NetworkResult& result) {
 
     case NetworkResultType::VerifyCode:
       setStatusLed(false);
-      if (!codeVerificationPending || strcmp(result.text1, pendingCode) != 0) {
+      if (!codeVerificationPending) {
+        if (!matchesExpiredCodeRequest(result.requestId, result.text1)) {
+          break;
+        }
+      } else if (strcmp(result.text1, pendingCode) != 0) {
         break;
       }
 
       clearPendingCode();
+      clearExpiredCode();
 
       if (!result.requestOk) {
         Serial.printf("[CODE VERIFY] request failed code=%s requestId=%s\n",
@@ -2599,6 +3760,7 @@ void handleNetworkResult(const NetworkResult& result) {
           result.text1,
           strlen(result.requestId) > 0 ? result.requestId : "(none)"
         );
+        registerCodeVerificationFailure(now);
         flashCodeResult(String(result.text1), false);
         blinkLed(4, 120, 90);
         break;
@@ -2609,11 +3771,22 @@ void handleNetworkResult(const NetworkResult& result) {
         result.lockerNumber,
         strlen(result.requestId) > 0 ? result.requestId : "(none)"
       );
+      if (!pulseUnlockLocker(result.lockerNumber, runtimeLockUnlockPulseMs)) {
+        Serial.printf("[CODE VERIFY] relay pulse failed locker=S%u\n", result.lockerNumber);
+        flashCodeResult(String(result.text1), false);
+        startLedErrorFlash(700);
+        blinkLed(4, 90, 80);
+        break;
+      }
+      resetCodeRateLimit();
       flashCodeResult(String(result.text1), true);
+      if (result.lockerNumber >= 1 && result.lockerNumber <= LOCKER_COUNT) {
+        startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
+      }
       blinkLed(2, 260, 140);
       break;
 
-    case NetworkResultType::VerifyMasterTag:
+    case NetworkResultType::VerifyMasterTag: {
       if (masterTagVerificationPending && strcmp(result.text1, pendingMasterTagId) == 0) {
         clearPendingMasterTag();
       }
@@ -2679,6 +3852,18 @@ void handleNetworkResult(const NetworkResult& result) {
       );
       blinkLed(2, 220, 120);
       break;
+    }
+
+    case NetworkResultType::RemoteConfig:
+      remoteConfigQueued = false;
+      if (result.requestOk) {
+        applyRemoteConfigResult(result);
+        nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_INTERVAL_MS;
+      } else {
+        nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_RETRY_MS;
+        Serial.println("[CONFIG] remote config fetch failed.");
+      }
+      break;
   }
 }
 
@@ -2732,6 +3917,11 @@ void recoverFromDroppedNetworkResult(const NetworkResult& result) {
     case NetworkResultType::VerifyMasterTag:
       clearPendingMasterTag();
       break;
+
+    case NetworkResultType::RemoteConfig:
+      remoteConfigQueued = false;
+      nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_RETRY_MS;
+      break;
   }
 }
 
@@ -2761,11 +3951,14 @@ bool isPriorityNetworkJob(const NetworkJob& job) {
     case NetworkJobType::VerifyCode:
     case NetworkJobType::VerifyMasterTag:
     case NetworkJobType::AccessSelectionEvent:
+    case NetworkJobType::DeviceDiagnostic:
       return true;
 
     case NetworkJobType::Heartbeat:
     case NetworkJobType::DeviceActionsPoll:
     case NetworkJobType::TagAssignmentResult:
+    case NetworkJobType::DeviceLog:
+    case NetworkJobType::FetchRemoteConfig:
       return false;
   }
 
@@ -2807,22 +4000,27 @@ void handleRemoteCommand(const NetworkResult& result) {
       message = "No matching active tag assignment mode.";
     }
   } else if (strcmp(result.actionType, "OPEN_LOCKER") == 0) {
-    if (result.lockerNumber == 0 || result.lockerNumber > LOCKER_COUNT) {
+    if (!pulseUnlockLocker(result.lockerNumber, runtimeLockUnlockPulseMs)) {
       success = false;
-      message = "Invalid locker number.";
+      message = "Invalid locker number or relay pulse failed.";
     } else {
-      Serial.printf("Remote open command applied for locker S%u (relay output not configured in this firmware).\n", result.lockerNumber);
-      startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
+      Serial.printf("Remote open command applied for locker S%u.\n", result.lockerNumber);
+      if (result.lockerNumber >= 1 && result.lockerNumber <= LOCKER_COUNT) {
+        startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
+      }
       blinkLed(2, 120, 80);
-      status = "acknowledged";
-      message = "Command acknowledged; relay output is not configured in this firmware.";
+      message = "Locker relay pulsed.";
     }
   } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
-    Serial.println("Remote release-all command applied (relay outputs not configured in this firmware).");
-    startLedStripEffect(LED_STRIP_EFFECT_REMOTE_ALL, LED_REMOTE_FLASH_MS);
-    blinkLed(3, 120, 80);
-    status = "acknowledged";
-    message = "Command acknowledged; relay outputs are not configured in this firmware.";
+    if (!pulseUnlockLockerMask(allRelayLockersMask())) {
+      success = false;
+      message = "Failed to pulse locker relays.";
+    } else {
+      Serial.println("Remote release-all command applied.");
+      startLedStripEffect(LED_STRIP_EFFECT_REMOTE_ALL, LED_REMOTE_FLASH_MS);
+      blinkLed(3, 120, 80);
+      message = OPEN_LOCKS_PARALLEL ? "All locker relays pulsed in parallel." : "All locker relays queued sequentially.";
+    }
   } else {
     success = false;
     message = "Unsupported command type.";
@@ -3082,6 +4280,8 @@ void setPendingCode(const String& code) {
   copyStringToBuffer(code, pendingCode, sizeof(pendingCode));
   pendingCodeMessageId[0] = '\0';
   pendingCodeSentMs = 0;
+  expiredCode[0] = '\0';
+  expiredCodeMessageId[0] = '\0';
 }
 
 void clearPendingCode() {
@@ -3090,6 +4290,11 @@ void clearPendingCode() {
   pendingCode[0] = '\0';
   pendingCodeMessageId[0] = '\0';
   pendingCodeSentMs = 0;
+}
+
+void rememberExpiredPendingCode() {
+  copyCStringToBuffer(pendingCode, expiredCode, sizeof(expiredCode));
+  copyCStringToBuffer(pendingCodeMessageId, expiredCodeMessageId, sizeof(expiredCodeMessageId));
 }
 
 void setPendingMasterTag(const String& tagId) {
@@ -3202,8 +4407,13 @@ bool isPendingMasterTagResultExpired(uint32_t nowMs) {
     return false;
   }
 
+  const uint32_t sentAtMs = static_cast<uint32_t>(pendingMasterTagSentMs);
+  if (static_cast<int32_t>(nowMs - sentAtMs) < 0) {
+    return false;
+  }
+
   const uint32_t windowMs = static_cast<uint32_t>(DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS + DEVICE_VERIFY_MASTER_TAG_RESULT_GRACE_MS);
-  return nowMs - pendingMasterTagSentMs >= windowMs;
+  return nowMs - sentAtMs >= windowMs;
 }
 
 bool isPendingMasterTagResultWindowOpen(uint32_t nowMs) {
@@ -3217,7 +4427,13 @@ void servicePendingMasterTagVerification(uint32_t nowMs) {
     return;
   }
 
-  if (!pendingMasterTagVerify.timedOut && nowMs - pendingMasterTagSentMs >= DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS) {
+  const uint32_t sentAtMs = static_cast<uint32_t>(pendingMasterTagSentMs);
+  if (static_cast<int32_t>(nowMs - sentAtMs) < 0) {
+    return;
+  }
+
+  const uint32_t elapsedMs = nowMs - sentAtMs;
+  if (!pendingMasterTagVerify.timedOut && elapsedMs >= DEVICE_VERIFY_MASTER_TAG_TIMEOUT_MS) {
     markPendingMasterTagTimedOut("verification timed out");
   }
 
@@ -3379,9 +4595,12 @@ void buildHeartbeatPayload(JsonObject payload) {
 
   payload["deviceId"] = DEVICE_ID;
   payload["bootId"] = deviceBootId;
-  payload["protocolVersion"] = 1;
-  payload["firmware"] = "safekeys-esp32-v3-test-ws";
+  payload["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  payload["firmware"] = FIRMWARE_VERSION;
   payload["ip"] = WiFi.localIP().toString();
+  payload["servicePanelIp"] = WiFi.localIP().toString();
+  payload["servicePanelActive"] = servicePanelStarted && runtimeServicePanelEnabled;
+  payload["configVersion"] = remoteConfigVersion;
   payload["wifiRssi"] = WiFi.RSSI();
   payload["uptimeMs"] = millis();
   payload["freeHeap"] = ESP.getFreeHeap();
@@ -3389,8 +4608,19 @@ void buildHeartbeatPayload(JsonObject payload) {
   payload["lockersWithTags"] = lockerTagsPresent;
   payload["masterReaderPresent"] = masterReaderRuntime.hasCard;
   payload["deviceActionsPollIntervalMs"] = deviceActionsPollIntervalMs;
+  payload["heartbeatIntervalMs"] = runtimeHeartbeatIntervalMs;
+  payload["lockPulseMs"] = runtimeLockUnlockPulseMs;
   payload["networkFailureCount"] = consecutiveNetworkFailureCount;
   payload["wsConnected"] = deviceWsConnected;
+
+  JsonArray capabilities = payload["capabilities"].to<JsonArray>();
+  capabilities.add("service-panel");
+  capabilities.add("wifi-setup");
+  capabilities.add("local-ota");
+  capabilities.add("diagnostics");
+  capabilities.add("remote-logs");
+  capabilities.add("remote-config");
+  capabilities.add("code-rate-limit");
 
   JsonArray lockers = payload["lockers"].to<JsonArray>();
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -3406,6 +4636,101 @@ void buildHeartbeatPayload(JsonObject payload) {
   if (lastHeartbeatPingMs >= 0) {
     payload["pingMs"] = lastHeartbeatPingMs;
   }
+}
+
+void applyRemoteConfigResult(const NetworkResult& result) {
+  if (!result.requestOk || result.configVersion == 0) {
+    return;
+  }
+
+  remoteConfigVersion = result.configVersion;
+  runtimeHeartbeatIntervalMs = constrain(result.heartbeatIntervalMs, 10000UL, 600000UL);
+  runtimeDeviceActionsPollBaseMs = constrain(result.deviceActionsPollIntervalMs, 2000UL, 120000UL);
+  runtimeLockUnlockPulseMs = constrain(result.lockPulseMs, 100UL, 5000UL);
+  runtimeCodeRateLimitWindowMs = constrain(result.codeRateLimitWindowMs, 30000UL, 3600000UL);
+  runtimeCodeRateLimitLockoutMs = constrain(result.codeRateLimitLockoutMs, 5000UL, 3600000UL);
+  runtimeCodeRateLimitMaxFailures = constrain(result.codeRateLimitMaxFailures, static_cast<uint8_t>(1), static_cast<uint8_t>(20));
+  runtimeRemoteLoggingEnabled = result.boolValue1;
+  runtimeCodeRateLimitEnabled = result.boolValue2;
+  runtimeServicePanelEnabled = result.boolValue3;
+  runtimeOtaEnabled = result.boolValue4;
+  runtimeDiagnosticsEnabled = result.boolValue5;
+  const unsigned long cappedPollMs = deviceActionsPollIntervalMs > DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS
+    ? DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS
+    : deviceActionsPollIntervalMs;
+  deviceActionsPollIntervalMs = cappedPollMs < runtimeDeviceActionsPollBaseMs
+    ? runtimeDeviceActionsPollBaseMs
+    : cappedPollMs;
+
+  devicePreferences.putUInt("cfgVersion", remoteConfigVersion);
+  devicePreferences.putUInt("hbMs", runtimeHeartbeatIntervalMs);
+  devicePreferences.putUInt("pollMs", runtimeDeviceActionsPollBaseMs);
+  devicePreferences.putUInt("pulseMs", runtimeLockUnlockPulseMs);
+  devicePreferences.putBool("logEnabled", runtimeRemoteLoggingEnabled);
+  devicePreferences.putBool("rlEnabled", runtimeCodeRateLimitEnabled);
+  devicePreferences.putUChar("rlMax", runtimeCodeRateLimitMaxFailures);
+  devicePreferences.putUInt("rlWindow", runtimeCodeRateLimitWindowMs);
+  devicePreferences.putUInt("rlLockout", runtimeCodeRateLimitLockoutMs);
+  devicePreferences.putBool("panelEnabled", runtimeServicePanelEnabled);
+  devicePreferences.putBool("otaEnabled", runtimeOtaEnabled);
+  devicePreferences.putBool("diagEnabled", runtimeDiagnosticsEnabled);
+
+  Serial.printf(
+    "[CONFIG] applied version=%lu heartbeat=%lums poll=%lums pulse=%lums rateLimit=%s/%u\n",
+    static_cast<unsigned long>(remoteConfigVersion),
+    static_cast<unsigned long>(runtimeHeartbeatIntervalMs),
+    static_cast<unsigned long>(runtimeDeviceActionsPollBaseMs),
+    static_cast<unsigned long>(runtimeLockUnlockPulseMs),
+    runtimeCodeRateLimitEnabled ? "on" : "off",
+    runtimeCodeRateLimitMaxFailures
+  );
+}
+
+void maybeFetchRemoteConfig(unsigned long now) {
+  if (remoteConfigQueued) {
+    return;
+  }
+
+  if (!isWifiReady() || isBackgroundNetworkBackoffActive(now)) {
+    return;
+  }
+
+  if (nextRemoteConfigFetchMs != 0 && now < nextRemoteConfigFetchMs) {
+    return;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::FetchRemoteConfig;
+  if (enqueueNetworkJob(job)) {
+    remoteConfigQueued = true;
+    nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_RETRY_MS;
+  }
+}
+
+void queueDeviceLog(const char* level, const char* event, const char* message) {
+  if (!runtimeRemoteLoggingEnabled || networkJobQueue == nullptr) {
+    return;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::DeviceLog;
+  copyCStringToBuffer(level != nullptr ? level : "info", job.text1, sizeof(job.text1));
+  copyCStringToBuffer(event != nullptr ? event : "DEVICE_LOG", job.text2, sizeof(job.text2));
+  copyCStringToBuffer(message != nullptr ? message : "", job.text4, sizeof(job.text4));
+  enqueueNetworkJob(job);
+}
+
+void queueDeviceDiagnostic(const char* name, bool ok, const char* message) {
+  if (networkJobQueue == nullptr) {
+    return;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::DeviceDiagnostic;
+  job.boolValue = ok;
+  copyCStringToBuffer(name != nullptr ? name : "diagnostic", job.text1, sizeof(job.text1));
+  copyCStringToBuffer(message != nullptr ? message : "", job.text4, sizeof(job.text4));
+  enqueueNetworkJob(job);
 }
 
 bool sendDeviceHello() {
@@ -3719,6 +5044,207 @@ bool sendAccessSelectionEventWs(const NetworkJob& job) {
   return sent;
 }
 
+bool sendDeviceLogWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "devlog", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "device.log";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["level"] = job.text1;
+  payload["event"] = job.text2;
+  payload["message"] = job.text4;
+  payload["firmware"] = FIRMWARE_VERSION;
+  payload["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  payload["uptimeMs"] = millis();
+  payload["freeHeap"] = ESP.getFreeHeap();
+
+  char body[512];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    return false;
+  }
+
+  return deviceWebSocket.sendTXT(body, bodyLen);
+}
+
+bool sendDeviceDiagnosticWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "diag", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "diagnostic.result";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["name"] = job.text1;
+  payload["ok"] = job.boolValue;
+  payload["message"] = job.text4;
+  payload["firmware"] = FIRMWARE_VERSION;
+  payload["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  payload["uptimeMs"] = millis();
+  JsonObject details = payload["details"].to<JsonObject>();
+  details["freeHeap"] = ESP.getFreeHeap();
+  details["wifiRssi"] = isWifiReady() ? WiFi.RSSI() : 0;
+  details["wsConnected"] = deviceWsConnected;
+
+  char body[640];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    return false;
+  }
+
+  return deviceWebSocket.sendTXT(body, bodyLen);
+}
+
+bool postDeviceLog(const NetworkJob& job) {
+  WiFiClientSecure secureClient;
+  HTTPClient http;
+  char url[128];
+  snprintf(url, sizeof(url), "%s/device/logs", API_BASE_URL);
+
+  if (!beginSecureRequest(http, secureClient, url, "/device/logs")) {
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  if (strlen(DEVICE_API_KEY) > 0) {
+    http.addHeader("x-device-key", DEVICE_API_KEY);
+  }
+
+  JsonDocument payload;
+  payload["deviceId"] = DEVICE_ID;
+  payload["level"] = job.text1;
+  payload["event"] = job.text2;
+  payload["message"] = job.text4;
+  payload["firmware"] = FIRMWARE_VERSION;
+  payload["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  payload["uptimeMs"] = millis();
+  payload["freeHeap"] = ESP.getFreeHeap();
+
+  char body[512];
+  const size_t bodyLen = serializeJson(payload, body, sizeof(body));
+  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), bodyLen);
+  const String responseBody = http.getString();
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/device/logs", httpCode, secureClient, responseBody);
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
+bool postDeviceDiagnostic(const NetworkJob& job) {
+  WiFiClientSecure secureClient;
+  HTTPClient http;
+  char url[128];
+  snprintf(url, sizeof(url), "%s/device/diagnostics", API_BASE_URL);
+
+  if (!beginSecureRequest(http, secureClient, url, "/device/diagnostics")) {
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  if (strlen(DEVICE_API_KEY) > 0) {
+    http.addHeader("x-device-key", DEVICE_API_KEY);
+  }
+
+  JsonDocument payload;
+  payload["deviceId"] = DEVICE_ID;
+  payload["name"] = job.text1;
+  payload["ok"] = job.boolValue;
+  payload["message"] = job.text4;
+  payload["firmware"] = FIRMWARE_VERSION;
+  payload["protocolVersion"] = DEVICE_PROTOCOL_VERSION;
+  payload["uptimeMs"] = millis();
+  JsonObject details = payload["details"].to<JsonObject>();
+  details["freeHeap"] = ESP.getFreeHeap();
+  details["wifiRssi"] = isWifiReady() ? WiFi.RSSI() : 0;
+  details["wsConnected"] = deviceWsConnected;
+
+  char body[640];
+  const size_t bodyLen = serializeJson(payload, body, sizeof(body));
+  const int httpCode = http.POST(reinterpret_cast<uint8_t*>(body), bodyLen);
+  const String responseBody = http.getString();
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/device/diagnostics", httpCode, secureClient, responseBody);
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
+bool fetchRemoteConfigForTask(NetworkResult& result) {
+  WiFiClientSecure secureClient;
+  HTTPClient http;
+  char url[192];
+  snprintf(url, sizeof(url), "%s/device/config?deviceId=%s", API_BASE_URL, DEVICE_ID);
+
+  if (!beginSecureRequest(http, secureClient, url, "/device/config")) {
+    return false;
+  }
+
+  if (strlen(DEVICE_API_KEY) > 0) {
+    http.addHeader("x-device-key", DEVICE_API_KEY);
+  }
+
+  const int httpCode = http.GET();
+  const String responseBody = http.getString();
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+    logHttpFailure("/device/config", httpCode, secureClient, responseBody);
+    return false;
+  }
+
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, responseBody);
+  if (error) {
+    Serial.printf("[CONFIG] JSON parse failed: %s\n", error.c_str());
+    return false;
+  }
+
+  JsonObject config = doc["config"].as<JsonObject>();
+  if (config.isNull()) {
+    return false;
+  }
+
+  result.configVersion = static_cast<uint32_t>(doc["configVersion"] | 1);
+  result.heartbeatIntervalMs = static_cast<uint32_t>(config["heartbeatIntervalMs"] | HEARTBEAT_INTERVAL_MS);
+  result.deviceActionsPollIntervalMs = static_cast<uint32_t>(config["deviceActionsPollIntervalMs"] | DEVICE_ACTIONS_POLL_INTERVAL_MS);
+  result.lockPulseMs = static_cast<uint32_t>(config["lockPulseMs"] | LOCK_UNLOCK_PULSE_MS);
+  JsonObject remoteLogging = config["remoteLogging"].as<JsonObject>();
+  result.boolValue1 = remoteLogging.isNull() ? true : (remoteLogging["enabled"] | true);
+  JsonObject codeRateLimit = config["codeRateLimit"].as<JsonObject>();
+  result.boolValue2 = codeRateLimit.isNull() ? true : (codeRateLimit["enabled"] | true);
+  result.codeRateLimitMaxFailures = static_cast<uint8_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT : (codeRateLimit["maxFailures"] | CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT));
+  result.codeRateLimitWindowMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_WINDOW_MS_DEFAULT : (codeRateLimit["windowMs"] | CODE_RATE_LIMIT_WINDOW_MS_DEFAULT));
+  result.codeRateLimitLockoutMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT : (codeRateLimit["lockoutMs"] | CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT));
+  JsonObject servicePanel = config["servicePanel"].as<JsonObject>();
+  JsonObject ota = config["ota"].as<JsonObject>();
+  JsonObject diagnostics = config["diagnostics"].as<JsonObject>();
+  result.boolValue3 = servicePanel.isNull() ? true : (servicePanel["enabled"] | true);
+  result.boolValue4 = ota.isNull() ? true : (ota["enabled"] | true);
+  result.boolValue5 = diagnostics.isNull() ? true : (diagnostics["enabled"] | true);
+  return true;
+}
+
 bool postAccessSelectionEvent(const NetworkJob& job) {
   JsonDocument doc;
   doc["type"] = "access.selection";
@@ -4001,9 +5527,14 @@ void printUsage() {
   Serial.println("  status/s  -> print full device status");
   Serial.println("  rfid/r    -> print RFID snapshot");
   Serial.println("  wifi/w    -> reconnect WiFi");
+  Serial.println("  wifi-setup -> start temporary SafeKeys setup AP");
+  Serial.println("  config    -> fetch remote device config now");
   Serial.println("  heartbeat/h -> send heartbeat now");
   Serial.println("  lockers/l -> force locker RFID report");
   Serial.println("  actions/a -> poll remote actions");
+  Serial.println("  open <1-4> -> pulse selected locker relay");
+  Serial.println("  openall   -> pulse all configured locker relays");
+  Serial.println("  locksoff  -> force all relays OFF");
   Serial.println("  clear/c   -> clear code buffer");
   Serial.println("Network:");
   Serial.println("  - primary transport: persistent WebSocket /device/ws");
@@ -4033,6 +5564,23 @@ void printStatus() {
     Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
   }
   Serial.printf("WiFi retry interval: %lu ms, WiFi failures: %u\n", wifiRetryIntervalMs, consecutiveWifiFailureCount);
+  Serial.printf("WiFi configured SSID: %s (source=%s)\n",
+    configuredWifiSsid.length() > 0 ? configuredWifiSsid.c_str() : "(empty)",
+    wifiConfigLoadedFromNvs ? "nvs" : "firmware"
+  );
+  Serial.printf("Service panel: started=%s enabled=%s setupAp=%s ssid=%s apIp=%s\n",
+    servicePanelStarted ? "yes" : "no",
+    runtimeServicePanelEnabled ? "yes" : "no",
+    serviceSetupPortalActive ? "yes" : "no",
+    setupApSsid.length() > 0 ? setupApSsid.c_str() : "(none)",
+    WiFi.softAPIP().toString().c_str()
+  );
+  Serial.printf("Firmware=%s protocol=%u configVersion=%lu heartbeat=%lu ms\n",
+    FIRMWARE_VERSION,
+    DEVICE_PROTOCOL_VERSION,
+    static_cast<unsigned long>(remoteConfigVersion),
+    static_cast<unsigned long>(runtimeHeartbeatIntervalMs)
+  );
   if (lastHeartbeatPingMs >= 0) {
     Serial.printf("Last heartbeat ping: %ld ms\n", lastHeartbeatPingMs);
   } else {
@@ -4048,7 +5596,33 @@ void printStatus() {
   Serial.printf("Device bootId: %s, next message seq=%lu\n", deviceBootId, static_cast<unsigned long>(deviceMessageSequence + 1));
 
   Serial.printf("Current code buffer: %s\n", enteredCode.length() > 0 ? enteredCode.c_str() : "(empty)");
+  Serial.printf("Code rate limit: enabled=%s failures=%u/%u window=%lu ms lockoutUntil=%lu\n",
+    runtimeCodeRateLimitEnabled ? "yes" : "no",
+    codeRateLimitFailureCount,
+    runtimeCodeRateLimitMaxFailures,
+    static_cast<unsigned long>(runtimeCodeRateLimitWindowMs),
+    static_cast<unsigned long>(codeRateLimitLockedUntilMs)
+  );
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
+  Serial.printf("Lock relays: pulse=%lu ms mode=%s activeLow=%s\n",
+    static_cast<unsigned long>(runtimeLockUnlockPulseMs),
+    OPEN_LOCKS_PARALLEL ? "parallel" : "sequential",
+    RELAY_ACTIVE_LOW ? "yes" : "no"
+  );
+  for (uint8_t lockerId = 1; lockerId <= LOCK_RELAY_COUNT; lockerId += 1) {
+    const LockRelayState& state = lockRelayStates[lockerRelayIndex(lockerId)];
+    const unsigned long remainingMs = (state.active && state.pulsed && millis() - state.startedAtMs < state.durationMs)
+      ? state.durationMs - (millis() - state.startedAtMs)
+      : 0UL;
+    Serial.printf(
+      "Relay L%u -> gpio=%u active=%s pulse=%s remaining=%lu ms\n",
+      lockerId,
+      lockerRelayPin(lockerId),
+      state.active ? "yes" : "no",
+      state.pulsed ? "yes" : "no",
+      remainingMs
+    );
+  }
   printRfidSnapshot();
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -4241,8 +5815,17 @@ void configureLockerInputs() {
   }
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
-    pinMode(LOCKERS[i].doorClosed.pin, INPUT_PULLUP);
-    pinMode(LOCKERS[i].lockClosed.pin, INPUT_PULLUP);
+    if (isRelayPin(LOCKERS[i].doorClosed.pin)) {
+      Serial.printf("[LOCK] locker=%u door input GPIO%u skipped due to relay pin conflict\n", i + 1, LOCKERS[i].doorClosed.pin);
+    } else {
+      pinMode(LOCKERS[i].doorClosed.pin, INPUT_PULLUP);
+    }
+
+    if (isRelayPin(LOCKERS[i].lockClosed.pin)) {
+      Serial.printf("[LOCK] locker=%u lock input GPIO%u skipped due to relay pin conflict\n", i + 1, LOCKERS[i].lockClosed.pin);
+    } else {
+      pinMode(LOCKERS[i].lockClosed.pin, INPUT_PULLUP);
+    }
   }
 }
 
@@ -4258,8 +5841,12 @@ LockerState readLockerState(uint8_t lockerIndex) {
 
   if (ENABLE_LOCKER_SWITCH_INPUTS) {
     const LockerHardwareConfig& cfg = LOCKERS[lockerIndex];
-    doorClosed = readInputPin(cfg.doorClosed);
-    lockClosed = readInputPin(cfg.lockClosed);
+    if (!isRelayPin(cfg.doorClosed.pin)) {
+      doorClosed = readInputPin(cfg.doorClosed);
+    }
+    if (!isRelayPin(cfg.lockClosed.pin)) {
+      lockClosed = readInputPin(cfg.lockClosed);
+    }
   }
 
   return {
@@ -4622,7 +6209,7 @@ void tickAccessSelection(uint32_t nowMs) {
 void handleAccessSelectionKey(char key) {
   Serial.printf("[KEYPAD] selection key=%c\n", key);
 
-  if (key >= '1' && key <= '3') {
+  if (key >= '1' && key <= static_cast<char>('0' + LOCKER_COUNT)) {
     openSelectedLocker(static_cast<uint8_t>(key - '0'));
     return;
   }
@@ -4663,6 +6250,12 @@ void openSelectedLocker(uint8_t lockerNumber) {
     return;
   }
 
+  if (!pulseUnlockLocker(lockerNumber, runtimeLockUnlockPulseMs)) {
+    startLedErrorFlash(350);
+    blinkLed(4, 70, 70);
+    return;
+  }
+
   Serial.printf("[LOCKER] opening locker=%d reason=access_selection uid=%s\n", lockerNumber, accessSelection.uid.c_str());
   startLedSegmentFlash(lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
   finishAccessSelection("open_single");
@@ -4681,6 +6274,12 @@ void openAllAccessibleLockers() {
   }
 
   if (!queueAccessSelectionEvent("access_selection_open_all")) {
+    blinkLed(4, 70, 70);
+    return;
+  }
+
+  if (!pulseUnlockLockerMask(accessSelection.accessibleMask)) {
+    startLedErrorFlash(350);
     blinkLed(4, 70, 70);
     return;
   }
@@ -5717,7 +7316,7 @@ void maybeRecoverWifiAfterNetworkFailures(unsigned long now) {
 
 void resetDeviceActionsPollCadence(bool verbose) {
   const unsigned long previousIntervalMs = deviceActionsPollIntervalMs;
-  deviceActionsPollIntervalMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
+  deviceActionsPollIntervalMs = runtimeDeviceActionsPollBaseMs;
   if (verbose && previousIntervalMs != deviceActionsPollIntervalMs) {
     Serial.printf("Device actions poll interval reset to %lu ms\n", deviceActionsPollIntervalMs);
   }
@@ -5725,10 +7324,13 @@ void resetDeviceActionsPollCadence(bool verbose) {
 
 void relaxDeviceActionsPollCadence() {
   const unsigned long previousIntervalMs = deviceActionsPollIntervalMs;
-  deviceActionsPollIntervalMs = min(
-    DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS,
-    max(DEVICE_ACTIONS_POLL_INTERVAL_MS, previousIntervalMs * 2)
-  );
+  const unsigned long doubledIntervalMs = previousIntervalMs * 2;
+  const unsigned long flooredIntervalMs = doubledIntervalMs < runtimeDeviceActionsPollBaseMs
+    ? runtimeDeviceActionsPollBaseMs
+    : doubledIntervalMs;
+  deviceActionsPollIntervalMs = flooredIntervalMs > DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS
+    ? DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS
+    : flooredIntervalMs;
 
   if (deviceActionsPollIntervalMs != previousIntervalMs) {
     Serial.printf("Device actions poll interval relaxed to %lu ms\n", deviceActionsPollIntervalMs);

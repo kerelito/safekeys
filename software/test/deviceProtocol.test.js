@@ -4,12 +4,16 @@ const assert = require("node:assert/strict");
 const {
   buildAck,
   buildCodeVerifyResult,
+  buildDeviceConfigResponse,
   buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
+  normalizeDeviceConfig,
+  normalizeDeviceDiagnosticPayload,
   normalizeDeviceId,
+  normalizeDeviceLogPayload,
   normalizeMessageId,
   normalizeSequence
 } = require("../server/services/deviceProtocol");
@@ -88,6 +92,64 @@ test("builds protocol ack with stable envelope metadata", () => {
   assert.equal(ack.ok, true);
   assert.deepEqual(ack.state, { accepted: [] });
   assert.match(ack.serverTime, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("normalizes remote device config with guarded ranges", () => {
+  const config = normalizeDeviceConfig({
+    heartbeatIntervalMs: 1000,
+    lockPulseMs: 9000,
+    remoteLogging: { enabled: false, minLevel: "WARN" },
+    codeRateLimit: { maxFailures: 0, windowMs: 10, lockoutMs: 2000 },
+    servicePanel: { enabled: false }
+  });
+
+  assert.equal(config.heartbeatIntervalMs, 10000);
+  assert.equal(config.lockPulseMs, 5000);
+  assert.equal(config.remoteLogging.enabled, false);
+  assert.equal(config.remoteLogging.minLevel, "warn");
+  assert.equal(config.codeRateLimit.maxFailures, 1);
+  assert.equal(config.codeRateLimit.windowMs, 30000);
+  assert.equal(config.codeRateLimit.lockoutMs, 5000);
+  assert.equal(config.servicePanel.enabled, false);
+});
+
+test("builds device config response for firmware", () => {
+  const response = buildDeviceConfigResponse("esp32-test", {
+    lockPulseMs: 900
+  }, {
+    configVersion: 12
+  });
+
+  assert.equal(response.type, "device.config");
+  assert.equal(response.ok, true);
+  assert.equal(response.deviceId, "esp32-test");
+  assert.equal(response.configVersion, 12);
+  assert.equal(response.config.lockPulseMs, 900);
+});
+
+test("normalizes device log and diagnostic payloads", () => {
+  assert.deepEqual(normalizeDeviceLogPayload({
+    level: "ERROR",
+    event: "OTA_FAILED",
+    message: "Upload failed",
+    protocolVersion: 2,
+    uptimeMs: "42"
+  }), {
+    level: "error",
+    event: "OTA_FAILED",
+    message: "Upload failed",
+    firmware: null,
+    protocolVersion: 2,
+    uptimeMs: 42,
+    freeHeap: null,
+    details: null
+  });
+
+  assert.equal(normalizeDeviceDiagnosticPayload({
+    name: "relay",
+    ok: false,
+    message: "L1 failed"
+  }).ok, false);
 });
 
 test("builds locker status result for firmware LED sync", () => {

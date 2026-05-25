@@ -22,8 +22,8 @@ W praktyce aktualny kod rozwiazuje kilka problemow naraz:
 Wazna uwaga o aktualnym etapie firmware:
 
 - backend i panel obsluguja logiczne akcje otwierania skrytek,
-- obecny firmware testowy nie ma jeszcze skonfigurowanych wyjsc przekaznikowych do fizycznego sterowania zamkami,
-- polecenia `OPEN_LOCKER` i `RELEASE_ALL_LOCKERS` sa obecnie potwierdzane przez firmware, ale nie zalaczaja realnego wyjscia zamka.
+- aktywny firmware w `hardware/safekeys/src/main.cpp` steruje fizycznymi zamkami przez 4-kanalowy modul relay,
+- wszystkie sciezki otwarcia w firmware koncza sie nieblokujacym impulsem relay opartym o `millis()`.
 
 ## Glowne funkcjonalnosci
 
@@ -52,6 +52,7 @@ Wazna uwaga o aktualnym etapie firmware:
 - obsluga klawiatury 4x4,
 - obsluga 4 czytnikow RFID RC522: 3 skrytkowych i 1 master,
 - obsluga paska ARGB WS2812B jako interfejsu statusu,
+- sterowanie 4-kanalowym modulem relay dla zamkow skrytek,
 - opcjonalna obsluga wejsc stanu drzwi / zamka w firmware,
 - opcjonalna integracja Discord: slash commands i powiadomienia o logach.
 
@@ -60,7 +61,7 @@ Wazna uwaga o aktualnym etapie firmware:
 - aktualnie serwowany panel to statyczny frontend z `software/public`, nie kompletny pipeline React/Vite,
 - w repo jest katalog `software/dist`, ale backend go nie serwuje i nie ma aktualnego skryptu build odtwarzajacego ten artefakt,
 - firmware w `hardware/safekeys/src/main.cpp` ma wpisane stale konfiguracyjne WiFi i backendu bezposrednio w kodzie,
-- firmware testowy nie steruje jeszcze fizycznym przekaznikiem / ryglem skrytki.
+- logika statusow nadal operuje na 3 skrytkach `1..3`, mimo ze warstwa relay ma przygotowany 4. kanal jako future use.
 
 ### Planned / TODO
 
@@ -400,15 +401,11 @@ Srodowisko builda:
 - pasek ARGB WS2812B,
 - 3 czytniki RFID RC522 dla skrytek,
 - 1 czytnik RFID RC522 master,
+- 4-kanalowy modul relay sterujacy zamkami,
 - opcjonalne wejscia `doorClosed` i `lockClosed` dla 3 skrytek,
 - dioda statusowa LED,
 - WiFi,
 - WebSocket i HTTPS do backendu.
-
-### Komponenty, ktorych jeszcze nie ma w praktycznej obsludze
-
-- fizyczne wyjscia przekaznikowe / tranzystorowe do otwierania zamkow nie sa skonfigurowane w aktualnym `main.cpp`,
-- dlatego firmware przyjmuje komendy otwarcia, ale ich nie wykonuje na sprzecie.
 
 ### Glowny plik firmware i warianty
 
@@ -428,6 +425,10 @@ Pinout glownego firmware da sie odczytac bezposrednio z `hardware/safekeys/src/m
 | Adres keypada I2C | `0x20` |
 | WS2812B data | `4` |
 | Liczba LED | `60` |
+| Relay locker 1 | `27` |
+| Relay locker 2 | `26` |
+| Relay locker 3 | `25` |
+| Relay locker 4 | `33` |
 | LED na skrytke | `20` |
 | SPI SCK dla RC522 | `14` |
 | SPI MISO dla RC522 | `12` |
@@ -447,7 +448,25 @@ Pinout glownego firmware da sie odczytac bezposrednio z `hardware/safekeys/src/m
 Uwaga:
 
 - wejscia stanu drzwi / zamka sa zdefiniowane, ale ich obsluga jest domyslnie wylaczona przez `ENABLE_LOCKER_SWITCH_INPUTS = false`,
-- pinow wyjsc do sterowania zamkami obecny firmware nie definiuje.
+- aktualna mapa relay koliduje ze starymi opcjonalnymi wejsciami `doorClosed/lockClosed` na `GPIO25/GPIO26/GPIO27`, wiec tych wejsc nie nalezy uzywac rownolegle bez zmiany pinow.
+
+### Relay / Lock wiring
+
+- Relay VCC -> `5V`
+- Relay GND -> wspolna masa z ESP32 i zasilaniem zamkow
+- Relay IN1 -> `GPIO27`
+- Relay IN2 -> `GPIO26`
+- Relay IN3 -> `GPIO25`
+- Relay IN4 -> `GPIO33`
+- `12V+` -> `COM` przelacznika relay
+- `NO` relay -> `+` zamka
+- `-` zamka -> `GND 12V`
+- dodaj diode flyback rownolegle do zamka
+
+Uwaga:
+
+- firmware zaklada `ACTIVE LOW` dla modulu relay,
+- jesli Twoj modul jest `ACTIVE HIGH`, zmien `RELAY_ACTIVE_LOW` w `hardware/safekeys/src/main.cpp`.
 
 ### Biblioteki firmware
 
@@ -928,11 +947,7 @@ Pomocnicza kolekcja potwierdzen do idempotentnej obslugi wiadomosci z ESP32:
 6. Uzytkownik wpisuje kod na klawiaturze przy ESP32.
 7. ESP32 wysyla `code.verify` do backendu.
 8. Backend weryfikuje kod, dezaktywuje go i zapisuje log `LOCKER_OPENED`.
-9. Firmware sygnalizuje wynik lokalnie LED/UART.
-
-Uwaga:
-
-- obecny firmware nie zalacza jeszcze fizycznego wyjscia otwarcia zamka po poprawnym kodzie.
+9. Firmware sygnalizuje wynik lokalnie LED/UART i impulsowo otwiera odpowiedni relay zamka.
 
 ### Przyklad 2: dostep RFID
 
@@ -942,9 +957,9 @@ Uwaga:
 4. Backend zwraca, czy tag jest prawidlowy, czy jest masterem i jakie ma dostepy.
 5. Firmware rozpoczyna lokalna sesje wyboru skrytki.
 6. Klawisz `1..3` wybiera jedna skrytke, `#` prosi o wszystkie dostepne, `*` anuluje.
-7. ESP32 wysyla `access.selection`.
-8. Backend loguje zdarzenie i wrzuca komendy `OPEN_LOCKER` do kolejki.
-9. Panel dostaje aktualizacje realtime i pokazuje polecenia / logi.
+7. ESP32 lokalnie aktywuje relay wybranej skrytki albo wszystkich dostepnych skrytek i wysyla `access.selection`.
+8. Backend loguje zdarzenie i synchronizuje je z panelem.
+9. Panel dostaje aktualizacje realtime i pokazuje logi / statusy.
 
 ### Przyklad 3: nadanie nowego taga RFID
 
@@ -988,12 +1003,13 @@ Sprawdz:
 
 ### Zamek nie dziala
 
-To obecnie oczekiwane zachowanie aktualnego firmware testowego:
+Sprawdz:
 
-- komendy otwarcia sa logowane i potwierdzane,
-- ale `main.cpp` nie ma jeszcze skonfigurowanych wyjsc sterujacych zamkiem / przekaznikiem.
-
-Jesli chcesz fizycznie otwierac skrytki, trzeba dopisac warstwe wyjsc sprzetowych w firmware.
+- czy modul relay faktycznie pracuje jako `ACTIVE LOW`; jesli nie, zmien `RELAY_ACTIVE_LOW`,
+- czy relay ma osobne stabilne zasilanie `5V` i wspolna mase z ESP32,
+- czy poprawnie podpiety jest `GPIO27/GPIO26/GPIO25/GPIO33`,
+- czy log `Serial` pokazuje `[LOCK] locker=... ON` oraz po chwili `[LOCK] ... OFF reason=pulse_complete`,
+- czy nie wlaczyles rownoczesnie starych wejsc `doorClosed/lockClosed` na kolidujacych pinach `25/26/27`.
 
 ### Panel nie pokazuje aktualnego statusu
 
@@ -1068,7 +1084,7 @@ Sprawdz:
 
 Planowane kierunki rozwoju, nie funkcje gotowe:
 
-- dodanie realnych wyjsc do sterowania zamkami / przekaznikami,
+- rozbudowa warstwy sterowania zamkami, np. o czujniki potwierdzenia i alternatywne drivery,
 - przeniesienie konfiguracji WiFi i kluczy firmware poza kod zrodlowy,
 - dopracowanie produkcyjnego pipeline frontendowego i decyzja: `public` albo React/Vite,
 - rozszerzenie testow automatycznych poza `deviceProtocol`,

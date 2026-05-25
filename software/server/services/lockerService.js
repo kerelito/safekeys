@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-const { Code, DeviceCommand, DeviceMessageReceipt, DeviceState, Log, Locker, RfidUser, RfidItem } = require("../models");
+const { Code, DeviceCommand, DeviceConfig, DeviceMessageReceipt, DeviceState, Log, Locker, RfidUser, RfidItem } = require("../models");
 const {
   ALLOWED_LOCKERS,
   assertValidAllowedLockers,
@@ -21,11 +21,16 @@ const {
   COMMAND_DELIVERABLE_STATUSES,
   COMMAND_TERMINAL_STATUSES,
   DEFAULT_DEVICE_ID,
+  DEFAULT_DEVICE_CONFIG,
   DEVICE_PROTOCOL_VERSION,
   buildAck,
+  buildDeviceConfigResponse,
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
+  normalizeDeviceConfig,
+  normalizeDeviceDiagnosticPayload,
+  normalizeDeviceLogPayload,
   normalizeString,
   normalizeDeviceId,
   normalizeMessageId,
@@ -270,7 +275,10 @@ class LockerService extends EventEmitter {
       connectionId: null,
       bootId: null,
       protocolVersion: DEVICE_PROTOCOL_VERSION,
-      networkFailureCount: null
+      networkFailureCount: null,
+      configVersion: 1,
+      servicePanelIp: null,
+      servicePanelActive: null
     };
   }
 
@@ -304,7 +312,10 @@ class LockerService extends EventEmitter {
         connectionId: null,
         bootId: deviceState.bootId || null,
         protocolVersion: deviceState.protocolVersion || DEVICE_PROTOCOL_VERSION,
-        networkFailureCount: deviceState.networkFailureCount ?? null
+        networkFailureCount: deviceState.networkFailureCount ?? null,
+        configVersion: deviceState.configVersion || 1,
+        servicePanelIp: deviceState.servicePanelIp || null,
+        servicePanelActive: typeof deviceState.servicePanelActive === "boolean" ? deviceState.servicePanelActive : null
       };
     }
 
@@ -344,7 +355,10 @@ class LockerService extends EventEmitter {
       connectionId: this.deviceStatus.connectionId,
       bootId: this.deviceStatus.bootId,
       protocolVersion: this.deviceStatus.protocolVersion,
-      networkFailureCount: this.deviceStatus.networkFailureCount
+      networkFailureCount: this.deviceStatus.networkFailureCount,
+      configVersion: this.deviceStatus.configVersion,
+      servicePanelIp: this.deviceStatus.servicePanelIp,
+      servicePanelActive: this.deviceStatus.servicePanelActive
     };
   }
 
@@ -369,7 +383,10 @@ class LockerService extends EventEmitter {
       minFreeHeap: typeof payload.minFreeHeap === "number" ? payload.minFreeHeap : this.deviceStatus.minFreeHeap,
       networkFailureCount: typeof payload.networkFailureCount === "number"
         ? payload.networkFailureCount
-        : this.deviceStatus.networkFailureCount
+        : this.deviceStatus.networkFailureCount,
+      configVersion: typeof payload.configVersion === "number" ? payload.configVersion : this.deviceStatus.configVersion,
+      servicePanelIp: typeof payload.servicePanelIp === "string" ? payload.servicePanelIp : this.deviceStatus.servicePanelIp,
+      servicePanelActive: typeof payload.servicePanelActive === "boolean" ? payload.servicePanelActive : this.deviceStatus.servicePanelActive
     };
 
     await DeviceState.findOneAndUpdate(
@@ -455,6 +472,9 @@ class LockerService extends EventEmitter {
       lockersWithTags: typeof payload.lockersWithTags === "number" ? payload.lockersWithTags : null,
       masterReaderPresent: typeof payload.masterReaderPresent === "boolean" ? payload.masterReaderPresent : null,
       networkFailureCount: typeof payload.networkFailureCount === "number" ? payload.networkFailureCount : null,
+      configVersion: typeof payload.configVersion === "number" ? payload.configVersion : this.deviceStatus.configVersion,
+      servicePanelIp: typeof payload.servicePanelIp === "string" ? payload.servicePanelIp : this.deviceStatus.servicePanelIp,
+      servicePanelActive: typeof payload.servicePanelActive === "boolean" ? payload.servicePanelActive : this.deviceStatus.servicePanelActive,
       lastMessageId: context.messageId || this.deviceStatus.lastMessageId || null
     };
 
@@ -529,6 +549,45 @@ class LockerService extends EventEmitter {
             deviceId,
             sequence,
             messageId
+          });
+          const deviceConfig = await this.getDeviceConfig(deviceId);
+          response = buildAck(envelope, {
+            protocolVersion: DEVICE_PROTOCOL_VERSION,
+            configVersion: deviceConfig.configVersion,
+            config: deviceConfig.config
+          });
+          break;
+        }
+
+        case "config.request": {
+          const deviceConfig = await this.getDeviceConfig(deviceId);
+          response = buildAck(envelope, {
+            protocolVersion: DEVICE_PROTOCOL_VERSION,
+            configVersion: deviceConfig.configVersion,
+            config: deviceConfig.config
+          });
+          break;
+        }
+
+        case "device.log": {
+          await this.recordDeviceLog({
+            ...(envelope.payload || {}),
+            deviceId
+          }, {
+            ...context,
+            deviceId
+          });
+          response = buildAck(envelope);
+          break;
+        }
+
+        case "diagnostic.result": {
+          await this.recordDeviceDiagnostic({
+            ...(envelope.payload || {}),
+            deviceId
+          }, {
+            ...context,
+            deviceId
           });
           response = buildAck(envelope);
           break;
@@ -671,6 +730,130 @@ class LockerService extends EventEmitter {
       serverTime: new Date().toISOString(),
       responses
     };
+  }
+
+  async getDeviceConfig(deviceId = DEFAULT_DEVICE_ID) {
+    const normalizedDeviceId = normalizeDeviceId(deviceId);
+    const existing = await DeviceConfig.findOne({ deviceId: normalizedDeviceId }).lean();
+    if (!existing) {
+      return buildDeviceConfigResponse(normalizedDeviceId, DEFAULT_DEVICE_CONFIG, {
+        configVersion: 1
+      });
+    }
+
+    return buildDeviceConfigResponse(normalizedDeviceId, existing.config || DEFAULT_DEVICE_CONFIG, {
+      configVersion: existing.version || 1
+    });
+  }
+
+  async updateDeviceConfig(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(payload.deviceId || DEFAULT_DEVICE_ID);
+    const existing = await DeviceConfig.findOne({ deviceId }).lean();
+    const previousConfig = existing?.config || DEFAULT_DEVICE_CONFIG;
+    const incomingConfig = payload.config || payload;
+    const nextConfig = normalizeDeviceConfig({
+      ...previousConfig,
+      ...incomingConfig,
+      remoteLogging: {
+        ...(previousConfig.remoteLogging || {}),
+        ...(incomingConfig.remoteLogging || {})
+      },
+      codeRateLimit: {
+        ...(previousConfig.codeRateLimit || {}),
+        ...(incomingConfig.codeRateLimit || {})
+      },
+      servicePanel: {
+        ...(previousConfig.servicePanel || {}),
+        ...(incomingConfig.servicePanel || {})
+      },
+      ota: {
+        ...(previousConfig.ota || {}),
+        ...(incomingConfig.ota || {})
+      },
+      diagnostics: {
+        ...(previousConfig.diagnostics || {}),
+        ...(incomingConfig.diagnostics || {})
+      }
+    });
+    const nextVersion = (existing?.version || 1) + 1;
+
+    await DeviceConfig.findOneAndUpdate(
+      { deviceId },
+      {
+        $set: {
+          config: nextConfig,
+          version: nextVersion,
+          updatedBy: context.actor || null
+        },
+        $setOnInsert: {
+          deviceId
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    await this.createLog({
+      event: "DEVICE_CONFIG_UPDATED",
+      source: context.source || "web",
+      actor: context.actor || "system",
+      details: {
+        deviceId,
+        version: nextVersion,
+        config: nextConfig
+      }
+    });
+
+    this.emit("device-config-updated", {
+      deviceId,
+      version: nextVersion,
+      config: nextConfig
+    });
+
+    return buildDeviceConfigResponse(deviceId, nextConfig, {
+      configVersion: nextVersion
+    });
+  }
+
+  async recordDeviceLog(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(payload.deviceId || context.deviceId);
+    const normalized = normalizeDeviceLogPayload(payload);
+    return this.createLog({
+      event: "DEVICE_LOG",
+      source: context.source || "device",
+      actor: deviceId,
+      success: normalized.level !== "error",
+      errorMessage: normalized.level === "error" ? normalized.message || normalized.event : null,
+      details: {
+        level: normalized.level,
+        event: normalized.event,
+        message: normalized.message,
+        firmware: normalized.firmware,
+        protocolVersion: normalized.protocolVersion,
+        uptimeMs: normalized.uptimeMs,
+        freeHeap: normalized.freeHeap,
+        details: normalized.details
+      }
+    });
+  }
+
+  async recordDeviceDiagnostic(payload = {}, context = {}) {
+    const deviceId = normalizeDeviceId(payload.deviceId || context.deviceId);
+    const normalized = normalizeDeviceDiagnosticPayload(payload);
+    return this.createLog({
+      event: "DEVICE_DIAGNOSTIC",
+      source: context.source || "device",
+      actor: deviceId,
+      success: normalized.ok,
+      errorMessage: normalized.ok ? null : normalized.message || normalized.name,
+      details: {
+        name: normalized.name,
+        message: normalized.message,
+        firmware: normalized.firmware,
+        protocolVersion: normalized.protocolVersion,
+        uptimeMs: normalized.uptimeMs,
+        details: normalized.details
+      }
+    });
   }
 
   async processDeviceStateBatch(payload = {}, context = {}) {

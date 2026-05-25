@@ -292,6 +292,18 @@ const DeviceStateSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
+  configVersion: {
+    type: Number,
+    default: 1
+  },
+  servicePanelIp: {
+    type: String,
+    default: null
+  },
+  servicePanelActive: {
+    type: Boolean,
+    default: null
+  },
   lockers: [{
     locker: Number,
     hasTag: Boolean,
@@ -316,6 +328,30 @@ const DeviceStateSchema = new mongoose.Schema({
       default: Date.now
     }
   }]
+}, {
+  timestamps: true
+});
+
+const DeviceConfigSchema = new mongoose.Schema({
+  deviceId: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  version: {
+    type: Number,
+    default: 1,
+    min: 1
+  },
+  config: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  updatedBy: {
+    type: String,
+    default: null
+  }
 }, {
   timestamps: true
 });
@@ -459,6 +495,7 @@ const Code = mongoose.models.Code || mongoose.model("Code", CodeSchema);
 const Log = mongoose.models.Log || mongoose.model("Log", LogSchema);
 const Locker = mongoose.models.Locker || mongoose.model("Locker", LockerSchema);
 const DeviceCommand = mongoose.models.DeviceCommand || mongoose.model("DeviceCommand", DeviceCommandSchema);
+const DeviceConfig = mongoose.models.DeviceConfig || mongoose.model("DeviceConfig", DeviceConfigSchema);
 const DeviceState = mongoose.models.DeviceState || mongoose.model("DeviceState", DeviceStateSchema);
 const DeviceMessageReceipt = mongoose.models.DeviceMessageReceipt || mongoose.model("DeviceMessageReceipt", DeviceMessageReceiptSchema);
 const RfidUser = mongoose.models.RfidUser || mongoose.model("RfidUser", RfidUserSchema);
@@ -468,6 +505,7 @@ const PanelUser = mongoose.models.PanelUser || mongoose.model("PanelUser", Panel
 module.exports = {
   Code,
   DeviceCommand,
+  DeviceConfig,
   DeviceMessageReceipt,
   DeviceState,
   Log,

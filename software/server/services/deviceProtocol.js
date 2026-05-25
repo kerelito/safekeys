@@ -1,7 +1,32 @@
-const DEVICE_PROTOCOL_VERSION = 1;
+const DEVICE_PROTOCOL_VERSION = 2;
 const DEFAULT_DEVICE_ID = process.env.DEVICE_ID || "esp32-main";
 const COMMAND_TERMINAL_STATUSES = new Set(["applied", "failed"]);
 const COMMAND_DELIVERABLE_STATUSES = ["pending", "delivered"];
+
+const DEFAULT_DEVICE_CONFIG = {
+  heartbeatIntervalMs: 60000,
+  deviceActionsPollIntervalMs: 8000,
+  lockPulseMs: 700,
+  remoteLogging: {
+    enabled: true,
+    minLevel: "info"
+  },
+  codeRateLimit: {
+    enabled: true,
+    maxFailures: 5,
+    windowMs: 300000,
+    lockoutMs: 30000
+  },
+  servicePanel: {
+    enabled: true
+  },
+  ota: {
+    enabled: true
+  },
+  diagnostics: {
+    enabled: true
+  }
+};
 
 function normalizeString(value, fallback = "") {
   return typeof value === "string" && value.trim()
@@ -20,6 +45,108 @@ function normalizeMessageId(value) {
 function normalizeSequence(value) {
   const sequence = Number(value);
   return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : null;
+}
+
+function clampNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.trunc(numeric)));
+}
+
+function normalizeBoolean(value, fallback) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return fallback;
+}
+
+function normalizeDeviceConfig(config = {}) {
+  const source = typeof config === "object" && config !== null ? config : {};
+  const defaultConfig = DEFAULT_DEVICE_CONFIG;
+  const remoteLogging = typeof source.remoteLogging === "object" && source.remoteLogging !== null
+    ? source.remoteLogging
+    : {};
+  const codeRateLimit = typeof source.codeRateLimit === "object" && source.codeRateLimit !== null
+    ? source.codeRateLimit
+    : {};
+  const servicePanel = typeof source.servicePanel === "object" && source.servicePanel !== null
+    ? source.servicePanel
+    : {};
+  const ota = typeof source.ota === "object" && source.ota !== null
+    ? source.ota
+    : {};
+  const diagnostics = typeof source.diagnostics === "object" && source.diagnostics !== null
+    ? source.diagnostics
+    : {};
+
+  const minLevel = normalizeString(remoteLogging.minLevel, defaultConfig.remoteLogging.minLevel).toLowerCase();
+
+  return {
+    heartbeatIntervalMs: clampNumber(source.heartbeatIntervalMs, defaultConfig.heartbeatIntervalMs, 10000, 600000),
+    deviceActionsPollIntervalMs: clampNumber(source.deviceActionsPollIntervalMs, defaultConfig.deviceActionsPollIntervalMs, 2000, 120000),
+    lockPulseMs: clampNumber(source.lockPulseMs, defaultConfig.lockPulseMs, 100, 5000),
+    remoteLogging: {
+      enabled: normalizeBoolean(remoteLogging.enabled, defaultConfig.remoteLogging.enabled),
+      minLevel: ["debug", "info", "warn", "error"].includes(minLevel) ? minLevel : defaultConfig.remoteLogging.minLevel
+    },
+    codeRateLimit: {
+      enabled: normalizeBoolean(codeRateLimit.enabled, defaultConfig.codeRateLimit.enabled),
+      maxFailures: clampNumber(codeRateLimit.maxFailures, defaultConfig.codeRateLimit.maxFailures, 1, 20),
+      windowMs: clampNumber(codeRateLimit.windowMs, defaultConfig.codeRateLimit.windowMs, 30000, 3600000),
+      lockoutMs: clampNumber(codeRateLimit.lockoutMs, defaultConfig.codeRateLimit.lockoutMs, 5000, 3600000)
+    },
+    servicePanel: {
+      enabled: normalizeBoolean(servicePanel.enabled, defaultConfig.servicePanel.enabled)
+    },
+    ota: {
+      enabled: normalizeBoolean(ota.enabled, defaultConfig.ota.enabled)
+    },
+    diagnostics: {
+      enabled: normalizeBoolean(diagnostics.enabled, defaultConfig.diagnostics.enabled)
+    }
+  };
+}
+
+function buildDeviceConfigResponse(deviceId = DEFAULT_DEVICE_ID, config = {}, extra = {}) {
+  return {
+    type: "device.config",
+    ok: extra.ok !== false,
+    deviceId: normalizeDeviceId(deviceId),
+    protocolVersion: DEVICE_PROTOCOL_VERSION,
+    configVersion: clampNumber(extra.configVersion, 1, 1, Number.MAX_SAFE_INTEGER),
+    serverTime: new Date().toISOString(),
+    config: normalizeDeviceConfig(config)
+  };
+}
+
+function normalizeDeviceLogPayload(payload = {}) {
+  const level = normalizeString(payload.level, "info").toLowerCase();
+  return {
+    level: ["debug", "info", "warn", "error"].includes(level) ? level : "info",
+    event: normalizeString(payload.event, "DEVICE_LOG").slice(0, 80),
+    message: normalizeString(payload.message, "").slice(0, 500),
+    firmware: normalizeString(payload.firmware, null),
+    protocolVersion: normalizeSequence(payload.protocolVersion),
+    uptimeMs: normalizeSequence(payload.uptimeMs),
+    freeHeap: normalizeSequence(payload.freeHeap),
+    details: typeof payload.details === "object" && payload.details !== null ? payload.details : null
+  };
+}
+
+function normalizeDeviceDiagnosticPayload(payload = {}) {
+  return {
+    name: normalizeString(payload.name, "diagnostic").slice(0, 80),
+    ok: payload.ok !== false,
+    message: normalizeString(payload.message, "").slice(0, 500),
+    firmware: normalizeString(payload.firmware, null),
+    protocolVersion: normalizeSequence(payload.protocolVersion),
+    uptimeMs: normalizeSequence(payload.uptimeMs),
+    details: typeof payload.details === "object" && payload.details !== null ? payload.details : null
+  };
 }
 
 function mapCommandForDevice(command) {
@@ -193,17 +320,22 @@ function normalizeCommandAckPayload(payload = {}) {
 module.exports = {
   COMMAND_DELIVERABLE_STATUSES,
   COMMAND_TERMINAL_STATUSES,
+  DEFAULT_DEVICE_CONFIG,
   DEFAULT_DEVICE_ID,
   DEVICE_PROTOCOL_VERSION,
   buildAck,
   buildCodeVerifyResult,
+  buildDeviceConfigResponse,
   buildLockerStatusResult,
   buildTagVerifyResult,
   mapCommandForDevice,
   mapCommandForHistory,
   normalizeCommandAckPayload,
+  normalizeDeviceConfig,
+  normalizeDeviceDiagnosticPayload,
   normalizeString,
   normalizeDeviceId,
+  normalizeDeviceLogPayload,
   normalizeMessageId,
   normalizeSequence
 };
