@@ -1,599 +1,718 @@
 <!DOCTYPE html>
-<html>
+<html lang="pl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#07111f">
-<title>SafeKeys</title>
+<meta name="theme-color" content="#111113">
+<title>SafeKeys Command Center</title>
 <link rel="icon" type="image/svg+xml" href="/assets/safekeys-logo.svg">
 <link rel="alternate icon" type="image/png" href="/assets/safekeys-logo.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
-
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 
 <body>
-
 <div id="authView" class="auth-shell hidden">
-<div class="auth-card">
-<div class="auth-header">
-<img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" class="logo-mark">
-<span class="eyebrow">SafeKeys Secure Access</span>
-<h1 class="auth-title">Zaloguj się do panelu SafeKeys.</h1>
-<p class="auth-subtitle">Dostęp do centrum operacyjnego SafeKeys wymaga poprawnego loginu i hasła skonfigurowanych po stronie serwera.</p>
+  <div class="auth-card">
+    <div class="auth-header">
+      <img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" class="logo-mark">
+      <span class="eyebrow">SafeKeys</span>
+      <h1 class="auth-title">Zaloguj się do panelu</h1>
+      <p class="auth-subtitle">Panel operacyjny skrytek, kodów czasowych, RFID i diagnostyki urządzenia.</p>
+    </div>
+
+    <form id="loginForm" class="auth-form">
+      <label class="field">
+        <span class="field-label">Login</span>
+        <input id="loginUsername" type="text" autocomplete="username" required>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Hasło</span>
+        <input id="loginPassword" type="password" autocomplete="current-password" required>
+      </label>
+
+      <button type="submit">Zaloguj</button>
+      <div id="authError" class="auth-error"></div>
+    </form>
+  </div>
 </div>
 
-<form id="loginForm" class="auth-form">
-<label class="field">
-<span class="field-label">Login</span>
-<input id="loginUsername" type="text" autocomplete="username" required>
-</label>
+<div id="appView" class="app-root hidden">
+  <header class="topbar">
+    <button id="menuButton" class="menu-button" type="button" aria-label="Otwórz menu" aria-controls="menuDrawer">
+      <span></span>
+    </button>
 
-<label class="field">
-<span class="field-label">Hasło</span>
-<input id="loginPassword" type="password" autocomplete="current-password" required>
-</label>
+    <div class="topbar-title">
+      <span id="currentBreadcrumb" class="breadcrumb">SafeKeys</span>
+      <strong id="currentViewTitle">Pulpit</strong>
+    </div>
 
-<button type="submit">Zaloguj</button>
-<div id="authError" class="auth-error"></div>
-</form>
-</div>
-</div>
+    <div class="topbar-actions">
+      <div id="systemStatus" class="system-status" aria-label="Status systemu">
+        <button id="serverStatus" class="status-indicator" type="button" data-service="server" aria-label="Status API">
+          <span class="status-dot"></span>
+          <span class="status-label">API</span>
+          <span class="status-value">Sprawdzanie</span>
+          <span class="status-popover">
+            <strong>API</strong>
+            <small>Łączenie...</small>
+          </span>
+        </button>
+        <button id="databaseStatus" class="status-indicator" type="button" data-service="database" aria-label="Status bazy danych">
+          <span class="status-dot"></span>
+          <span class="status-label">DB</span>
+          <span class="status-value">Sprawdzanie</span>
+          <span class="status-popover">
+            <strong>Baza danych</strong>
+            <small>Oczekiwanie na status...</small>
+          </span>
+        </button>
+        <button id="esp32Status" class="status-indicator" type="button" data-service="esp32" aria-label="Status ESP32">
+          <span class="status-dot"></span>
+          <span class="status-label">ESP32</span>
+          <span class="status-value">Sprawdzanie</span>
+          <span class="status-popover">
+            <strong>ESP32</strong>
+            <small>Oczekiwanie na heartbeat...</small>
+          </span>
+        </button>
+      </div>
 
-<div id="appView" class="hidden">
-<div class="topbar">
-<div class="brand">
-<img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" class="brand-mark">
-<div class="brand-copy">
-<span class="eyebrow">SafeKeys Access Platform</span>
-<span class="brand-title">SafeKeys Command Center</span>
-</div>
-</div>
+      <details class="profile-menu">
+        <summary id="userChip" class="user-chip hidden">
+          <strong id="userDisplayName"></strong>
+          <span id="userUsername"></span>
+        </summary>
+        <div class="profile-panel">
+          <button id="themeToggle" class="secondary-button profile-action" type="button">Motyw: system</button>
+          <button id="compactToggle" class="secondary-button profile-action compact-toggle" type="button">Tryb: zaawansowany</button>
+          <button id="logoutButton" class="secondary-button profile-action" type="button">Wyloguj</button>
+        </div>
+      </details>
+    </div>
+  </header>
 
-<div class="topbar-actions">
-<button id="themeToggle" class="theme-toggle" type="button">Motyw: system</button>
-<button id="compactToggle" class="theme-toggle compact-toggle" type="button">Tryb: zaawansowany</button>
-<div id="userChip" class="user-chip hidden">
-<strong id="userDisplayName"></strong>
-<span id="userUsername"></span>
-</div>
-<button id="logoutButton" class="logout-button" type="button">Wyloguj</button>
-<div id="systemStatus" class="system-status" aria-label="Status systemu">
-<button id="serverStatus" class="status-indicator" type="button" data-service="server" aria-label="Status połączenia z serwerem">
-<span class="status-dot"></span>
-<span class="status-label">API</span>
-<span class="status-popover">
-<strong>Serwer</strong>
-<small>Łączenie...</small>
-</span>
-</button>
-<button id="databaseStatus" class="status-indicator" type="button" data-service="database" aria-label="Status połączenia z bazą danych">
-<span class="status-dot"></span>
-<span class="status-label">DB</span>
-<span class="status-popover">
-<strong>Baza danych</strong>
-<small>Oczekiwanie na status...</small>
-</span>
-</button>
-<button id="esp32Status" class="status-indicator" type="button" data-service="esp32" aria-label="Status połączenia z ESP32">
-<span class="status-dot"></span>
-<span class="status-label">ESP32</span>
-<span class="status-popover">
-<strong>ESP32</strong>
-<small>Oczekiwanie na heartbeat...</small>
-</span>
-</button>
-</div>
-<button id="menuButton" class="menu-button" type="button" aria-label="Otwórz menu">
-<span></span>
-</button>
-</div>
-</div>
+  <div class="workspace">
+    <aside id="menuDrawer" class="menu-drawer">
+      <div class="sidebar-brand">
+        <img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" class="brand-mark">
+        <div>
+          <strong>SafeKeys</strong>
+          <span>Command Center</span>
+        </div>
+      </div>
 
-<div id="menuDrawer" class="menu-drawer hidden">
-<nav>
-<button class="menu-link active" type="button" data-page="dashboard">Dashboard</button>
-<button class="menu-link" type="button" data-page="users" data-advanced-only="true">Użytkownicy RFID</button>
-<button class="menu-link" type="button" data-page="items" data-advanced-only="true">Przedmioty RFID</button>
-<button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers" data-advanced-only="true">Użytkownicy panelu</button>
-</nav>
-</div>
+      <nav class="sidebar-nav" aria-label="Nawigacja główna">
+        <button class="menu-link active" type="button" data-page="dashboard">Pulpit</button>
+        <button class="menu-link" type="button" data-page="lockers">Skrytki</button>
+        <button class="menu-link" type="button" data-page="access">Dostępy</button>
+        <button class="menu-link" type="button" data-page="users" data-advanced-only="true">Użytkownicy RFID</button>
+        <button class="menu-link" type="button" data-page="items" data-advanced-only="true">Przedmioty RFID</button>
+        <button class="menu-link" type="button" data-page="logs">Logi</button>
+        <button class="menu-link" type="button" data-page="diagnostics" data-advanced-only="true">Diagnostyka</button>
+        <button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers" data-advanced-only="true">Administracja</button>
+      </nav>
 
-<div class="app-shell">
-<section id="dashboardPage" class="page active">
-<div class="dashboard">
-<div class="dashboard-main">
+      <div class="sidebar-footer">
+        <button class="menu-link muted" type="button" data-page="diagnostics">Ustawienia</button>
+        <button class="menu-link muted" type="button" onclick="logout()">Wyloguj</button>
+      </div>
+    </aside>
 
-<div class="card hero-card">
-<div class="hero-header">
-<div>
-<div class="hero-brand">
-<img src="/assets/safekeys-logo.svg" alt="SafeKeys logo">
-<span>SafeKeys</span>
-</div>
-<span class="eyebrow">Realtime Key Security</span>
-<h1 class="hero-title">Zarządzanie dostępem do kluczy w jednym panelu.</h1>
-<p class="hero-subtitle">SafeKeys łączy generowanie kodów, monitoring RFID i podgląd zdarzeń LIVE w jednym nowoczesnym centrum operacyjnym.</p>
-</div>
-<div class="hero-badge">SafeKeys LIVE</div>
-</div>
+    <main class="main-content">
+      <section id="dashboardPage" class="page active">
+        <div class="page-heading">
+          <div>
+            <h1>Pulpit</h1>
+            <p>Najważniejszy stan systemu i szybkie akcje operatora.</p>
+          </div>
+        </div>
 
-<div class="field-grid">
-<label class="field">
-<span class="field-label">Wybierz skrytkę</span>
-<select id="locker">
-<option value="1">Skrytka 1</option>
-<option value="2">Skrytka 2</option>
-<option value="3">Skrytka 3</option>
-</select>
-</label>
+        <div id="systemHealthCard" class="card system-health-card">
+          <div>
+            <span class="eyebrow">Stan systemu</span>
+            <h2 id="systemHealthTitle">Sprawdzanie systemu</h2>
+            <p id="systemHealthMeta">Pobieram status API, bazy danych i ESP32.</p>
+          </div>
+          <button class="secondary-button" type="button" onclick="refreshSystemStatus()">Odśwież</button>
+        </div>
 
-<label class="field">
-<span class="field-label">Czas aktywności</span>
-<select id="hours">
-<option value="2">2h</option>
-<option value="4">4h</option>
-<option value="6">6h</option>
-<option value="8">8h</option>
-<option value="12">12h</option>
-<option value="24">24h</option>
-</select>
-</label>
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="metric-label">Skrytki</span>
+            <strong id="metricReadyLockers" class="metric-value">0/3</strong>
+            <small>Gotowe operacyjnie</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Aktywne kody</span>
+            <strong id="metricActiveCodes" class="metric-value">0</strong>
+            <small>Trwające dostępy</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Alerty</span>
+            <strong id="metricAlerts" class="metric-value">0</strong>
+            <small>Wymagają sprawdzenia</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">RFID</span>
+            <strong id="metricRfidTags" class="metric-value">0</strong>
+            <small>Tagi w konfiguracji</small>
+          </article>
+        </div>
 
-<label class="field">
-<span class="field-label">Akcja</span>
-<button id="generateButton" type="button" onclick="generateCode()" data-operation-only>Generuj</button>
-</label>
-</div>
+        <div class="dashboard-grid">
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Stan skrytek</h2>
+                <p>Szybki podgląd komór S1-S3.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="setPage('lockers')">Pełna lista</button>
+            </div>
+            <div id="dashboardLockers" class="compact-locker-list"></div>
+          </div>
 
-<label class="field email-field" data-advanced-only="true">
-<span class="field-label">Wyślij kod na e-mail</span>
-<input id="recipientEmail" type="email" inputmode="email" autocomplete="email" placeholder="np. operator@firma.pl">
-<small class="field-help">Opcjonalnie. Jeśli podasz adres, SafeKeys spróbuje wysłać kod automatycznie zaraz po wygenerowaniu.</small>
-</label>
+          <div class="card alerts-card">
+            <div class="section-header">
+              <div>
+                <h2>Alerty</h2>
+                <p>Priorytetyzowane sygnały operacyjne.</p>
+              </div>
+              <span id="alertsCount" class="count-pill">0</span>
+            </div>
+            <div id="alertsList" class="alerts-list"></div>
+          </div>
+        </div>
 
-<div class="generated-output">
-<div class="generated-output-header">
-<small>Ostatnio wygenerowany kod</small>
-<button id="copyGeneratedCodeButton" class="inline-copy-button hidden" type="button">Kopiuj</button>
-<span id="generatedDeliveryStatus" class="delivery-status hidden"></span>
-</div>
-<h3 id="generatedCode" class="generated-code">----</h3>
-<p id="generatedCodeMeta" class="generated-meta">Kod pojawi się tutaj po wygenerowaniu. Możesz go zostawić tylko w panelu albo od razu wysłać na e-mail.</p>
-</div>
-<div class="hero-metrics">
-<article class="metric-card">
-<span class="metric-label">Skrytki gotowe</span>
-<strong id="metricReadyLockers" class="metric-value">0/3</strong>
-<small class="metric-help">Gotowe operacyjnie</small>
-</article>
-<article class="metric-card">
-<span class="metric-label">Aktywne kody</span>
-<strong id="metricActiveCodes" class="metric-value">0</strong>
-<small class="metric-help">Trwające dostępy</small>
-</article>
-<article class="metric-card">
-<span class="metric-label">Użytkownicy RFID</span>
-<strong id="metricRfidUsers" class="metric-value">0</strong>
-<small class="metric-help">Przypisane osoby</small>
-</article>
-<article class="metric-card">
-<span class="metric-label">Przedmioty RFID</span>
-<strong id="metricRfidItems" class="metric-value">0</strong>
-<small class="metric-help">Zmapowane UID</small>
-</article>
-</div>
-</div>
+        <div class="dashboard-grid">
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Ostatnie zdarzenia</h2>
+                <p>Najnowsze wpisy z logów systemowych.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="setPage('logs')">Otwórz logi</button>
+            </div>
+            <div id="recentEventsList" class="recent-events-list"></div>
+          </div>
 
-<div class="card locker-map-card">
-<div class="section-header">
-<div class="section-copy">
-<h2 class="card-title">Mapa fizyczna skrytek</h2>
-<p>Kompaktowy regał 3 komór z czytelnym stanem i szybkimi akcjami operatora.</p>
-</div>
-<div class="locker-toolbar">
-<button class="secondary-button" onclick="loadLockers()">Odśwież status</button>
-<button class="danger" onclick="releaseAllLockers()" data-operation-only>Zwolnij wszystkie</button>
-</div>
-</div>
-<div id="lockers" class="lockers"></div>
-</div>
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Kolejka ESP32</h2>
+                <p>Ostatnie polecenia wysłane do urządzenia.</p>
+              </div>
+              <span id="dashboardRemoteActionsCount" class="count-pill">0</span>
+            </div>
+            <div id="dashboardRemoteActionsList" class="remote-actions-list"></div>
+          </div>
+        </div>
+      </section>
 
-</div>
+      <section id="lockersPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Skrytki</h1>
+            <p>Codzienna obsługa komór, kluczy i drzwi.</p>
+          </div>
+          <div class="page-actions">
+            <button class="secondary-button" type="button" onclick="loadLockers()">Odśwież</button>
+            <button class="danger subtle-danger" type="button" onclick="releaseAllLockers()" data-operation-only>Zwolnij wszystkie</button>
+          </div>
+        </div>
 
-<aside class="dashboard-side" data-advanced-only="true">
-<div class="card alerts-card">
-<div class="section-header">
-<div class="section-copy">
-<h2 class="card-title">Alerty operacyjne</h2>
-<p>Priorytetowe sygnały, które warto sprawdzić przed codzienną obsługą systemu.</p>
-</div>
-<span id="alertsCount" class="panel-counter">0</span>
-</div>
-<div id="alertsList" class="alerts-list"></div>
-</div>
+        <div class="card">
+          <div id="lockers" class="data-table-wrap"></div>
+        </div>
+      </section>
 
-<div class="card status-summary-card">
-<div class="section-copy">
-<h2 class="card-title">Stan systemu</h2>
-<p>Najważniejsze sygnały techniczne i szybki ogląd gotowości całej platformy.</p>
-</div>
-<div class="status-summary-grid">
-<article class="status-summary-tile">
-<span class="status-summary-label">API</span>
-<strong id="summaryServerState" class="status-summary-value">Sprawdzanie</strong>
-<small id="summaryServerMeta" class="status-summary-meta">Oczekiwanie na odpowiedź</small>
-</article>
-<article class="status-summary-tile">
-<span class="status-summary-label">Baza danych</span>
-<strong id="summaryDatabaseState" class="status-summary-value">Sprawdzanie</strong>
-<small id="summaryDatabaseMeta" class="status-summary-meta">Oczekiwanie na status</small>
-</article>
-<article class="status-summary-tile">
-<span class="status-summary-label">Urządzenie</span>
-<strong id="summaryDeviceState" class="status-summary-value">Sprawdzanie</strong>
-<small id="summaryDeviceMeta" class="status-summary-meta">Brak heartbeat</small>
-</article>
-<article class="status-summary-tile accent">
-<span class="status-summary-label">Ostatni kontakt</span>
-<strong id="summaryHeartbeat" class="status-summary-value">brak danych</strong>
-<small id="summaryHeartbeatMeta" class="status-summary-meta">ESP32 / Socket.IO</small>
-</article>
-</div>
-</div>
+      <section id="accessPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Dostępy</h1>
+            <p>Kody czasowe, wysyłka e-mail i aktywne uprawnienia.</p>
+          </div>
+        </div>
 
-<div class="card compact-card">
-<div class="section-header">
-<div class="section-copy">
-<h2 class="card-title">Aktywne kody</h2>
-<p>Trwające dostępy z odliczaniem i szybką dezaktywacją.</p>
-</div>
-<span id="activeCodesCount" class="panel-counter">0</span>
-</div>
-<ul id="activeCodes" class="stack-list"></ul>
-</div>
+        <div id="esp32SyncNotice" class="inline-alert hidden">
+          <strong>ESP32 offline</strong>
+          <span>Kod zostanie zapisany w panelu, a synchronizacja z urządzeniem wróci po odzyskaniu połączenia.</span>
+        </div>
 
-<div class="card remote-actions-card">
-<div class="section-header">
-<div class="section-copy">
-<h2 class="card-title">Polecenia do ESP32</h2>
-<p>Kolejka i potwierdzenia ostatnich akcji wysłanych z panelu do urządzenia.</p>
-</div>
-<div class="section-actions">
-<span id="remoteActionsCount" class="panel-counter">0</span>
-<button id="refreshRemoteActionsButton" class="secondary-button" type="button">Odśwież</button>
-</div>
-</div>
-<div id="remoteActionsList" class="remote-actions-list"></div>
-</div>
-</aside>
+        <div class="split-grid access-grid">
+          <div class="card form-card">
+            <div class="section-copy">
+              <h2>Nowy kod</h2>
+              <p>Wybierz skrytkę i czas ważności dla odbiorcy.</p>
+            </div>
 
-<div class="card logs dashboard-logs" data-advanced-only="true">
-<div class="section-header">
-<div class="section-copy">
-<h2>Logi systemowe</h2>
-<p>Zdarzenia i operacje na żywo, zsynchronizowane w czasie rzeczywistym.</p>
-</div>
-<div class="section-actions">
-<span id="logsCount" class="panel-counter">0</span>
-<button id="exportLogsButton" class="secondary-button" type="button">Eksport CSV</button>
-<button class="danger" onclick="clearLogs()" data-rfid-admin-only>Wyczyść logi</button>
-</div>
-</div>
-<div class="log-filters">
-<label class="field mini-field">
-<span class="field-label">Typ zdarzenia</span>
-<select id="logEventFilter">
-<option value="">Wszystkie</option>
-</select>
-</label>
-<label class="field mini-field">
-<span class="field-label">Skrytka</span>
-<select id="logLockerFilter">
-<option value="">Wszystkie</option>
-<option value="1">Skrytka 1</option>
-<option value="2">Skrytka 2</option>
-<option value="3">Skrytka 3</option>
-</select>
-</label>
-<label class="field mini-field search-field">
-<span class="field-label">Szukaj</span>
-<input id="logSearchInput" type="search" placeholder="kod, tag, operator...">
-</label>
-<button id="logFilterReset" class="secondary-button" type="button">Reset</button>
-</div>
-<ul id="logs" class="stack-list"></ul>
-</div>
-</div>
-</section>
+            <div class="form-grid">
+              <label class="field">
+                <span class="field-label">Skrytka</span>
+                <select id="locker">
+                  <option value="1">Skrytka S1</option>
+                  <option value="2">Skrytka S2</option>
+                  <option value="3">Skrytka S3</option>
+                </select>
+              </label>
 
-<section id="usersPage" class="page">
-<div class="users-layout">
-<div class="users-sidebar">
-<div class="card form-card">
-<div class="section-copy">
-<h2 class="card-title">Użytkownicy RFID</h2>
-<p>Dodawaj osoby, przypisuj ich tagi RFID i wskazuj, które skrytki mogą otwierać po przyłożeniu karty.</p>
-</div>
+              <label class="field">
+                <span class="field-label">Czas ważności</span>
+                <select id="hours">
+                  <option value="2">2 godziny</option>
+                  <option value="4">4 godziny</option>
+                  <option value="6">6 godzin</option>
+                  <option value="8">8 godzin</option>
+                  <option value="12">12 godzin</option>
+                  <option value="24">24 godziny</option>
+                </select>
+              </label>
 
-<form id="rfidUserForm" class="auth-form" data-rfid-admin-only>
-<input id="rfidUserId" type="hidden">
+              <label class="field">
+                <span class="field-label">E-mail opcjonalnie</span>
+                <input id="recipientEmail" type="email" inputmode="email" autocomplete="email" placeholder="operator@firma.pl">
+              </label>
 
-<label class="field">
-<span class="field-label">Nazwa użytkownika</span>
-<input id="rfidUserName" type="text" placeholder="np. Jan Kowalski" required>
-</label>
+              <button id="generateButton" type="button" onclick="generateCode()" data-operation-only>Generuj kod</button>
+            </div>
+          </div>
 
-<label class="field">
-<span class="field-label">ID taga RFID</span>
-<input id="rfidUserTagId" type="text" placeholder="np. 04A1B2C3D4" required>
-</label>
+          <div class="card generated-card">
+            <div class="section-copy">
+              <h2>Ostatni kod</h2>
+              <p>Status ostatniej operacji generowania.</p>
+            </div>
+            <div class="generated-output">
+              <div class="generated-output-header">
+                <small>Ostatnio wygenerowany kod</small>
+                <div class="inline-actions">
+                  <span id="generatedDeliveryStatus" class="delivery-status hidden"></span>
+                  <button id="copyGeneratedCodeButton" class="secondary-button inline-copy-button hidden" type="button">Kopiuj</button>
+                </div>
+              </div>
+              <strong id="generatedCode" class="generated-code">----</strong>
+              <p id="generatedCodeMeta" class="generated-meta">Kod pojawi się tutaj po wygenerowaniu.</p>
+            </div>
+          </div>
+        </div>
 
-<div class="field">
-<span class="field-label">Skrytki z dostępem</span>
-<div class="checkbox-grid">
-<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="1"> <span>Skrytka 1</span></label>
-<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="2"> <span>Skrytka 2</span></label>
-<label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="3"> <span>Skrytka 3</span></label>
-</div>
-</div>
+        <div class="card">
+          <div class="section-header">
+            <div>
+              <h2>Aktywne dostępy</h2>
+              <p>Kody, które jeszcze nie wygasły.</p>
+            </div>
+            <span id="activeCodesCount" class="count-pill">0</span>
+          </div>
+          <div class="data-table">
+            <div class="table-head active-codes-head">
+              <span>Kod</span>
+              <span>Skrytka</span>
+              <span>Odbiorca</span>
+              <span>Wygasa</span>
+              <span>Akcje</span>
+            </div>
+            <div id="activeCodes" class="table-body"></div>
+          </div>
+        </div>
+      </section>
 
-<button id="rfidUserSubmit" type="submit">Dodaj użytkownika</button>
-<button id="rfidUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
-</form>
-<p class="field-help hidden" data-rfid-readonly-note>Masz dostęp do podglądu. Dodawanie i edycja użytkowników RFID są dostępne dla ról master i administrator.</p>
-</div>
-</div>
+      <section id="logsPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Logi</h1>
+            <p>Klasyczna tabela zdarzeń z filtrami i eksportem CSV.</p>
+          </div>
+          <div class="page-actions">
+            <span id="logsCount" class="count-pill">0</span>
+            <button id="exportLogsButton" class="secondary-button" type="button">Eksport CSV</button>
+            <button class="danger subtle-danger" type="button" onclick="clearLogs()" data-rfid-admin-only>Wyczyść logi</button>
+          </div>
+        </div>
 
-<div class="users-main">
-<div class="section-snapshot">
-<article class="snapshot-card">
-<span class="snapshot-label">Użytkownicy</span>
-<strong id="rfidUsersSnapshotCount" class="snapshot-value">0</strong>
-<small class="snapshot-help">Konta RFID w systemie</small>
-</article>
-<article class="snapshot-card">
-<span class="snapshot-label">Dostęp</span>
-<strong id="rfidUsersSnapshotAccess" class="snapshot-value">0</strong>
-<small class="snapshot-help">Łączne przypisania do skrytek</small>
-</article>
-</div>
-<div class="card">
-<div class="section-header">
-<div class="section-copy">
-<h2>Lista użytkowników</h2>
-<p>Przeglądaj i edytuj przypisania kart RFID do skrytek oraz przygotuj konfigurację pod czytnik użytkownika.</p>
-</div>
-<div class="section-actions">
-<span id="rfidUsersCount" class="panel-counter">0</span>
-<button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież listę</button>
-</div>
-</div>
-<div class="list-toolbar">
-<label class="field mini-field search-field">
-<span class="field-label">Szukaj użytkownika</span>
-<input id="rfidUsersSearch" type="search" placeholder="nazwa, tag, skrytka...">
-</label>
-</div>
-<div id="rfidUsersList" class="users-list"></div>
-</div>
-</div>
-</div>
-</section>
+        <div class="card">
+          <div class="filters-grid">
+            <label class="field mini-field">
+              <span class="field-label">Typ zdarzenia</span>
+              <select id="logEventFilter">
+                <option value="">Wszystkie</option>
+              </select>
+            </label>
+            <label class="field mini-field">
+              <span class="field-label">Skrytka</span>
+              <select id="logLockerFilter">
+                <option value="">Wszystkie</option>
+                <option value="1">Skrytka S1</option>
+                <option value="2">Skrytka S2</option>
+                <option value="3">Skrytka S3</option>
+              </select>
+            </label>
+            <label class="field mini-field">
+              <span class="field-label">Od</span>
+              <input id="logFromFilter" type="datetime-local">
+            </label>
+            <label class="field mini-field">
+              <span class="field-label">Do</span>
+              <input id="logToFilter" type="datetime-local">
+            </label>
+            <label class="field mini-field search-field">
+              <span class="field-label">Szukaj</span>
+              <input id="logSearchInput" type="search" placeholder="kod, UID, operator...">
+            </label>
+            <button id="logFilterReset" class="secondary-button" type="button">Reset</button>
+          </div>
 
-<section id="itemsPage" class="page">
-<div class="users-layout">
-<div class="users-sidebar">
-<div class="card form-card">
-<div class="section-copy">
-<h2 class="card-title">Przedmioty RFID</h2>
-<p>Dodawaj własne przedmioty rozpoznawane po UID taga RFID. System pokaże ich nazwę i typ w logach oraz w statusie skrytek.</p>
-</div>
+          <div class="data-table logs-table">
+            <div class="table-head logs-head">
+              <span>Czas</span>
+              <span>Typ zdarzenia</span>
+              <span>Skrytka</span>
+              <span>UID / kod</span>
+              <span>Operator</span>
+              <span>Status</span>
+              <span>Akcja</span>
+            </div>
+            <ul id="logs" class="table-body"></ul>
+          </div>
+        </div>
+      </section>
 
-<form id="rfidItemForm" class="auth-form" data-rfid-admin-only>
-<input id="rfidItemId" type="hidden">
+      <section id="usersPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Użytkownicy RFID</h1>
+            <p>Osoby, ich tagi RFID oraz dostęp do skrytek.</p>
+          </div>
+          <span id="rfidUsersCount" class="count-pill">0</span>
+        </div>
 
-<label class="field">
-<span class="field-label">Nazwa przedmiotu</span>
-<input id="rfidItemName" type="text" placeholder="np. Klucz do magazynu" required>
-</label>
+        <div class="split-grid">
+          <div class="card form-card">
+            <div class="section-copy">
+              <h2>Dodaj użytkownika</h2>
+              <p>Przypisz tag RFID do osoby i skrytek.</p>
+            </div>
 
-<label class="field">
-<span class="field-label">UID taga RFID</span>
-<div class="inline-field">
-<input id="rfidItemTagId" type="text" placeholder="np. 04A1B2C3D4" required>
-<button id="assignRfidTagButton" class="secondary-button" type="button">Nadaj tag</button>
-</div>
-<small id="rfidAssignmentStatus" class="field-help">Możesz wpisać ID ręcznie albo uruchomić nadawanie na master readerze.</small>
-</label>
+            <form id="rfidUserForm" class="auth-form" data-rfid-admin-only>
+              <input id="rfidUserId" type="hidden">
+              <label class="field">
+                <span class="field-label">Nazwa użytkownika</span>
+                <input id="rfidUserName" type="text" placeholder="Jan Kowalski" required>
+              </label>
+              <label class="field">
+                <span class="field-label">ID taga RFID</span>
+                <input id="rfidUserTagId" type="text" placeholder="04A1B2C3D4" required>
+              </label>
+              <div class="field">
+                <span class="field-label">Dostępne skrytki</span>
+                <div class="checkbox-grid">
+                  <label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="1"> <span>S1</span></label>
+                  <label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="2"> <span>S2</span></label>
+                  <label class="checkbox-card"><input type="checkbox" name="allowedLocker" value="3"> <span>S3</span></label>
+                </div>
+              </div>
+              <button id="rfidUserSubmit" type="submit">Dodaj użytkownika</button>
+              <button id="rfidUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
+            </form>
+            <p class="field-help hidden" data-rfid-readonly-note>Masz dostęp tylko do podglądu konfiguracji RFID.</p>
+          </div>
 
-<label class="field">
-<span class="field-label">Typ</span>
-<select id="rfidItemType" required>
-<option value="brelok">Brelok</option>
-<option value="karta">Karta</option>
-<option value="inne">Inne</option>
-<option value="klucz_master" data-master-option>Klucz master</option>
-<option value="karta_master" data-master-option>Karta master</option>
-</select>
-</label>
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Lista użytkowników</h2>
+                <p><span id="rfidUsersSnapshotCount">0</span> użytkowników, <span id="rfidUsersSnapshotAccess">0</span> przypisań do skrytek.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="loadRfidUsers()">Odśwież</button>
+            </div>
+            <div class="list-toolbar">
+              <label class="field mini-field search-field">
+                <span class="field-label">Szukaj użytkownika</span>
+                <input id="rfidUsersSearch" type="search" placeholder="nazwa, tag, skrytka...">
+              </label>
+            </div>
+            <div class="data-table">
+              <div class="table-head rfid-users-head">
+                <span>Nazwa</span>
+                <span>Tag RFID</span>
+                <span>Dostęp</span>
+                <span>Ostatnie użycie</span>
+                <span>Akcje</span>
+              </div>
+              <div id="rfidUsersList" class="table-body"></div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-<button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
-<button id="rfidItemReset" class="secondary-button" type="button">Wyczyść formularz</button>
-</form>
-<p class="field-help hidden" data-rfid-readonly-note>Masz dostęp do podglądu. Dodawanie zwykłych przedmiotów RFID wymaga roli administrator, a tagów master roli master.</p>
-</div>
-</div>
+      <section id="itemsPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Przedmioty RFID</h1>
+            <p>Znane obiekty rozpoznawane w skrytkach i logach.</p>
+          </div>
+          <span id="rfidItemsCount" class="count-pill">0</span>
+        </div>
 
-<div class="users-main">
-<div class="section-snapshot">
-<article class="snapshot-card">
-<span class="snapshot-label">Przedmioty</span>
-<strong id="rfidItemsSnapshotCount" class="snapshot-value">0</strong>
-<small class="snapshot-help">Własne obiekty RFID</small>
-</article>
-<article class="snapshot-card">
-<span class="snapshot-label">Typy</span>
-<strong id="rfidItemsSnapshotTypes" class="snapshot-value">0</strong>
-<small class="snapshot-help">Aktywne kategorie</small>
-</article>
-</div>
-<div class="card">
-<div class="section-header">
-<div class="section-copy">
-<h2>Lista przedmiotów</h2>
-<p>Tu zarządzasz mapowaniem UID tagów na czytelne nazwy i typy przedmiotów.</p>
-</div>
-<div class="section-actions">
-<span id="rfidItemsCount" class="panel-counter">0</span>
-<button class="secondary-button" type="button" onclick="loadRfidItems()">Odśwież listę</button>
-</div>
-</div>
-<div class="list-toolbar">
-<label class="field mini-field search-field">
-<span class="field-label">Szukaj przedmiotu</span>
-<input id="rfidItemsSearch" type="search" placeholder="nazwa, UID, typ...">
-</label>
-</div>
-<div id="rfidItemsList" class="users-list"></div>
-</div>
-</div>
-</div>
-</section>
+        <div class="split-grid">
+          <div class="card form-card">
+            <div class="section-copy">
+              <h2>Dodaj przedmiot</h2>
+              <p>Nazwij UID, żeby logi były czytelne dla operatora.</p>
+            </div>
 
-<section id="panelUsersPage" class="page">
-<div class="users-layout">
-<div class="users-sidebar">
-<div class="card form-card">
-<div class="section-copy">
-<h2 class="card-title">Użytkownicy panelu</h2>
-<p>Tylko użytkownik master może dodawać, usuwać i edytować konta oraz role dostępu do panelu.</p>
-</div>
+            <form id="rfidItemForm" class="auth-form" data-rfid-admin-only>
+              <input id="rfidItemId" type="hidden">
+              <label class="field">
+                <span class="field-label">Nazwa przedmiotu</span>
+                <input id="rfidItemName" type="text" placeholder="Klucz do magazynu" required>
+              </label>
+              <label class="field">
+                <span class="field-label">UID taga RFID</span>
+                <div class="inline-field">
+                  <input id="rfidItemTagId" type="text" placeholder="04A1B2C3D4" required>
+                  <button id="assignRfidTagButton" class="secondary-button" type="button">Nadaj tag</button>
+                </div>
+                <small id="rfidAssignmentStatus" class="field-help">Możesz wpisać ID ręcznie albo uruchomić nadawanie na master readerze.</small>
+              </label>
+              <label class="field">
+                <span class="field-label">Typ</span>
+                <select id="rfidItemType" required>
+                  <option value="brelok">Brelok</option>
+                  <option value="karta">Karta</option>
+                  <option value="inne">Inne</option>
+                  <option value="klucz_master" data-master-option>Klucz master</option>
+                  <option value="karta_master" data-master-option>Karta master</option>
+                </select>
+              </label>
+              <button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
+              <button id="rfidItemReset" class="secondary-button" type="button">Wyczyść formularz</button>
+            </form>
+            <p class="field-help hidden" data-rfid-readonly-note>Masz dostęp tylko do podglądu przedmiotów RFID.</p>
+          </div>
 
-<form id="panelUserForm" class="auth-form">
-<input id="panelUserId" type="hidden">
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Lista przedmiotów</h2>
+                <p><span id="rfidItemsSnapshotCount">0</span> przedmiotów, <span id="rfidItemsSnapshotTypes">0</span> aktywne typy.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="loadRfidItems()">Odśwież</button>
+            </div>
+            <div class="list-toolbar">
+              <label class="field mini-field search-field">
+                <span class="field-label">Szukaj przedmiotu</span>
+                <input id="rfidItemsSearch" type="search" placeholder="nazwa, UID, typ...">
+              </label>
+            </div>
+            <div class="data-table">
+              <div class="table-head rfid-items-head">
+                <span>Nazwa</span>
+                <span>UID</span>
+                <span>Typ</span>
+                <span>Status</span>
+                <span>Akcje</span>
+              </div>
+              <div id="rfidItemsList" class="table-body"></div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-<label class="field">
-<span class="field-label">Nazwa wyświetlana</span>
-<input id="panelUserDisplayName" type="text" placeholder="np. Jan Kowalski" required>
-</label>
+      <section id="diagnosticsPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Diagnostyka</h1>
+            <p>Techniczny stan API, bazy danych, ESP32 i kolejki poleceń.</p>
+          </div>
+          <button class="secondary-button" type="button" onclick="refreshSystemStatus()">Odśwież status</button>
+        </div>
 
-<label class="field">
-<span class="field-label">Login</span>
-<input id="panelUserUsername" type="text" placeholder="np. admin" required>
-</label>
+        <div class="diagnostics-grid">
+          <article class="card status-summary-tile">
+            <span class="metric-label">API</span>
+            <strong id="summaryServerState">Sprawdzanie</strong>
+            <small id="summaryServerMeta">Oczekiwanie na odpowiedź</small>
+          </article>
+          <article class="card status-summary-tile">
+            <span class="metric-label">DB</span>
+            <strong id="summaryDatabaseState">Sprawdzanie</strong>
+            <small id="summaryDatabaseMeta">Oczekiwanie na status</small>
+          </article>
+          <article class="card status-summary-tile">
+            <span class="metric-label">ESP32</span>
+            <strong id="summaryDeviceState">Sprawdzanie</strong>
+            <small id="summaryDeviceMeta">Brak heartbeat</small>
+          </article>
+          <article class="card status-summary-tile">
+            <span class="metric-label">Ostatni kontakt</span>
+            <strong id="summaryHeartbeat">brak danych</strong>
+            <small id="summaryHeartbeatMeta">ESP32 / Socket.IO</small>
+          </article>
+        </div>
 
-<label class="field">
-<span class="field-label">Hasło</span>
-<input id="panelUserPassword" type="password" placeholder="Minimum 6 znaków">
-<small class="field-help">Przy edycji zostaw puste, jeśli hasło ma pozostać bez zmian.</small>
-</label>
+        <div class="split-grid">
+          <div class="card">
+            <div class="section-copy">
+              <h2>Urządzenie</h2>
+              <p>Parametry ostatniego heartbeat i transportu.</p>
+            </div>
+            <dl id="diagnosticsList" class="details-list">
+              <div><dt>Device ID</dt><dd id="diagnosticDeviceId">brak danych</dd></div>
+              <div><dt>IP</dt><dd id="diagnosticIp">brak danych</dd></div>
+              <div><dt>Ping</dt><dd id="diagnosticPing">brak danych</dd></div>
+              <div><dt>Socket / transport</dt><dd id="diagnosticTransport">brak danych</dd></div>
+              <div><dt>Firmware</dt><dd id="diagnosticFirmware">brak danych</dd></div>
+              <div><dt>Uptime</dt><dd id="diagnosticUptime">brak danych</dd></div>
+              <div><dt>Wolna pamięć</dt><dd id="diagnosticHeap">brak danych</dd></div>
+              <div><dt>RSSI WiFi</dt><dd id="diagnosticRssi">brak danych</dd></div>
+            </dl>
+          </div>
 
-<label class="field">
-<span class="field-label">Rola</span>
-<select id="panelUserRole" required>
-<option value="master">Master</option>
-<option value="admin">Administrator</option>
-<option value="operator">Operator</option>
-<option value="viewer">Podgląd</option>
-</select>
-</label>
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Polecenia do ESP32</h2>
+                <p>Historia kolejkowania i potwierdzeń.</p>
+              </div>
+              <div class="inline-actions">
+                <span id="remoteActionsCount" class="count-pill">0</span>
+                <button id="refreshRemoteActionsButton" class="secondary-button" type="button">Odśwież</button>
+              </div>
+            </div>
+            <div id="remoteActionsList" class="remote-actions-list"></div>
+          </div>
+        </div>
+      </section>
 
-<button id="panelUserSubmit" type="submit">Dodaj użytkownika</button>
-<button id="panelUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
-</form>
-</div>
-</div>
+      <section id="panelUsersPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Administracja</h1>
+            <p>Konta panelu i backup konfiguracji.</p>
+          </div>
+          <div class="page-actions">
+            <span id="panelUsersCount" class="count-pill">0</span>
+            <button id="backupExportButton" class="secondary-button" type="button">Backup JSON</button>
+          </div>
+        </div>
 
-<div class="users-main">
-<div class="section-snapshot">
-<article class="snapshot-card">
-<span class="snapshot-label">Konta panelu</span>
-<strong id="panelUsersSnapshotCount" class="snapshot-value">0</strong>
-<small class="snapshot-help">Wszyscy operatorzy</small>
-</article>
-<article class="snapshot-card">
-<span class="snapshot-label">Master</span>
-<strong id="panelUsersSnapshotMasters" class="snapshot-value">0</strong>
-<small class="snapshot-help">Uprawnienia najwyższe</small>
-</article>
-</div>
-<div class="card">
-<div class="section-header">
-<div class="section-copy">
-<h2>Lista kont panelu</h2>
-<p>Konta są teraz trzymane poza zmiennymi środowiskowymi i można nimi zarządzać z poziomu panelu.</p>
-</div>
-<div class="section-actions">
-<span id="panelUsersCount" class="panel-counter">0</span>
-<button id="backupExportButton" class="secondary-button" type="button">Backup JSON</button>
-<button class="secondary-button" type="button" onclick="loadPanelUsers()">Odśwież listę</button>
-</div>
-</div>
-<div class="list-toolbar">
-<label class="field mini-field search-field">
-<span class="field-label">Szukaj konta</span>
-<input id="panelUsersSearch" type="search" placeholder="nazwa, login, rola...">
-</label>
-</div>
-<div id="panelUsersList" class="users-list"></div>
-</div>
-</div>
-</div>
-</section>
+        <div class="split-grid">
+          <div class="card form-card">
+            <div class="section-copy">
+              <h2>Konto panelu</h2>
+              <p>Dodaj operatora albo zmień rolę istniejącego konta.</p>
+            </div>
+
+            <form id="panelUserForm" class="auth-form">
+              <input id="panelUserId" type="hidden">
+              <label class="field">
+                <span class="field-label">Nazwa</span>
+                <input id="panelUserDisplayName" type="text" placeholder="Jan Kowalski" required>
+              </label>
+              <label class="field">
+                <span class="field-label">Login</span>
+                <input id="panelUserUsername" type="text" placeholder="operator" required>
+              </label>
+              <label class="field">
+                <span class="field-label">Hasło</span>
+                <input id="panelUserPassword" type="password" placeholder="Minimum 6 znaków">
+                <small class="field-help">Przy edycji zostaw puste, jeśli hasło ma pozostać bez zmian.</small>
+              </label>
+              <label class="field">
+                <span class="field-label">Rola</span>
+                <select id="panelUserRole" required>
+                  <option value="master">Master</option>
+                  <option value="admin">Administrator</option>
+                  <option value="operator">Operator</option>
+                  <option value="viewer">Podgląd</option>
+                </select>
+              </label>
+              <button id="panelUserSubmit" type="submit">Dodaj użytkownika</button>
+              <button id="panelUserReset" class="secondary-button" type="button">Wyczyść formularz</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Lista kont</h2>
+                <p><span id="panelUsersSnapshotCount">0</span> kont, <span id="panelUsersSnapshotMasters">0</span> z rolą Master.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="loadPanelUsers()">Odśwież</button>
+            </div>
+            <div class="list-toolbar">
+              <label class="field mini-field search-field">
+                <span class="field-label">Szukaj konta</span>
+                <input id="panelUsersSearch" type="search" placeholder="nazwa, login, rola...">
+              </label>
+            </div>
+            <div class="data-table">
+              <div class="table-head panel-users-head">
+                <span>Nazwa</span>
+                <span>Login</span>
+                <span>Rola</span>
+                <span>Ostatnie logowanie</span>
+                <span>Akcje</span>
+              </div>
+              <div id="panelUsersList" class="table-body"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
 </div>
 
 <div id="confirmOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
-<div class="confirm-dialog">
-<span class="eyebrow">Potwierdzenie akcji</span>
-<h2 id="confirmTitle">Potwierdź operację</h2>
-<p id="confirmMessage">Ta akcja wymaga potwierdzenia.</p>
-<div class="confirm-actions">
-<button id="confirmCancel" class="secondary-button" type="button">Anuluj</button>
-<button id="confirmAccept" class="danger" type="button">Potwierdź</button>
-</div>
-</div>
-</div>
-
-<div id="logDetailsOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="logDetailsTitle">
-<div class="confirm-dialog log-details-dialog">
-<span class="eyebrow">Szczegóły zdarzenia</span>
-<h2 id="logDetailsTitle">Log systemowy</h2>
-<p id="logDetailsSummary">Szczegółowe informacje o zdarzeniu.</p>
-<dl id="logDetailsList" class="log-details-list"></dl>
-<div class="confirm-actions">
-<button id="logDetailsClose" class="secondary-button" type="button">Zamknij</button>
-</div>
-</div>
+  <div class="confirm-dialog">
+    <span class="eyebrow">Potwierdzenie akcji</span>
+    <h2 id="confirmTitle">Potwierdź operację</h2>
+    <p id="confirmMessage">Ta akcja wymaga potwierdzenia.</p>
+    <div class="confirm-actions">
+      <button id="confirmCancel" class="secondary-button" type="button">Anuluj</button>
+      <button id="confirmAccept" class="danger" type="button">Potwierdź</button>
+    </div>
+  </div>
 </div>
 
-<div id="lockerDetailsOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="lockerDetailsTitle">
-<div class="confirm-dialog locker-details-dialog">
-<span class="eyebrow">Szczegóły skrytki</span>
-<h2 id="lockerDetailsTitle">Skrytka</h2>
-<p id="lockerDetailsSummary">Aktualny stan komory i ostatnie zdarzenia.</p>
-<div id="lockerDetailsStatus" class="locker-details-status"></div>
-<div id="lockerDetailsItem" class="locker-details-item"></div>
-<div class="locker-details-history">
-<div class="locker-details-history-header">
-<strong>Ostatnie zdarzenia</strong>
-<button id="lockerDetailsRefresh" class="secondary-button" type="button">Odśwież</button>
+<div id="logDetailsOverlay" class="confirm-overlay inspector-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="logDetailsTitle">
+  <div class="confirm-dialog inspector-panel">
+    <span class="eyebrow">Szczegóły zdarzenia</span>
+    <h2 id="logDetailsTitle">Log systemowy</h2>
+    <p id="logDetailsSummary">Szczegółowe informacje o zdarzeniu.</p>
+    <dl id="logDetailsList" class="log-details-list"></dl>
+    <div class="confirm-actions">
+      <button id="logDetailsClose" class="secondary-button" type="button">Zamknij</button>
+    </div>
+  </div>
 </div>
-<div id="lockerDetailsLogs" class="locker-details-logs"></div>
-</div>
-<div class="confirm-actions">
-<button id="lockerDetailsOpen" type="button" data-operation-only>Otwórz skrytkę</button>
-<button id="lockerDetailsClose" class="secondary-button" type="button">Zamknij</button>
-</div>
-</div>
+
+<div id="lockerDetailsOverlay" class="confirm-overlay inspector-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="lockerDetailsTitle">
+  <div class="confirm-dialog inspector-panel locker-details-dialog">
+    <span class="eyebrow">Szczegóły skrytki</span>
+    <h2 id="lockerDetailsTitle">Skrytka</h2>
+    <p id="lockerDetailsSummary">Aktualny stan komory i ostatnie zdarzenia.</p>
+    <div id="lockerDetailsStatus" class="locker-details-status"></div>
+    <div id="lockerDetailsItem" class="locker-details-item"></div>
+    <div class="locker-details-history">
+      <div class="locker-details-history-header">
+        <strong>Ostatnie zdarzenia</strong>
+        <button id="lockerDetailsRefresh" class="secondary-button" type="button">Odśwież</button>
+      </div>
+      <div id="lockerDetailsLogs" class="locker-details-logs"></div>
+    </div>
+    <div class="confirm-actions">
+      <button id="lockerDetailsOpen" type="button" data-operation-only>Otwórz skrytkę</button>
+      <button id="lockerDetailsClose" class="secondary-button" type="button">Zamknij</button>
+    </div>
+  </div>
 </div>
 
 <div id="toast" class="toast"></div>
 
 <script src="/app.js"></script>
-
 </body>
 </html>

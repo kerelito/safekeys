@@ -18,6 +18,7 @@ let systemStatusData = null;
 let currentTagAssignment = null;
 let lockersData = [];
 let logsCount = 0;
+let recentLogsData = [];
 let alertsData = [];
 let remoteActionsData = [];
 let confirmResolver = null;
@@ -171,6 +172,69 @@ function setText(id, value) {
   }
 }
 
+function setHidden(id, hidden) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.classList.toggle("hidden", hidden);
+  }
+}
+
+function setElementState(id, state) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.dataset.state = state;
+  }
+}
+
+function formatOptional(value, fallback = "brak danych") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  return String(value);
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "brak danych";
+  }
+
+  if (value >= 1024 * 1024) {
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  if (value >= 1024) {
+    return `${Math.round(value / 1024)} KB`;
+  }
+
+  return `${value} B`;
+}
+
+function formatDuration(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "brak danych";
+  }
+
+  const totalSeconds = Math.floor(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  if (hours > 0) {
+    return `${hours} godz. ${minutes} min`;
+  }
+
+  return `${minutes} min`;
+}
+
+function formatDateTimeInputValue(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 function setTileState(valueId, metaId, state, value, meta) {
   setText(valueId, value);
   setText(metaId, meta);
@@ -184,18 +248,25 @@ function setTileState(valueId, metaId, state, value, meta) {
 function updateOverviewMetrics() {
   const readyLockers = lockersData.filter(locker => locker.hasTag && locker.isDoorClosed).length;
   const totalLockers = lockersData.length || 3;
-  const totalAccessAssignments = rfidUsersData.reduce((sum, user) => sum + user.allowedLockers.length, 0);
+  const totalAccessAssignments = rfidUsersData.reduce((sum, user) => {
+    const allowedLockers = Array.isArray(user.allowedLockers) ? user.allowedLockers : [];
+    return sum + allowedLockers.length;
+  }, 0);
   const itemTypes = new Set(rfidItemsData.map(item => item.itemType)).size;
   const masterUsers = panelUsersData.filter(user => user.role === "master").length;
+  const rfidTags = rfidUsersData.length + rfidItemsData.length;
 
   setText("metricReadyLockers", `${readyLockers}/${totalLockers}`);
   setText("metricActiveCodes", String(activeCodesData.length));
   setText("metricRfidUsers", String(rfidUsersData.length));
   setText("metricRfidItems", String(rfidItemsData.length));
+  setText("metricRfidTags", String(rfidTags));
+  setText("metricAlerts", String(alertsData.length));
 
   setText("activeCodesCount", String(activeCodesData.length));
   setText("logsCount", String(logsCount));
   setText("remoteActionsCount", String(remoteActionsData.length));
+  setText("dashboardRemoteActionsCount", String(remoteActionsData.length));
   setText("rfidUsersCount", String(rfidUsersData.length));
   setText("rfidItemsCount", String(rfidItemsData.length));
   setText("panelUsersCount", String(panelUsersData.length));
@@ -219,6 +290,11 @@ function updateStatusIndicator(service, { state = "pending", title, summary, lin
     element.classList.add("is-online");
   } else if (state === "offline") {
     element.classList.add("is-offline");
+  }
+
+  const value = element.querySelector(".status-value");
+  if (value) {
+    value.textContent = state === "online" ? "Online" : state === "offline" ? "Offline" : "Sprawdzanie";
   }
 
   const popover = element.querySelector(".status-popover");
@@ -316,6 +392,43 @@ function renderSystemStatus() {
     esp32.ip ? `ESP32 ${esp32.ip}` : "Czekam na adres urządzenia"
   );
 
+  const healthState = !lastHttpOk || !databaseConnected
+    ? "critical"
+    : esp32Connected
+      ? "online"
+      : "warning";
+  const healthTitle = !lastHttpOk
+    ? "API offline"
+    : !databaseConnected
+      ? "Baza danych offline"
+      : esp32Connected
+        ? "System gotowy"
+        : "ESP32 offline";
+  const healthMeta = !lastHttpOk
+    ? "Panel nie otrzymuje odpowiedzi z backendu."
+    : !databaseConnected
+      ? `MongoDB zgłasza stan: ${databaseState}. Operacje mogą być niedostępne.`
+      : esp32Connected
+        ? `Ostatni kontakt z urządzeniem: ${formatRelativeTime(esp32.lastSeenAt)}.`
+        : `Ostatni kontakt: ${formatRelativeTime(esp32.lastSeenAt)}. Niektóre operacje wykonają się po powrocie połączenia.`;
+
+  setElementState("systemHealthCard", healthState);
+  setText("systemHealthTitle", healthTitle);
+  setText("systemHealthMeta", healthMeta);
+  setHidden("esp32SyncNotice", esp32Connected);
+
+  setText("diagnosticDeviceId", formatOptional(esp32.deviceId));
+  setText("diagnosticIp", formatOptional(esp32.ip));
+  setText("diagnosticPing", typeof esp32.pingMs === "number" ? `${esp32.pingMs} ms` : "brak danych");
+  setText("diagnosticTransport", formatOptional(esp32.transport));
+  setText("diagnosticFirmware", formatOptional(esp32.firmware));
+  setText("diagnosticUptime", formatDuration(esp32.uptimeMs));
+  setText("diagnosticHeap", [
+    typeof esp32.freeHeap === "number" ? `wolne ${formatBytes(esp32.freeHeap)}` : "",
+    typeof esp32.minFreeHeap === "number" ? `min. ${formatBytes(esp32.minFreeHeap)}` : ""
+  ].filter(Boolean).join(", ") || "brak danych");
+  setText("diagnosticRssi", typeof esp32.wifiRssi === "number" ? `${esp32.wifiRssi} dBm` : "brak danych");
+
   renderRfidAssignmentStatus();
   updateOverviewMetrics();
 }
@@ -328,6 +441,7 @@ function renderAlerts() {
 
   list.innerHTML = "";
   setText("alertsCount", String(alertsData.length));
+  setText("metricAlerts", String(alertsData.length));
 
   if (alertsData.length === 0) {
     const empty = document.createElement("div");
@@ -355,6 +469,8 @@ function renderAlerts() {
     item.appendChild(action);
     list.appendChild(item);
   });
+
+  updateOverviewMetrics();
 }
 
 async function loadAlerts() {
@@ -564,7 +680,9 @@ function connectSocket() {
   });
   socket.on("logs-cleared", () => {
     logsCount = 0;
+    recentLogsData = [];
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
+    renderRecentEvents();
     updateOverviewMetrics();
     loadAlerts();
   });
@@ -587,8 +705,8 @@ function connectSocket() {
 
 function toggleMenu(forceOpen = null) {
   const drawer = document.getElementById("menuDrawer");
-  const shouldOpen = forceOpen === null ? drawer.classList.contains("hidden") : forceOpen;
-  drawer.classList.toggle("hidden", !shouldOpen);
+  const shouldOpen = forceOpen === null ? !drawer.classList.contains("is-mobile-open") : forceOpen;
+  drawer.classList.toggle("is-mobile-open", shouldOpen);
   document.getElementById("menuButton").setAttribute("aria-expanded", String(shouldOpen));
 }
 
@@ -597,11 +715,26 @@ function setPage(page, closeMenu = true) {
     page = "dashboard";
   }
 
+  const pages = {
+    dashboard: "Pulpit",
+    lockers: "Skrytki",
+    access: "Dostępy",
+    users: "Użytkownicy RFID",
+    items: "Przedmioty RFID",
+    logs: "Logi",
+    diagnostics: "Diagnostyka",
+    panelUsers: "Administracja"
+  };
+  if (!pages[page]) {
+    page = "dashboard";
+  }
+
   currentPage = page;
-  document.getElementById("dashboardPage").classList.toggle("active", page === "dashboard");
-  document.getElementById("usersPage").classList.toggle("active", page === "users");
-  document.getElementById("itemsPage").classList.toggle("active", page === "items");
-  document.getElementById("panelUsersPage").classList.toggle("active", page === "panelUsers");
+  Object.keys(pages).forEach(pageName => {
+    document.getElementById(`${pageName}Page`)?.classList.toggle("active", page === pageName);
+  });
+  setText("currentViewTitle", pages[page]);
+  setText("currentBreadcrumb", page === "dashboard" ? "SafeKeys" : `SafeKeys / ${pages[page]}`);
   document.querySelectorAll(".menu-link").forEach(link => {
     link.classList.toggle("active", link.dataset.page === page);
   });
@@ -630,7 +763,7 @@ function updateThemeButton(theme) {
 
 function updateThemeColor(resolvedTheme) {
   const metaTheme = document.querySelector('meta[name="theme-color"]');
-  metaTheme.setAttribute("content", resolvedTheme === "dark" ? "#07111f" : "#edf3ff");
+  metaTheme.setAttribute("content", resolvedTheme === "dark" ? "#111113" : "#f5f5f7");
 }
 
 function applyTheme(theme) {
@@ -755,13 +888,7 @@ function renderEmptyState(listId, message) {
 function showToast(msg, isError = false) {
   const t = document.getElementById("toast");
   t.innerText = msg;
-  const isLight = document.documentElement.dataset.theme === "light";
-  t.style.background = isError
-    ? (isLight ? "rgba(255, 233, 236, 0.98)" : "rgba(88, 17, 22, 0.95)")
-    : (isLight ? "rgba(255, 255, 255, 0.92)" : "rgba(6, 14, 25, 0.92)");
-  t.style.color = isError
-    ? (isLight ? "#7f1d2d" : "#ffe7e9")
-    : (isLight ? "#142033" : "#f5f7fb");
+  t.classList.toggle("is-error", isError);
   t.classList.add("show");
 
   if (toastTimeoutId) {
@@ -836,21 +963,22 @@ function renderGeneratedCodeResult(data) {
   const meta = document.getElementById("generatedCodeMeta");
   const expiresAt = formatDateTime(data.expiresAt);
   const delivery = data.emailDelivery;
+  const actor = currentUser?.displayName ? ` Wygenerował: ${currentUser.displayName}.` : "";
 
   if (delivery?.attempted) {
     if (delivery.sent) {
       setGeneratedDeliveryStatus("E-mail wysłany", "success");
-      meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Wysłano go na ${delivery.recipientEmail}.`;
+      meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Wysłano go na ${delivery.recipientEmail}.${actor}`;
       return;
     }
 
     setGeneratedDeliveryStatus("E-mail niewysłany", "warning");
-    meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Nie udało się wysłać go na ${delivery.recipientEmail}. ${summarizeDeliveryError(delivery.error)}`;
+    meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}. Nie udało się wysłać go na ${delivery.recipientEmail}. ${summarizeDeliveryError(delivery.error)}${actor}`;
     return;
   }
 
   setGeneratedDeliveryStatus();
-  meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}.`;
+  meta.innerText = `Kod do skrytki S${data.locker} wygasa ${expiresAt}.${actor}`;
 }
 
 function updateGenerateButtonLabel(isSubmitting = false) {
@@ -1192,26 +1320,34 @@ function renderRfidUsers() {
   }
 
   visibleUsers.forEach(user => {
-    const card = document.createElement("div");
-    card.className = "user-card";
+    const row = document.createElement("div");
+    row.className = "table-row rfid-user-row";
 
-    const header = document.createElement("div");
-    header.className = "user-card-header";
+    const name = document.createElement("strong");
+    name.textContent = user.name;
 
-    const meta = document.createElement("div");
-    const title = document.createElement("h3");
-    title.className = "user-card-title";
-    title.textContent = user.name;
+    const tag = document.createElement("span");
+    tag.className = "tag-mono";
+    tag.textContent = user.tagId;
 
-    const tag = document.createElement("div");
-    tag.className = "user-tag-chip";
-    tag.textContent = `Tag RFID: ${user.tagId}`;
+    const lockers = document.createElement("span");
+    const allowedLockers = getAllowedLockers(user);
+    lockers.textContent = allowedLockers.length
+      ? allowedLockers.map(locker => `S${locker}`).join(", ")
+      : "Brak przypisań";
 
-    meta.appendChild(title);
-    meta.appendChild(tag);
+    const lastUsed = document.createElement("span");
+    lastUsed.textContent = user.lastUsedAt ? formatRelativeTime(user.lastUsedAt) : "brak danych";
 
     const actions = document.createElement("div");
-    actions.className = "user-card-actions";
+    actions.className = "row-actions";
+
+    const copyButton = document.createElement("button");
+    copyButton.className = "secondary-button";
+    copyButton.type = "button";
+    copyButton.textContent = "Kopiuj UID";
+    copyButton.addEventListener("click", () => copyTextToClipboard(user.tagId, `Skopiowano UID ${user.tagId}.`));
+    actions.appendChild(copyButton);
 
     if (canManage) {
       const editButton = document.createElement("button");
@@ -1227,28 +1363,13 @@ function renderRfidUsers() {
       actions.appendChild(editButton);
       actions.appendChild(deleteButton);
     }
-    header.appendChild(meta);
-    header.appendChild(actions);
 
-    const lockers = document.createElement("div");
-    lockers.className = "user-lockers";
-    user.allowedLockers.forEach(locker => {
-      const chip = document.createElement("span");
-      chip.className = "user-locker-chip";
-      chip.textContent = `S${locker}`;
-      lockers.appendChild(chip);
-    });
-
-    const copy = document.createElement("p");
-    copy.className = "user-card-copy";
-    copy.textContent = canManage
-      ? `Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}. UID użytkownika jest gotowe do użycia na czytniku.`
-      : `Tryb podglądu. Dostęp do ${user.allowedLockers.length} ${user.allowedLockers.length === 1 ? "skrytki" : "skrytek"}.`;
-
-    card.appendChild(header);
-    card.appendChild(lockers);
-    card.appendChild(copy);
-    container.appendChild(card);
+    row.appendChild(name);
+    row.appendChild(tag);
+    row.appendChild(lockers);
+    row.appendChild(lastUsed);
+    row.appendChild(actions);
+    container.appendChild(row);
   });
 }
 
@@ -1277,37 +1398,37 @@ function renderRfidItems() {
   }
 
   visibleItems.forEach(item => {
-    const card = document.createElement("div");
-    card.className = "user-card";
+    const row = document.createElement("div");
+    row.className = "table-row rfid-item-row";
 
-    const header = document.createElement("div");
-    header.className = "user-card-header";
+    const name = document.createElement("strong");
+    name.textContent = item.name;
 
-    const meta = document.createElement("div");
-    const title = document.createElement("h3");
-    title.className = "user-card-title";
-    title.textContent = item.name;
-
-    const tag = document.createElement("div");
-    tag.className = "user-tag-chip";
-    tag.textContent = `UID: ${item.tagId}`;
-
-    meta.appendChild(title);
-    meta.appendChild(tag);
-
-    const chips = document.createElement("div");
-    chips.className = "user-lockers";
+    const tag = document.createElement("span");
+    tag.className = "tag-mono";
+    tag.textContent = item.tagId;
 
     const typeChip = document.createElement("span");
-    typeChip.className = "user-locker-chip";
+    typeChip.className = "badge";
     if (isMasterRfidItem(item)) {
       typeChip.classList.add("master-rfid-chip");
     }
     typeChip.textContent = getItemTypeLabel(item.itemType);
-    chips.appendChild(typeChip);
+
+    const status = document.createElement("span");
+    status.className = "status-badge is-ok";
+    status.textContent = isMasterRfidItem(item) ? "Administracyjny" : "Widoczny w logach";
 
     const actions = document.createElement("div");
-    actions.className = "user-card-actions";
+    actions.className = "row-actions";
+
+    const copyButton = document.createElement("button");
+    copyButton.className = "secondary-button";
+    copyButton.type = "button";
+    copyButton.textContent = "Kopiuj UID";
+    copyButton.addEventListener("click", () => copyTextToClipboard(item.tagId, `Skopiowano UID ${item.tagId}.`));
+    actions.appendChild(copyButton);
+
     const canEditItem = canManage && (!isMasterRfidItem(item) || canManageMasterRfid());
 
     if (canEditItem) {
@@ -1324,25 +1445,13 @@ function renderRfidItems() {
       actions.appendChild(editButton);
       actions.appendChild(deleteButton);
     }
-    header.appendChild(meta);
-    header.appendChild(actions);
 
-    const copy = document.createElement("p");
-    copy.className = "user-card-copy";
-    if (isMasterRfidItem(item)) {
-      copy.textContent = canManageMasterRfid()
-        ? `Administracyjny tag RFID. Przyłożenie UID ${item.tagId} daje dostęp master do skrytek.`
-        : "Administracyjny tag RFID. Szczegóły i edycja są dostępne tylko dla roli master.";
-    } else {
-      copy.textContent = canManage
-        ? `Typ: ${getItemTypeLabel(item.itemType)}. UID ${item.tagId} będzie widoczne w logach i statusie skrytek jako znany przedmiot.`
-        : `Tryb podglądu. Typ: ${getItemTypeLabel(item.itemType)}, UID: ${item.tagId}.`;
-    }
-
-    card.appendChild(header);
-    card.appendChild(chips);
-    card.appendChild(copy);
-    container.appendChild(card);
+    row.appendChild(name);
+    row.appendChild(tag);
+    row.appendChild(typeChip);
+    row.appendChild(status);
+    row.appendChild(actions);
+    container.appendChild(row);
   });
 }
 
@@ -1426,34 +1535,24 @@ function renderPanelUsers() {
   }
 
   visibleUsers.forEach(user => {
-    const card = document.createElement("div");
-    card.className = "user-card";
+    const row = document.createElement("div");
+    row.className = "table-row panel-user-row";
 
-    const header = document.createElement("div");
-    header.className = "user-card-header";
+    const name = document.createElement("strong");
+    name.textContent = user.displayName;
 
-    const meta = document.createElement("div");
-    const title = document.createElement("h3");
-    title.className = "user-card-title";
-    title.textContent = user.displayName;
-
-    const tag = document.createElement("div");
-    tag.className = "user-tag-chip";
-    tag.textContent = `@${user.username}`;
-
-    meta.appendChild(title);
-    meta.appendChild(tag);
-
-    const chips = document.createElement("div");
-    chips.className = "user-lockers";
+    const username = document.createElement("span");
+    username.textContent = `@${user.username}`;
 
     const roleChip = document.createElement("span");
-    roleChip.className = "user-locker-chip";
+    roleChip.className = "badge";
     roleChip.textContent = getPanelRoleLabel(user.role);
-    chips.appendChild(roleChip);
+
+    const lastLogin = document.createElement("span");
+    lastLogin.textContent = user.lastLoginAt ? formatRelativeTime(user.lastLoginAt) : "brak danych";
 
     const actions = document.createElement("div");
-    actions.className = "user-card-actions";
+    actions.className = "row-actions";
 
     const editButton = document.createElement("button");
     editButton.className = "secondary-button";
@@ -1468,23 +1567,13 @@ function renderPanelUsers() {
 
     actions.appendChild(editButton);
     actions.appendChild(deleteButton);
-    header.appendChild(meta);
-    header.appendChild(actions);
 
-    const copy = document.createElement("p");
-    copy.className = "user-card-copy";
-    const roleDescriptions = {
-      master: "Pełny dostęp: konta panelu, konfiguracja RFID, tagi master i operacje na skrytkach.",
-      admin: "Dostęp administracyjny: konfiguracja RFID, logi i codzienna obsługa skrytek.",
-      operator: "Dostęp operacyjny: generowanie kodów, otwieranie skrytek i dezaktywacja dostępów.",
-      viewer: "Tryb podglądu: bez możliwości wykonywania operacji ani zmian konfiguracji."
-    };
-    copy.textContent = roleDescriptions[user.role] || roleDescriptions.viewer;
-
-    card.appendChild(header);
-    card.appendChild(chips);
-    card.appendChild(copy);
-    container.appendChild(card);
+    row.appendChild(name);
+    row.appendChild(username);
+    row.appendChild(roleChip);
+    row.appendChild(lastLogin);
+    row.appendChild(actions);
+    container.appendChild(row);
   });
 }
 
@@ -1884,48 +1973,87 @@ async function loadLockers() {
 
 function renderLockers() {
   const container = document.getElementById("lockers");
-  container.innerHTML = "";
-
-  const rack = document.createElement("div");
-  rack.className = "lockers-rack";
+  const dashboardContainer = document.getElementById("dashboardLockers");
+  if (container) {
+    container.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "table-head lockers-head";
+    ["ID", "Klucz", "Drzwi", "Ostatnio", "Tag / przedmiot", "Akcje"].forEach(label => {
+      const cell = document.createElement("span");
+      cell.textContent = label;
+      head.appendChild(cell);
+    });
+    container.appendChild(head);
+  }
+  if (dashboardContainer) {
+    dashboardContainer.innerHTML = "";
+  }
 
   lockersData.forEach(locker => {
     const itemPresentation = getLockerItemPresentation(locker);
+    const severity = getLockerSeverity(locker);
+    const keyStatusLabel = itemPresentation.status === "known"
+      ? itemPresentation.value
+      : itemPresentation.status === "missing"
+        ? "Brak"
+        : "Obcy przedmiot";
+    const lastActivity = locker.detectedAt ? formatRelativeTime(locker.detectedAt) : "brak danych";
 
-    const chamber = document.createElement("article");
-    chamber.className = `locker-chamber state-${getLockerSeverity(locker)}`;
+    if (dashboardContainer) {
+      const item = document.createElement("article");
+      item.className = `compact-locker-item state-${severity}`;
 
-    const header = document.createElement("div");
-    header.className = "chamber-header";
+      const id = document.createElement("span");
+      id.className = "locker-id";
+      id.textContent = `S${locker.locker}`;
 
-    const title = document.createElement("h3");
-    title.className = "locker-name";
-    title.textContent = `S${locker.locker}`;
+      const meta = document.createElement("div");
+      meta.className = "compact-locker-meta";
 
-    const severity = document.createElement("span");
-    severity.className = "chamber-severity";
-    severity.textContent = getLockerSeverityLabel(locker);
+      const title = document.createElement("strong");
+      title.textContent = `${keyStatusLabel} · ${locker.isDoorClosed ? "drzwi zamknięte" : "drzwi otwarte"}`;
 
-    header.appendChild(title);
-    header.appendChild(severity);
+      const detail = document.createElement("span");
+      detail.textContent = itemPresentation.meta;
 
-    const itemStatus = document.createElement("div");
-    itemStatus.className = `locker-item-status ${itemPresentation.stateClass}`;
-    itemStatus.innerHTML = `
-      <span class="locker-item-label">${itemPresentation.label}</span>
-      <strong class="locker-item-value">${itemPresentation.value}</strong>
-      <small class="locker-item-meta">${itemPresentation.meta}</small>
-    `;
+      meta.appendChild(title);
+      meta.appendChild(detail);
 
-    const icons = document.createElement("div");
-    icons.className = "chamber-icons";
-    icons.innerHTML = `
-      <span class="state-icon ${itemPresentation.iconClass}" title="Stan klucza"><span>Klucz</span><strong>${itemPresentation.status === "known" ? "znany" : itemPresentation.status === "missing" ? "brak" : "obcy"}</strong></span>
-      <span class="state-icon ${locker.isDoorClosed ? "good" : "warn"}" title="Stan drzwi"><span>Drzwi</span><strong>${locker.isDoorClosed ? "zamknięte" : "otwarte"}</strong></span>
-    `;
+      const badge = document.createElement("span");
+      badge.className = `status-badge is-${severity === "ok" ? "ok" : severity === "critical" ? "critical" : "warning"}`;
+      badge.textContent = getLockerSeverityLabel(locker);
+
+      item.appendChild(id);
+      item.appendChild(meta);
+      item.appendChild(badge);
+      dashboardContainer.appendChild(item);
+    }
+
+    if (!container) {
+      return;
+    }
+
+    const row = document.createElement("div");
+    row.className = "table-row locker-row";
+
+    const id = document.createElement("strong");
+    id.textContent = `S${locker.locker}`;
+
+    const key = document.createElement("span");
+    key.textContent = keyStatusLabel;
+
+    const door = document.createElement("span");
+    door.className = `status-badge is-${locker.isDoorClosed ? "ok" : "warning"}`;
+    door.textContent = locker.isDoorClosed ? "Zamknięte" : "Otwarte";
+
+    const activity = document.createElement("span");
+    activity.textContent = lastActivity;
+
+    const user = document.createElement("span");
+    user.textContent = locker.detectedTagId || locker.detectedItemName || "brak danych";
 
     const actions = document.createElement("div");
-    actions.className = "locker-actions";
+    actions.className = "row-actions";
 
     const openButton = document.createElement("button");
     openButton.textContent = "Otwórz";
@@ -1941,14 +2069,15 @@ function renderLockers() {
     }
     actions.appendChild(statusButton);
 
-    chamber.appendChild(header);
-    chamber.appendChild(itemStatus);
-    chamber.appendChild(icons);
-    chamber.appendChild(actions);
-    rack.appendChild(chamber);
+    row.appendChild(id);
+    row.appendChild(key);
+    row.appendChild(door);
+    row.appendChild(activity);
+    row.appendChild(user);
+    row.appendChild(actions);
+    container.appendChild(row);
   });
 
-  container.appendChild(rack);
   updateOverviewMetrics();
 }
 
@@ -2010,6 +2139,42 @@ function createLogSummaryElement(log) {
   item.appendChild(title);
   item.appendChild(meta);
   return item;
+}
+
+function renderRecentEvents() {
+  const container = document.getElementById("recentEventsList");
+  if (!container) {
+    return;
+  }
+
+  container.innerHTML = "";
+
+  if (recentLogsData.length === 0) {
+    renderEmptyState("recentEventsList", "Brak ostatnich zdarzeń do wyświetlenia.");
+    return;
+  }
+
+  recentLogsData.slice(0, 6).forEach(log => {
+    const presentation = getLogPresentation(log);
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `recent-event-item ${presentation.className}`;
+    item.addEventListener("click", () => openLogDetails(log, presentation.text));
+
+    const main = document.createElement("div");
+    main.className = "recent-event-main";
+
+    const title = document.createElement("strong");
+    title.textContent = presentation.text;
+
+    const meta = document.createElement("span");
+    meta.textContent = log.timestamp ? formatDateTime(log.timestamp) : "brak daty";
+
+    main.appendChild(title);
+    main.appendChild(meta);
+    item.appendChild(main);
+    container.appendChild(item);
+  });
 }
 
 function renderLockerDetailsStatus(locker) {
@@ -2151,44 +2316,51 @@ function getRemoteActionStatusLabel(status) {
 }
 
 function renderRemoteActions() {
-  const container = document.getElementById("remoteActionsList");
-  if (!container) {
-    return;
-  }
-
-  container.innerHTML = "";
   setText("remoteActionsCount", String(remoteActionsData.length));
+  setText("dashboardRemoteActionsCount", String(remoteActionsData.length));
 
-  if (remoteActionsData.length === 0) {
-    renderEmptyState("remoteActionsList", "Nie wysłano jeszcze żadnych poleceń do urządzenia.");
-    return;
-  }
+  const renderInto = (containerId, limit = 8) => {
+    const container = document.getElementById(containerId);
+    if (!container) {
+      return;
+    }
 
-  remoteActionsData.slice(0, 8).forEach(action => {
-    const item = document.createElement("article");
-    item.className = `remote-action-item is-${action.status || "queued"}`;
+    container.innerHTML = "";
 
-    const main = document.createElement("div");
-    main.className = "remote-action-main";
+    if (remoteActionsData.length === 0) {
+      renderEmptyState(containerId, "Nie wysłano jeszcze żadnych poleceń do urządzenia.");
+      return;
+    }
 
-    const title = document.createElement("strong");
-    title.textContent = getRemoteActionTypeLabel(action);
+    remoteActionsData.slice(0, limit).forEach(action => {
+      const item = document.createElement("article");
+      item.className = `remote-action-item is-${action.status || "queued"}`;
 
-    const meta = document.createElement("span");
-    const actor = action.actor ? ` · ${action.actor}` : "";
-    meta.textContent = `${formatRelativeTime(action.createdAt)}${actor}`;
+      const main = document.createElement("div");
+      main.className = "remote-action-main";
 
-    main.appendChild(title);
-    main.appendChild(meta);
+      const title = document.createElement("strong");
+      title.textContent = getRemoteActionTypeLabel(action);
 
-    const status = document.createElement("span");
-    status.className = "remote-action-status";
-    status.textContent = getRemoteActionStatusLabel(action.status);
+      const meta = document.createElement("span");
+      const actor = action.actor ? ` · ${action.actor}` : "";
+      meta.textContent = `${formatRelativeTime(action.createdAt)}${actor}`;
 
-    item.appendChild(main);
-    item.appendChild(status);
-    container.appendChild(item);
-  });
+      main.appendChild(title);
+      main.appendChild(meta);
+
+      const status = document.createElement("span");
+      status.className = "remote-action-status";
+      status.textContent = getRemoteActionStatusLabel(action.status);
+
+      item.appendChild(main);
+      item.appendChild(status);
+      container.appendChild(item);
+    });
+  };
+
+  renderInto("remoteActionsList", 12);
+  renderInto("dashboardRemoteActionsList", 5);
 }
 
 async function loadRemoteActions() {
@@ -2273,52 +2445,36 @@ async function loadActiveCodes() {
     }
 
     activeCodesData.forEach(c => {
-      const li = document.createElement("li");
-      li.id = "code-" + c.code;
-      li.className = "active-code-item";
-
-      const layout = document.createElement("div");
-      layout.className = "active-code-layout";
-
-      const content = document.createElement("div");
-      content.className = "active-code-content";
-
-      const header = document.createElement("div");
-      header.className = "active-code-header";
+      const row = document.createElement("div");
+      row.id = "code-" + c.code;
+      row.className = "table-row active-code-row";
 
       const label = document.createElement("span");
       label.className = "code-chip";
       label.textContent = c.code;
 
       const lockerBadge = document.createElement("span");
-      lockerBadge.className = "active-code-locker";
-      lockerBadge.textContent = `Skrytka S${c.locker}`;
+      lockerBadge.textContent = `S${c.locker}`;
 
       const deliveryChip = createEmailDeliveryChip(c);
-      const detail = document.createElement("div");
-      detail.className = "active-code-detail";
+      const recipient = document.createElement("span");
 
       if (deliveryChip) {
-        detail.appendChild(deliveryChip);
+        recipient.textContent = deliveryChip.textContent;
+        recipient.title = deliveryChip.title || "";
       } else {
-        const note = document.createElement("span");
-        note.className = "active-code-note";
-        note.textContent = "Kod dostępny tylko w panelu operatora";
-        detail.appendChild(note);
+        recipient.textContent = "Tylko panel";
       }
 
       const timer = document.createElement("span");
       timer.className = "timer";
 
-      const footer = document.createElement("div");
-      footer.className = "active-code-footer";
-
       const actions = document.createElement("div");
-      actions.className = "code-actions";
+      actions.className = "row-actions";
 
       const button = document.createElement("button");
-      button.className = "danger";
-      button.textContent = "Wyłącz";
+      button.className = "danger subtle-danger";
+      button.textContent = "Dezaktywuj";
       button.addEventListener("click", () => deactivate(c.code));
 
       const copyButton = document.createElement("button");
@@ -2327,20 +2483,17 @@ async function loadActiveCodes() {
       copyButton.textContent = "Kopiuj";
       copyButton.addEventListener("click", () => copyTextToClipboard(c.code, `Skopiowano kod ${c.code}.`));
 
-      header.appendChild(label);
-      header.appendChild(lockerBadge);
-      footer.appendChild(timer);
       actions.appendChild(copyButton);
       if (canOperateLockers()) {
         actions.appendChild(button);
       }
-      footer.appendChild(actions);
-      content.appendChild(header);
-      content.appendChild(detail);
-      content.appendChild(footer);
-      layout.appendChild(content);
-      li.appendChild(layout);
-      list.appendChild(li);
+
+      row.appendChild(label);
+      row.appendChild(lockerBadge);
+      row.appendChild(recipient);
+      row.appendChild(timer);
+      row.appendChild(actions);
+      list.appendChild(row);
     });
 
     updateCountdowns();
@@ -2407,34 +2560,57 @@ function addLog(log, options = {}) {
   }
 
   const li = document.createElement("li");
-
-  const time = new Date(log.timestamp).toLocaleString();
   const { text, className } = getLogPresentation(log);
 
-  li.className = className;
-  li.innerHTML = "";
-  const content = document.createElement("div");
-  content.className = "log-entry";
+  li.className = `table-row log-row ${className}`;
 
-  const textNode = document.createElement("span");
-  textNode.className = "log-entry-text";
-  textNode.textContent = `${time} | ${text}`;
+  const time = document.createElement("span");
+  time.textContent = log.timestamp ? formatDateTime(log.timestamp) : "brak daty";
+
+  const event = document.createElement("strong");
+  event.textContent = text;
+
+  const locker = document.createElement("span");
+  locker.textContent = log.locker ? `S${log.locker}` : "-";
+
+  const tagOrCode = document.createElement("span");
+  tagOrCode.className = "tag-mono";
+  tagOrCode.textContent = log.tagId || log.code || "-";
+
+  const actor = document.createElement("span");
+  actor.textContent = log.actor || log.source || "-";
+
+  const status = document.createElement("span");
+  status.className = `status-badge ${className === "log-success" ? "is-success" : className === "log-error" ? "is-error" : className === "log-warning" ? "is-warning" : ""}`;
+  status.textContent = className === "log-success"
+    ? "OK"
+    : className === "log-error"
+      ? "Błąd"
+      : className === "log-warning"
+        ? "Uwaga"
+        : "Info";
 
   const detailsButton = document.createElement("button");
   detailsButton.type = "button";
-  detailsButton.className = "log-details-trigger";
-  detailsButton.textContent = "i";
+  detailsButton.className = "secondary-button log-details-trigger";
+  detailsButton.textContent = "Szczegóły";
   detailsButton.title = "Pokaż szczegóły logu";
   detailsButton.setAttribute("aria-label", "Pokaż szczegóły logu");
   detailsButton.addEventListener("click", () => openLogDetails(log, text));
 
-  content.appendChild(textNode);
-  content.appendChild(detailsButton);
-  li.appendChild(content);
+  li.appendChild(time);
+  li.appendChild(event);
+  li.appendChild(locker);
+  li.appendChild(tagOrCode);
+  li.appendChild(actor);
+  li.appendChild(status);
+  li.appendChild(detailsButton);
   list.prepend(li);
   list.scrollTop = 0;
   if (options.increment !== false) {
     logsCount += 1;
+    recentLogsData = [log, ...recentLogsData].slice(0, 12);
+    renderRecentEvents();
     updateOverviewMetrics();
   }
 }
@@ -2718,6 +2894,8 @@ async function loadLogs() {
   try {
     const logs = await apiFetch(`/logs${getLogQueryString()}`);
     logsCount = logs.length;
+    recentLogsData = logs.slice(0, 12);
+    renderRecentEvents();
 
     if (logs.length === 0) {
       renderEmptyState("logs", "Brak logów do wyświetlenia.");
@@ -2739,6 +2917,8 @@ function getLogQueryString(extra = {}) {
   return buildQueryString({
     event: document.getElementById("logEventFilter")?.value || "",
     locker: document.getElementById("logLockerFilter")?.value || "",
+    from: formatDateTimeInputValue(document.getElementById("logFromFilter")?.value),
+    to: formatDateTimeInputValue(document.getElementById("logToFilter")?.value),
     q: document.getElementById("logSearchInput")?.value || "",
     limit: 120,
     ...extra
@@ -2749,6 +2929,8 @@ function hasActiveLogFilters() {
   return Boolean(
     document.getElementById("logEventFilter")?.value
     || document.getElementById("logLockerFilter")?.value
+    || document.getElementById("logFromFilter")?.value
+    || document.getElementById("logToFilter")?.value
     || document.getElementById("logSearchInput")?.value.trim()
   );
 }
@@ -2776,6 +2958,8 @@ async function loadLogEvents() {
 function resetLogFilters() {
   document.getElementById("logEventFilter").value = "";
   document.getElementById("logLockerFilter").value = "";
+  document.getElementById("logFromFilter").value = "";
+  document.getElementById("logToFilter").value = "";
   document.getElementById("logSearchInput").value = "";
   loadLogs();
 }
@@ -2818,7 +3002,9 @@ async function clearLogs() {
     });
 
     logsCount = 0;
+    recentLogsData = [];
     renderEmptyState("logs", "Brak logów do wyświetlenia.");
+    renderRecentEvents();
     updateOverviewMetrics();
     showToast("Logi zostały wyczyszczone.");
     await loadAlerts();
@@ -2852,6 +3038,8 @@ document.getElementById("rfidItemsSearch").addEventListener("input", renderRfidI
 document.getElementById("panelUsersSearch").addEventListener("input", renderPanelUsers);
 document.getElementById("logEventFilter").addEventListener("change", loadLogs);
 document.getElementById("logLockerFilter").addEventListener("change", loadLogs);
+document.getElementById("logFromFilter").addEventListener("change", loadLogs);
+document.getElementById("logToFilter").addEventListener("change", loadLogs);
 document.getElementById("logSearchInput").addEventListener("input", scheduleLoadLogs);
 document.getElementById("logFilterReset").addEventListener("click", resetLogFilters);
 document.getElementById("exportLogsButton").addEventListener("click", exportLogs);
@@ -2904,7 +3092,7 @@ document.addEventListener("click", event => {
   const drawer = document.getElementById("menuDrawer");
   const menuButton = document.getElementById("menuButton");
 
-  if (drawer.classList.contains("hidden")) {
+  if (!drawer.classList.contains("is-mobile-open")) {
     return;
   }
 
@@ -2921,6 +3109,9 @@ themeMedia.addEventListener("change", () => {
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     closeLogDetails();
+    closeLockerDetails();
+    closeConfirmDialog(false);
+    toggleMenu(false);
   }
 });
 updateGenerateButtonLabel();
