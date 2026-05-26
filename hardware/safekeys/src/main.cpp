@@ -44,8 +44,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "iPhone (Karol)";
-static const char* WIFI_PASSWORD = "123456789";
+static const char* WIFI_SSID = "TP-Link_70FC";
+static const char* WIFI_PASSWORD = "13793814";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -118,7 +118,7 @@ static const uint8_t RFID_SPI_MOSI_PIN = 13;
 static const uint8_t RFID_RST_PIN = 15;
 static const uint8_t RFID_LOCKER_SS_PINS[LOCKER_COUNT] = { 5, 16, 17 };
 static const uint8_t RFID_MASTER_SS_PIN = 32;
-static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_avg;
+static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_max;
 
 static const unsigned long WIFI_RETRY_MS = 5000;
 static const unsigned long WIFI_RETRY_MAX_MS = 60000;
@@ -528,6 +528,9 @@ unsigned long serviceWifiReconnectAtMs = 0;
 bool remoteConfigQueued = false;
 unsigned long nextRemoteConfigFetchMs = 0;
 uint32_t remoteConfigVersion = 0;
+bool remoteLogHttpUnsupported = false;
+bool remoteDiagnosticHttpUnsupported = false;
+bool remoteConfigHttpUnsupported = false;
 uint32_t runtimeHeartbeatIntervalMs = HEARTBEAT_INTERVAL_MS;
 uint32_t runtimeDeviceActionsPollBaseMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
 uint32_t runtimeLockUnlockPulseMs = LOCK_UNLOCK_PULSE_MS;
@@ -2297,6 +2300,7 @@ void startServiceSetupPortal(const char* reason) {
   }
 
   setupApSsid = String("SafeKeys-Setup-") + String(deviceBootId).substring(0, 4);
+  disconnectDeviceWebSocket();
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
@@ -2344,7 +2348,7 @@ void stopServiceSetupPortal() {
 }
 
 void serviceServicePanel(unsigned long now) {
-  if (serviceSetupPortalStartRequested && !serviceSetupPortalActive && !isWifiReady()) {
+  if (serviceSetupPortalStartRequested && !serviceSetupPortalActive) {
     serviceSetupPortalStartRequested = false;
     startServiceSetupPortal(
       serviceSetupPortalRequestedReason[0] != '\0'
@@ -3462,8 +3466,13 @@ void handleSerialDebug() {
           connectWifi();
         }
       } else if (command == "wifi-setup") {
+        Serial.println("Service setup portal requested.");
         requestServiceSetupPortal("serial command");
       } else if (command == "config") {
+        if (remoteConfigHttpUnsupported) {
+          Serial.println("[CONFIG] /device/config unavailable on backend; fetch skipped.");
+          continue;
+        }
         nextRemoteConfigFetchMs = 0;
         maybeFetchRemoteConfig(millis());
       } else if (command == "heartbeat" || command == "h") {
@@ -3859,6 +3868,9 @@ void handleNetworkResult(const NetworkResult& result) {
       if (result.requestOk) {
         applyRemoteConfigResult(result);
         nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_INTERVAL_MS;
+      } else if (remoteConfigHttpUnsupported) {
+        nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_INTERVAL_MS;
+        Serial.println("[CONFIG] /device/config unavailable on backend; HTTP fetch disabled until reboot.");
       } else {
         nextRemoteConfigFetchMs = now + REMOTE_CONFIG_FETCH_RETRY_MS;
         Serial.println("[CONFIG] remote config fetch failed.");
@@ -4691,6 +4703,10 @@ void maybeFetchRemoteConfig(unsigned long now) {
     return;
   }
 
+  if (remoteConfigHttpUnsupported) {
+    return;
+  }
+
   if (!isWifiReady() || isBackgroundNetworkBackoffActive(now)) {
     return;
   }
@@ -5112,6 +5128,10 @@ bool sendDeviceDiagnosticWs(const NetworkJob& job) {
 }
 
 bool postDeviceLog(const NetworkJob& job) {
+  if (remoteLogHttpUnsupported) {
+    return false;
+  }
+
   WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
@@ -5144,12 +5164,20 @@ bool postDeviceLog(const NetworkJob& job) {
 
   if (httpCode < 200 || httpCode >= 300) {
     logHttpFailure("/device/logs", httpCode, secureClient, responseBody);
+    if (httpCode == 404 || httpCode == 405) {
+      remoteLogHttpUnsupported = true;
+      Serial.println("[LOGS] /device/logs unavailable on backend; HTTP log fallback disabled until reboot.");
+    }
   }
 
   return httpCode >= 200 && httpCode < 300;
 }
 
 bool postDeviceDiagnostic(const NetworkJob& job) {
+  if (remoteDiagnosticHttpUnsupported) {
+    return false;
+  }
+
   WiFiClientSecure secureClient;
   HTTPClient http;
   char url[128];
@@ -5185,12 +5213,20 @@ bool postDeviceDiagnostic(const NetworkJob& job) {
 
   if (httpCode < 200 || httpCode >= 300) {
     logHttpFailure("/device/diagnostics", httpCode, secureClient, responseBody);
+    if (httpCode == 404 || httpCode == 405) {
+      remoteDiagnosticHttpUnsupported = true;
+      Serial.println("[DIAG] /device/diagnostics unavailable on backend; HTTP diagnostic fallback disabled until reboot.");
+    }
   }
 
   return httpCode >= 200 && httpCode < 300;
 }
 
 bool fetchRemoteConfigForTask(NetworkResult& result) {
+  if (remoteConfigHttpUnsupported) {
+    return false;
+  }
+
   WiFiClientSecure secureClient;
   HTTPClient http;
   char url[192];
@@ -5210,6 +5246,9 @@ bool fetchRemoteConfigForTask(NetworkResult& result) {
 
   if (httpCode < 200 || httpCode >= 300) {
     logHttpFailure("/device/config", httpCode, secureClient, responseBody);
+    if (httpCode == 404 || httpCode == 405) {
+      remoteConfigHttpUnsupported = true;
+    }
     return false;
   }
 
