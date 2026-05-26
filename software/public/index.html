@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#111113">
+<meta name="theme-color" content="#101012">
 <title>SafeKeys Command Center</title>
 <link rel="icon" type="image/svg+xml" href="/assets/safekeys-logo.svg">
 <link rel="alternate icon" type="image/png" href="/assets/safekeys-logo.png">
@@ -18,7 +18,7 @@
       <img src="/assets/safekeys-logo.svg" alt="SafeKeys logo" class="logo-mark">
       <span class="eyebrow">SafeKeys</span>
       <h1 class="auth-title">Zaloguj się do panelu</h1>
-      <p class="auth-subtitle">Panel operacyjny skrytek, kodów czasowych, RFID i diagnostyki urządzenia.</p>
+      <p class="auth-subtitle">Panel skrytek, kodów czasowych, RFID i diagnostyki.</p>
     </div>
 
     <form id="loginForm" class="auth-form">
@@ -126,7 +126,7 @@
         <div class="page-heading">
           <div>
             <h1>Pulpit</h1>
-            <p>Najważniejszy stan systemu i szybkie akcje operatora.</p>
+            <p>Stan systemu i szybkie akcje operatora.</p>
           </div>
         </div>
 
@@ -178,7 +178,7 @@
             <div class="section-header">
               <div>
                 <h2>Alerty</h2>
-                <p>Priorytetyzowane sygnały operacyjne.</p>
+                <p>Sygnały wymagające uwagi.</p>
               </div>
               <span id="alertsCount" class="count-pill">0</span>
             </div>
@@ -191,7 +191,7 @@
             <div class="section-header">
               <div>
                 <h2>Ostatnie zdarzenia</h2>
-                <p>Najnowsze wpisy z logów systemowych.</p>
+                <p>Najnowsze wpisy systemowe.</p>
               </div>
               <button class="secondary-button" type="button" onclick="setPage('logs')">Otwórz logi</button>
             </div>
@@ -202,7 +202,7 @@
             <div class="section-header">
               <div>
                 <h2>Kolejka ESP32</h2>
-                <p>Ostatnie polecenia wysłane do urządzenia.</p>
+                <p>Ostatnie polecenia do urządzenia.</p>
               </div>
               <span id="dashboardRemoteActionsCount" class="count-pill">0</span>
             </div>
@@ -232,7 +232,7 @@
         <div class="page-heading">
           <div>
             <h1>Dostępy</h1>
-            <p>Kody czasowe, wysyłka e-mail i aktywne uprawnienia.</p>
+            <p>Kody czasowe i aktywne uprawnienia.</p>
           </div>
         </div>
 
@@ -245,7 +245,7 @@
           <div class="card form-card">
             <div class="section-copy">
               <h2>Nowy kod</h2>
-              <p>Wybierz skrytkę i czas ważności dla odbiorcy.</p>
+              <p>Skrytka, czas i opcjonalny e-mail.</p>
             </div>
 
             <div class="form-grid">
@@ -282,7 +282,7 @@
           <div class="card generated-card">
             <div class="section-copy">
               <h2>Ostatni kod</h2>
-              <p>Status ostatniej operacji generowania.</p>
+              <p>Ostatnia operacja generowania.</p>
             </div>
             <div class="generated-output">
               <div class="generated-output-header">
@@ -302,7 +302,7 @@
           <div class="section-header">
             <div>
               <h2>Aktywne dostępy</h2>
-              <p>Kody, które jeszcze nie wygasły.</p>
+              <p>Kody nadal ważne.</p>
             </div>
             <span id="activeCodesCount" class="count-pill">0</span>
           </div>
@@ -323,7 +323,7 @@
         <div class="page-heading">
           <div>
             <h1>Logi</h1>
-            <p>Klasyczna tabela zdarzeń z filtrami i eksportem CSV.</p>
+            <p>Zdarzenia, filtry i eksport CSV.</p>
           </div>
           <div class="page-actions">
             <span id="logsCount" class="count-pill">0</span>
@@ -383,7 +383,7 @@
         <div class="page-heading">
           <div>
             <h1>Użytkownicy RFID</h1>
-            <p>Osoby, ich tagi RFID oraz dostęp do skrytek.</p>
+            <p>Osoby, tagi RFID i skrytki.</p>
           </div>
           <span id="rfidUsersCount" class="count-pill">0</span>
         </div>
@@ -392,7 +392,7 @@
           <div class="card form-card">
             <div class="section-copy">
               <h2>Dodaj użytkownika</h2>
-              <p>Przypisz tag RFID do osoby i skrytek.</p>
+              <p>Tag RFID i zakres dostępu.</p>
             </div>
 
             <form id="rfidUserForm" class="auth-form" data-rfid-admin-only>
@@ -451,7 +451,7 @@
         <div class="page-heading">
           <div>
             <h1>Przedmioty RFID</h1>
-            <p>Znane obiekty rozpoznawane w skrytkach i logach.</p>
+            <p>Obiekty rozpoznawane w skrytkach.</p>
           </div>
           <span id="rfidItemsCount" class="count-pill">0</span>
         </div>
@@ -460,7 +460,7 @@
           <div class="card form-card">
             <div class="section-copy">
               <h2>Dodaj przedmiot</h2>
-              <p>Nazwij UID, żeby logi były czytelne dla operatora.</p>
+              <p>Nazwa, UID i typ.</p>
             </div>
 
             <form id="rfidItemForm" class="auth-form" data-rfid-admin-only>
@@ -525,7 +525,7 @@
         <div class="page-heading">
           <div>
             <h1>Diagnostyka</h1>
-            <p>Techniczny stan API, bazy danych, ESP32 i kolejki poleceń.</p>
+            <p>API, DB, ESP32 i kolejka poleceń.</p>
           </div>
           <button class="secondary-button" type="button" onclick="refreshSystemStatus()">Odśwież status</button>
         </div>
@@ -557,7 +557,7 @@
           <div class="card">
             <div class="section-copy">
               <h2>Urządzenie</h2>
-              <p>Parametry ostatniego heartbeat i transportu.</p>
+              <p>Ostatni heartbeat i transport.</p>
             </div>
             <dl id="diagnosticsList" class="details-list">
               <div><dt>Device ID</dt><dd id="diagnosticDeviceId">brak danych</dd></div>
@@ -575,7 +575,7 @@
             <div class="section-header">
               <div>
                 <h2>Polecenia do ESP32</h2>
-                <p>Historia kolejkowania i potwierdzeń.</p>
+                <p>Kolejka i potwierdzenia.</p>
               </div>
               <div class="inline-actions">
                 <span id="remoteActionsCount" class="count-pill">0</span>
@@ -591,7 +591,7 @@
         <div class="page-heading">
           <div>
             <h1>Administracja</h1>
-            <p>Konta panelu i backup konfiguracji.</p>
+            <p>Konta panelu i backup.</p>
           </div>
           <div class="page-actions">
             <span id="panelUsersCount" class="count-pill">0</span>
@@ -603,7 +603,7 @@
           <div class="card form-card">
             <div class="section-copy">
               <h2>Konto panelu</h2>
-              <p>Dodaj operatora albo zmień rolę istniejącego konta.</p>
+              <p>Operator i rola konta.</p>
             </div>
 
             <form id="panelUserForm" class="auth-form">
