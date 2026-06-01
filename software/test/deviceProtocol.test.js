@@ -178,12 +178,25 @@ test("builds locker status result for firmware LED sync", () => {
         isDoorClosed: true,
         itemStatus: "known",
         detectedItemKnown: true,
-        severity: "ok"
+        severity: "ok",
+        returnActive: true,
+        returnStatus: "WAITING_FOR_ITEM",
+        returnSecondsRemaining: 87
       },
       {
         locker: 2,
         accepted: false,
         reason: "stale_version"
+      },
+      {
+        locker: 3,
+        accepted: true,
+        version: 8,
+        hasTag: false,
+        isDoorClosed: true,
+        itemStatus: "missing",
+        detectedItemKnown: null,
+        severity: "warn"
       }
     ]
   });
@@ -198,7 +211,21 @@ test("builds locker status result for firmware LED sync", () => {
     isDoorClosed: true,
     itemStatus: "known",
     detectedItemKnown: true,
-    severity: "ok"
+    severity: "ok",
+    returnActive: true,
+    returnStatus: "WAITING_FOR_ITEM",
+    returnSecondsRemaining: 87
+  }, {
+    locker: 3,
+    version: 8,
+    hasTag: false,
+    isDoorClosed: true,
+    itemStatus: "missing",
+    detectedItemKnown: null,
+    severity: "warn",
+    returnActive: false,
+    returnStatus: null,
+    returnSecondsRemaining: null
   }]);
 });
 

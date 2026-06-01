@@ -312,7 +312,12 @@ function buildLockerStatusResult(message = {}, state = {}) {
         isDoorClosed: item.isDoorClosed !== false,
         itemStatus: normalizeString(item.itemStatus, null),
         detectedItemKnown: typeof item.detectedItemKnown === "boolean" ? item.detectedItemKnown : null,
-        severity: normalizeString(item.severity, "warn")
+        severity: normalizeString(item.severity, "warn"),
+        returnActive: item.returnActive === true,
+        returnStatus: normalizeString(item.returnStatus, null),
+        returnSecondsRemaining: Number.isFinite(Number(item.returnSecondsRemaining))
+          ? Math.max(0, Math.ceil(Number(item.returnSecondsRemaining)))
+          : null
       }))
       .filter(item => Number.isInteger(item.locker) && item.locker >= 1 && item.locker <= 31)
     : [];

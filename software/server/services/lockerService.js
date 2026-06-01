@@ -242,6 +242,27 @@ function getLockerItemLabel(locker = {}) {
   return "Obcy przedmiot";
 }
 
+function buildReturnLedState(session, now = new Date()) {
+  if (!session || !isActiveReturnSessionStatus(session.status)) {
+    return {
+      returnActive: false,
+      returnStatus: null,
+      returnSecondsRemaining: null
+    };
+  }
+
+  const expiresAtTime = session.expiresAt ? new Date(session.expiresAt).getTime() : 0;
+  const returnSecondsRemaining = expiresAtTime
+    ? Math.max(0, Math.ceil((expiresAtTime - now.getTime()) / 1000))
+    : null;
+
+  return {
+    returnActive: true,
+    returnStatus: session.status,
+    returnSecondsRemaining
+  };
+}
+
 function buildLockerStatePayload(locker = {}) {
   const lockerNumber = Number(locker.locker || locker.lockerId);
   const hasTag = locker.hasTag === true;
@@ -1302,6 +1323,8 @@ class LockerService extends EventEmitter {
       this.emit("log", log);
     }
 
+    await this.decorateAcceptedLockersWithReturnState(accepted, new Date());
+
     for (const event of lockerEvents) {
       this.emit("locker-status-changed", event);
     }
@@ -1831,6 +1854,32 @@ class LockerService extends EventEmitter {
     return this.buildReturnSessionPublic(session);
   }
 
+  async decorateAcceptedLockersWithReturnState(accepted = [], now = new Date()) {
+    const lockerNumbers = [...new Set(accepted
+      .filter(item => item?.accepted !== false && Number.isInteger(Number(item.locker)))
+      .map(item => Number(item.locker)))];
+
+    if (lockerNumbers.length === 0) {
+      return accepted;
+    }
+
+    const sessions = await ReturnSession.find({
+      locker: { $in: lockerNumbers },
+      status: { $in: [...RETURN_ACTIVE_SESSION_STATUSES] }
+    }).sort({ expiresAt: 1 }).lean();
+    const sessionByLocker = new Map(sessions.map(session => [Number(session.locker), session]));
+
+    accepted.forEach(item => {
+      if (item?.accepted === false) {
+        return;
+      }
+
+      Object.assign(item, buildReturnLedState(sessionByLocker.get(Number(item.locker)), now));
+    });
+
+    return accepted;
+  }
+
   async getLockerReaderSnapshot(locker, config = {}) {
     const lockerNumber = Number(locker?.locker || locker?.lockerId);
     const deviceState = await DeviceState.findOne({ deviceId: DEFAULT_DEVICE_ID }).lean();
@@ -2148,6 +2197,9 @@ class LockerService extends EventEmitter {
         reason: "RETURN_ITEM",
         expectedUid: normalizedItem.tagId,
         returnSessionId: String(session._id),
+        returnStatus: "WAITING_FOR_ITEM",
+        returnActive: true,
+        returnTimeoutMs: config.returnSessionTimeoutSeconds * 1000,
         itemId: String(item._id),
         itemName: normalizedItem.name
       },

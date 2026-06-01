@@ -156,6 +156,10 @@ static const unsigned long LED_SYNC_OK_EFFECT_MS = 900;
 static const unsigned long LED_REMOTE_FLASH_MS = 900;
 static const unsigned long LED_TAG_ASSIGNMENT_SUCCESS_MS = 1000;
 static const unsigned long LED_UNKNOWN_TAG_PULSE_MS = 1600;
+static const unsigned long LED_RETURN_WAVE_MS = 1500;
+static const unsigned long LED_RETURN_DEFAULT_MS = 120000;
+static const unsigned long LED_RETURN_MAX_MS = 1800000;
+static const unsigned long LED_RETURN_PANEL_CLEAR_GRACE_MS = 2500;
 static const unsigned long LED_DOOR_BLINK_MS = 500;
 static const unsigned long LED_BACKEND_OFFLINE_PULSE_MS = 1100;
 static const unsigned long LED_ONLINE_BREATH_MS = 2600;
@@ -317,6 +321,13 @@ enum class LockerItemStatus : uint8_t {
   Missing,
   Known,
   UnknownTag
+};
+
+enum class LockerReturnStatus : uint8_t {
+  None,
+  WaitingForItem,
+  ItemDetected,
+  WaitingForDoorClose
 };
 
 enum LedStripEffectKind : uint8_t {
@@ -644,6 +655,19 @@ LockerItemStatus panelLockerItemStatuses[LOCKER_COUNT] = {
   LockerItemStatus::Unknown
 };
 bool panelLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
+LockerReturnStatus panelLockerReturnStatuses[LOCKER_COUNT] = {
+  LockerReturnStatus::None,
+  LockerReturnStatus::None,
+  LockerReturnStatus::None
+};
+uint32_t panelLockerReturnUntilMs[LOCKER_COUNT] = { 0, 0, 0 };
+LockerReturnStatus localLockerReturnStatuses[LOCKER_COUNT] = {
+  LockerReturnStatus::None,
+  LockerReturnStatus::None,
+  LockerReturnStatus::None
+};
+uint32_t localLockerReturnStartedMs[LOCKER_COUNT] = { 0, 0, 0 };
+uint32_t localLockerReturnUntilMs[LOCKER_COUNT] = { 0, 0, 0 };
 bool lockerReaderHealthy[LOCKER_COUNT] = { true, true, true };
 bool masterReaderHealthy = true;
 bool fullStateResyncPending = true;
@@ -825,8 +849,13 @@ LockerLedStatus getLockerLedStatus(uint8_t lockerIndex, const LockerState& state
 LockerLedStatus getProvisionalLockerLedStatus(const LockerState& state);
 bool parseLockerLedStatus(const char* value, LockerLedStatus& status);
 LockerItemStatus parseLockerItemStatus(const char* value);
+LockerReturnStatus parseLockerReturnStatus(const char* value, bool active);
 const char* lockerLedStatusName(LockerLedStatus status);
-bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, const char* severity);
+bool isLockerReturnStatusActive(LockerReturnStatus status);
+bool isReturnLedDeadlineActive(uint32_t deadlineMs, uint32_t nowMs);
+LockerReturnStatus getActiveLockerReturnStatus(uint8_t lockerIndex, uint32_t nowMs, bool panelStatusFresh);
+void startLocalLockerReturnAnimation(uint8_t lockerNumber, LockerReturnStatus status, uint32_t durationMs);
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, LockerReturnStatus returnStatus, uint32_t returnSecondsRemaining, const char* severity);
 uint32_t colorForLockerLedStatus(LockerLedStatus status);
 bool hasAnimatedNormalLedState(uint32_t nowMs);
 bool isStateSyncPending();
@@ -835,6 +864,7 @@ void startLedStripEffect(LedStripEffectKind kind, uint32_t durationMs);
 void startLedSegmentFlash(uint8_t lockerNumber, uint32_t color, uint32_t durationMs);
 void serviceLedTimedEffects(uint32_t nowMs);
 void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, uint32_t nowMs);
+void renderLockerReturnAnimation(const LockerLedSegment& segment, LockerReturnStatus status, uint32_t nowMs);
 void renderStartupLeds(uint32_t nowMs);
 void applyNormalLedOverlays(uint32_t nowMs);
 void applyStateSyncPendingOverlay(uint32_t nowMs);
@@ -918,6 +948,10 @@ void noteLockerReportSuccess(RfidReaderRuntime& runtime, unsigned long now);
 void noteLockerReportFailure(RfidReaderRuntime& runtime, unsigned long now);
 void markAllLockerReportsDirty(unsigned long now, bool resetRetryTimers);
 void markVisualStateDirty();
+
+uint8_t clampBrightness(uint16_t value) {
+  return static_cast<uint8_t>(value > 255 ? 255 : value);
+}
 
 uint32_t colorGreen(uint8_t brightness = STATUS_BRIGHTNESS) {
   return strip.Color(0, brightness, 0);
@@ -2697,6 +2731,8 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
       copyCStringToBuffer(commandPayload["assignmentId"] | "", result.text1, sizeof(result.text1));
       copyCStringToBuffer(commandPayload["tagId"] | "", result.text2, sizeof(result.text2));
       copyCStringToBuffer(commandPayload["itemName"] | "", result.text3, sizeof(result.text3));
+      copyCStringToBuffer(commandPayload["reason"] | "", result.text4, sizeof(result.text4));
+      result.numberValue = commandPayload["returnTimeoutMs"] | 0;
     }
 
     Serial.printf(
@@ -3002,6 +3038,9 @@ void handleLockerStatusResultMessage(JsonDocument& doc) {
     const char* severity = item["severity"] | "";
     const LockerItemStatus itemStatus = parseLockerItemStatus(item["itemStatus"] | "");
     const bool doorClosed = item["isDoorClosed"] | true;
+    const bool returnActive = item["returnActive"] | false;
+    const LockerReturnStatus returnStatus = parseLockerReturnStatus(item["returnStatus"] | "", returnActive);
+    const uint32_t returnSecondsRemaining = static_cast<uint32_t>(item["returnSecondsRemaining"] | 0);
     LockerLedStatus status;
     if (!parseLockerLedStatus(severity, status)) {
       Serial.printf("[LED STATUS] locker=%u ignored reason=unknown_severity value=%s\n",
@@ -3011,7 +3050,7 @@ void handleLockerStatusResultMessage(JsonDocument& doc) {
       continue;
     }
 
-    if (applyPanelLockerLedStatus(lockerNumber, version, status, itemStatus, doorClosed, severity)) {
+    if (applyPanelLockerLedStatus(lockerNumber, version, status, itemStatus, doorClosed, returnStatus, returnSecondsRemaining, severity)) {
       applied += 1;
     }
   }
@@ -4029,16 +4068,25 @@ void handleRemoteCommand(const NetworkResult& result) {
       message = "No matching active tag assignment mode.";
     }
   } else if (strcmp(result.actionType, "OPEN_LOCKER") == 0) {
+    const bool isReturnOpenCommand = strcmp(result.text4, "RETURN_ITEM") == 0;
     if (!pulseUnlockLocker(result.lockerNumber, runtimeLockUnlockPulseMs)) {
       success = false;
       message = "Invalid locker number or relay pulse failed.";
     } else {
       Serial.printf("Remote open command applied for locker S%u.\n", result.lockerNumber);
       if (result.lockerNumber >= 1 && result.lockerNumber <= LOCKER_COUNT) {
-        startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
+        if (isReturnOpenCommand) {
+          const uint32_t durationMs = result.numberValue > 0
+            ? static_cast<uint32_t>(min<long>(result.numberValue, LED_RETURN_MAX_MS))
+            : LED_RETURN_DEFAULT_MS;
+          startLocalLockerReturnAnimation(result.lockerNumber, LockerReturnStatus::WaitingForItem, durationMs);
+          startLedSegmentFlash(result.lockerNumber, colorCyan(190), LED_REMOTE_FLASH_MS);
+        } else {
+          startLedSegmentFlash(result.lockerNumber, colorWhite(190), LED_REMOTE_FLASH_MS);
+        }
       }
       blinkLed(2, 120, 80);
-      message = "Locker relay pulsed.";
+      message = isReturnOpenCommand ? "Locker relay pulsed for return flow." : "Locker relay pulsed.";
     }
   } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
     if (!pulseUnlockLockerMask(allRelayLockersMask())) {
@@ -5554,6 +5602,8 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
       copyCStringToBuffer(payload["assignmentId"] | "", commandResult.text1, sizeof(commandResult.text1));
       copyCStringToBuffer(payload["tagId"] | "", commandResult.text2, sizeof(commandResult.text2));
       copyCStringToBuffer(payload["itemName"] | "", commandResult.text3, sizeof(commandResult.text3));
+      copyCStringToBuffer(payload["reason"] | "", commandResult.text4, sizeof(commandResult.text4));
+      commandResult.numberValue = payload["returnTimeoutMs"] | 0;
     }
 
     if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &commandResult, 0) != pdTRUE) {
@@ -5650,6 +5700,7 @@ void printUsage() {
   Serial.println("  - red    -> error: unknown tag or missing key with open locker");
   Serial.println("  - red pulse -> unknown RFID item in locker");
   Serial.println("  - yellow/red blink -> open locker according to panel severity");
+  Serial.println("  - cyan/green wave -> return flow active for locker");
   Serial.println("  - blue breath -> backend WebSocket online");
   Serial.println("  - red dotted pulse -> backend/WiFi offline");
   Serial.println("  - cyan sweep -> state synchronized with panel");
@@ -6032,6 +6083,30 @@ LockerItemStatus parseLockerItemStatus(const char* value) {
   return LockerItemStatus::Unknown;
 }
 
+LockerReturnStatus parseLockerReturnStatus(const char* value, bool active) {
+  if (!active) {
+    return LockerReturnStatus::None;
+  }
+
+  if (value == nullptr || strlen(value) == 0) {
+    return LockerReturnStatus::WaitingForItem;
+  }
+
+  if (strcmp(value, "WAITING_FOR_ITEM") == 0 || strcmp(value, "RETURN_PENDING") == 0 || strcmp(value, "waiting") == 0) {
+    return LockerReturnStatus::WaitingForItem;
+  }
+
+  if (strcmp(value, "ITEM_DETECTED") == 0 || strcmp(value, "detected") == 0) {
+    return LockerReturnStatus::ItemDetected;
+  }
+
+  if (strcmp(value, "WAITING_FOR_DOOR_CLOSE") == 0 || strcmp(value, "door_wait") == 0) {
+    return LockerReturnStatus::WaitingForDoorClose;
+  }
+
+  return LockerReturnStatus::WaitingForItem;
+}
+
 const char* lockerLedStatusName(LockerLedStatus status) {
   switch (status) {
     case LockerLedStatus::Ok:
@@ -6044,7 +6119,56 @@ const char* lockerLedStatusName(LockerLedStatus status) {
   }
 }
 
-bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, const char* severity) {
+bool isLockerReturnStatusActive(LockerReturnStatus status) {
+  return status != LockerReturnStatus::None;
+}
+
+bool isReturnLedDeadlineActive(uint32_t deadlineMs, uint32_t nowMs) {
+  return deadlineMs != 0 && static_cast<int32_t>(deadlineMs - nowMs) > 0;
+}
+
+LockerReturnStatus getActiveLockerReturnStatus(uint8_t lockerIndex, uint32_t nowMs, bool panelStatusFresh) {
+  if (lockerIndex >= LOCKER_COUNT) {
+    return LockerReturnStatus::None;
+  }
+
+  if (
+    panelStatusFresh &&
+    isLockerReturnStatusActive(panelLockerReturnStatuses[lockerIndex]) &&
+    isReturnLedDeadlineActive(panelLockerReturnUntilMs[lockerIndex], nowMs)
+  ) {
+    return panelLockerReturnStatuses[lockerIndex];
+  }
+
+  if (
+    isLockerReturnStatusActive(localLockerReturnStatuses[lockerIndex]) &&
+    isReturnLedDeadlineActive(localLockerReturnUntilMs[lockerIndex], nowMs)
+  ) {
+    return localLockerReturnStatuses[lockerIndex];
+  }
+
+  return LockerReturnStatus::None;
+}
+
+void startLocalLockerReturnAnimation(uint8_t lockerNumber, LockerReturnStatus status, uint32_t durationMs) {
+  if (lockerNumber < 1 || lockerNumber > LOCKER_COUNT) {
+    return;
+  }
+
+  const uint8_t index = lockerNumber - 1;
+  const uint32_t safeDuration = durationMs == 0
+    ? LED_RETURN_DEFAULT_MS
+    : static_cast<uint32_t>(min<uint32_t>(durationMs, LED_RETURN_MAX_MS));
+  localLockerReturnStatuses[index] = isLockerReturnStatusActive(status)
+    ? status
+    : LockerReturnStatus::WaitingForItem;
+  const uint32_t nowMs = millis();
+  localLockerReturnStartedMs[index] = nowMs;
+  localLockerReturnUntilMs[index] = nowMs + safeDuration;
+  markVisualStateDirty();
+}
+
+bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLedStatus status, LockerItemStatus itemStatus, bool doorClosed, LockerReturnStatus returnStatus, uint32_t returnSecondsRemaining, const char* severity) {
   if (lockerNumber < 1 || lockerNumber > LOCKER_COUNT) {
     return false;
   }
@@ -6064,12 +6188,35 @@ bool applyPanelLockerLedStatus(uint8_t lockerNumber, uint32_t version, LockerLed
   panelLockerLedStatuses[index] = status;
   panelLockerItemStatuses[index] = itemStatus;
   panelLockerDoorClosed[index] = doorClosed;
+  panelLockerReturnStatuses[index] = returnStatus;
+  const uint32_t nowMs = millis();
+  if (isLockerReturnStatusActive(returnStatus)) {
+    const uint32_t durationMs = returnSecondsRemaining > 0
+      ? static_cast<uint32_t>(min<uint32_t>((returnSecondsRemaining + 2UL) * 1000UL, LED_RETURN_MAX_MS))
+      : LED_RETURN_DEFAULT_MS;
+    panelLockerReturnUntilMs[index] = nowMs + durationMs;
+    localLockerReturnStatuses[index] = returnStatus;
+    localLockerReturnStartedMs[index] = nowMs;
+    localLockerReturnUntilMs[index] = panelLockerReturnUntilMs[index];
+  } else {
+    const bool keepRecentLocalReturn =
+      isLockerReturnStatusActive(localLockerReturnStatuses[index]) &&
+      localLockerReturnStartedMs[index] != 0 &&
+      nowMs - localLockerReturnStartedMs[index] < LED_RETURN_PANEL_CLEAR_GRACE_MS;
+    panelLockerReturnUntilMs[index] = 0;
+    if (!keepRecentLocalReturn) {
+      localLockerReturnStatuses[index] = LockerReturnStatus::None;
+      localLockerReturnStartedMs[index] = 0;
+      localLockerReturnUntilMs[index] = 0;
+    }
+  }
   panelLockerLedStatusKnown[index] = true;
   panelLockerLedStatusVersions[index] = currentVersion;
-  Serial.printf("[LED STATUS] locker=%u severity=%s color=%s version=%lu source=panel\n",
+  Serial.printf("[LED STATUS] locker=%u severity=%s color=%s return=%s version=%lu source=panel\n",
     lockerNumber,
     severity != nullptr && strlen(severity) > 0 ? severity : lockerLedStatusName(status),
     lockerLedStatusName(status),
+    isLockerReturnStatusActive(returnStatus) ? "active" : "none",
     static_cast<unsigned long>(currentVersion)
   );
   return true;
@@ -6088,7 +6235,6 @@ uint32_t colorForLockerLedStatus(LockerLedStatus status) {
 }
 
 bool hasAnimatedNormalLedState(uint32_t nowMs) {
-  (void) nowMs;
   if (
     ledStripEffect.active ||
     ledSegmentFlashEffect.active ||
@@ -6102,12 +6248,16 @@ bool hasAnimatedNormalLedState(uint32_t nowMs) {
   }
 
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const bool panelStatusFresh = panelLockerLedStatusKnown[i] &&
+      panelLockerLedStatusVersions[i] == lockerStateVersions[i];
     if (!lockerReaderHealthy[i]) {
       return true;
     }
+    if (isLockerReturnStatusActive(getActiveLockerReturnStatus(i, nowMs, panelStatusFresh))) {
+      return true;
+    }
     if (
-      panelLockerLedStatusKnown[i] &&
-      panelLockerLedStatusVersions[i] == lockerStateVersions[i] &&
+      panelStatusFresh &&
       (panelLockerItemStatuses[i] == LockerItemStatus::UnknownTag || !panelLockerDoorClosed[i])
     ) {
       return true;
@@ -6164,6 +6314,27 @@ void serviceLedTimedEffects(uint32_t nowMs) {
     panelStatusResultPending = false;
     panelStatusResultPendingStartedMs = 0;
     changed = true;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    if (
+      isLockerReturnStatusActive(panelLockerReturnStatuses[i]) &&
+      !isReturnLedDeadlineActive(panelLockerReturnUntilMs[i], nowMs)
+    ) {
+      panelLockerReturnStatuses[i] = LockerReturnStatus::None;
+      panelLockerReturnUntilMs[i] = 0;
+      changed = true;
+    }
+
+    if (
+      isLockerReturnStatusActive(localLockerReturnStatuses[i]) &&
+      !isReturnLedDeadlineActive(localLockerReturnUntilMs[i], nowMs)
+    ) {
+      localLockerReturnStatuses[i] = LockerReturnStatus::None;
+      localLockerReturnStartedMs[i] = 0;
+      localLockerReturnUntilMs[i] = 0;
+      changed = true;
+    }
   }
 
   if (changed) {
@@ -6610,6 +6781,48 @@ void clearSegment(const LockerLedSegment& segment) {
   fillSegment(segment, 0);
 }
 
+void renderLockerReturnAnimation(const LockerLedSegment& segment, LockerReturnStatus status, uint32_t nowMs) {
+  if (!segment.valid || segment.length == 0) {
+    return;
+  }
+
+  const uint32_t cycle = nowMs % LED_RETURN_WAVE_MS;
+  const uint16_t head = static_cast<uint16_t>((cycle * segment.length) / LED_RETURN_WAVE_MS);
+  const uint8_t tail = segment.length > 6 ? 3 : 2;
+
+  for (uint16_t led = segment.start; led <= segment.end; led += 1) {
+    const uint16_t offset = led - segment.start;
+    const uint16_t forward = offset > head ? offset - head : head - offset;
+    const uint16_t wrapped = segment.length > forward ? segment.length - forward : forward;
+    const uint16_t distance = min<uint16_t>(forward, wrapped);
+    uint8_t wave = 0;
+
+    if (distance == 0) {
+      wave = 150;
+    } else if (distance <= tail) {
+      wave = static_cast<uint8_t>(150 - ((distance * 95) / tail));
+    }
+
+    uint8_t red = 0;
+    uint8_t green = 0;
+    uint8_t blue = 0;
+
+    if (status == LockerReturnStatus::WaitingForDoorClose) {
+      red = clampBrightness(22 + wave / 3);
+      green = clampBrightness(48 + wave);
+      blue = clampBrightness(8 + wave / 5);
+    } else if (status == LockerReturnStatus::ItemDetected) {
+      green = clampBrightness(58 + wave);
+      blue = clampBrightness(18 + wave / 3);
+    } else {
+      green = clampBrightness(34 + wave);
+      blue = clampBrightness(42 + wave);
+    }
+
+    strip.setPixelColor(led, strip.Color(red, green, blue));
+  }
+}
+
 void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, uint32_t nowMs) {
   const LockerLedSegment segment = getLockerLedSegment(lockerIndex + 1);
   if (!segment.valid) {
@@ -6629,6 +6842,12 @@ void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, ui
     && panelLockerLedStatusVersions[lockerIndex] == lockerStateVersions[lockerIndex];
   const LockerLedStatus ledStatus = getLockerLedStatus(lockerIndex, state);
   const uint32_t statusColor = colorForLockerLedStatus(ledStatus);
+  const LockerReturnStatus returnStatus = getActiveLockerReturnStatus(lockerIndex, nowMs, panelStatusFresh);
+
+  if (isLockerReturnStatusActive(returnStatus)) {
+    renderLockerReturnAnimation(segment, returnStatus, nowMs);
+    return;
+  }
 
   if (panelStatusFresh && panelLockerItemStatuses[lockerIndex] == LockerItemStatus::UnknownTag) {
     const uint32_t phase = nowMs % LED_UNKNOWN_TAG_PULSE_MS;
@@ -7469,6 +7688,11 @@ void markLockerStateChanged(RfidReaderRuntime& runtime, unsigned long now) {
     }
     panelLockerLedStatusKnown[index] = false;
     panelLockerLedStatusVersions[index] = version;
+    if (runtime.stableUid.length() > 0 && runtime.missingSeenCount == 0) {
+      localLockerReturnStatuses[index] = LockerReturnStatus::None;
+      localLockerReturnStartedMs[index] = 0;
+      localLockerReturnUntilMs[index] = 0;
+    }
   }
   nextDeviceStateBatchAttemptMs = 0;
   markLockerReportDirty(runtime, now);
