@@ -930,11 +930,14 @@ dl {
 
 .rfid-users-head,
 .rfid-user-row,
-.rfid-items-head,
-.rfid-item-row,
 .panel-users-head,
 .panel-user-row {
   grid-template-columns: minmax(170px, 1fr) minmax(160px, 0.9fr) minmax(130px, 0.8fr) minmax(150px, 0.8fr) minmax(140px, 0.7fr);
+}
+
+.rfid-items-head,
+.rfid-item-row {
+  grid-template-columns: minmax(160px, 1fr) minmax(140px, 0.78fr) minmax(115px, 0.6fr) minmax(90px, 0.45fr) minmax(135px, 0.72fr) minmax(130px, 0.68fr) minmax(145px, 0.72fr);
 }
 
 .status-badge {
@@ -992,6 +995,7 @@ dl {
 .compact-locker-list,
 .alerts-list,
 .remote-actions-list,
+.return-sessions-list,
 .recent-events-list {
   display: grid;
   gap: 8px;
@@ -1000,6 +1004,7 @@ dl {
 .compact-locker-item,
 .alert-item,
 .remote-action-item,
+.return-session-item,
 .recent-event-item {
   display: grid;
   gap: 4px;
@@ -1033,6 +1038,7 @@ dl {
 
 .compact-locker-meta,
 .remote-action-main,
+.return-session-main,
 .recent-event-main {
   display: grid;
   gap: 3px;
@@ -1040,6 +1046,7 @@ dl {
 
 .compact-locker-meta span,
 .remote-action-main span,
+.return-session-main span,
 .recent-event-main span,
 .alert-item span,
 .alert-item small {
@@ -1088,6 +1095,12 @@ dl {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 650;
+}
+
+.return-session-item {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-left: 3px solid var(--blue);
 }
 
 .recent-event-item {

@@ -190,6 +190,17 @@
           <div class="card">
             <div class="section-header">
               <div>
+                <h2>Trwa zwrot</h2>
+                <p>Aktywne sesje oczekujące na RFID w skrytce.</p>
+              </div>
+              <span id="activeReturnsCount" class="count-pill">0</span>
+            </div>
+            <div id="activeReturnsList" class="return-sessions-list"></div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <div>
                 <h2>Ostatnie zdarzenia</h2>
                 <p>Najnowsze wpisy systemowe.</p>
               </div>
@@ -460,7 +471,7 @@
           <div class="card form-card">
             <div class="section-copy">
               <h2>Dodaj przedmiot</h2>
-              <p>Nazwa, UID i typ.</p>
+              <p>Nazwa, UID, skrytka i stan operacyjny.</p>
             </div>
 
             <form id="rfidItemForm" class="auth-form" data-rfid-admin-only>
@@ -485,6 +496,25 @@
                   <option value="inne">Inne</option>
                   <option value="klucz_master" data-master-option>Klucz master</option>
                   <option value="karta_master" data-master-option>Karta master</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Przypisana skrytka</span>
+                <select id="rfidItemAssignedLocker" required>
+                  <option value="">Wybierz skrytkę</option>
+                  <option value="1">Skrytka S1</option>
+                  <option value="2">Skrytka S2</option>
+                  <option value="3">Skrytka S3</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Status</span>
+                <select id="rfidItemStatus" required>
+                  <option value="UNKNOWN">Nieznany</option>
+                  <option value="IN_LOCKER">W skrytce</option>
+                  <option value="CHECKED_OUT">Wydany</option>
+                  <option value="RETURN_PENDING">Zwrot w toku</option>
+                  <option value="CONFLICT">Konflikt</option>
                 </select>
               </label>
               <button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
@@ -512,7 +542,9 @@
                 <span>Nazwa</span>
                 <span>UID</span>
                 <span>Typ</span>
+                <span>Skrytka</span>
                 <span>Status</span>
+                <span>Ostatni ruch</span>
                 <span>Akcje</span>
               </div>
               <div id="rfidItemsList" class="table-body"></div>
@@ -569,6 +601,33 @@
               <div><dt>Wolna pamięć</dt><dd id="diagnosticHeap">brak danych</dd></div>
               <div><dt>RSSI WiFi</dt><dd id="diagnosticRssi">brak danych</dd></div>
             </dl>
+          </div>
+
+          <div class="card">
+            <div class="section-copy">
+              <h2>Tryb hardware</h2>
+              <p>Warunki potwierdzania zwrotu.</p>
+            </div>
+            <dl class="details-list">
+              <div><dt>Kontaktrony</dt><dd id="diagnosticDoorSensors">wyłączone</dd></div>
+              <div><dt>Potwierdzanie zwrotu</dt><dd id="diagnosticReturnMode">RFID only</dd></div>
+              <div><dt>Timeout zwrotu</dt><dd id="diagnosticReturnTimeout">120 s</dd></div>
+              <div><dt>Master reader</dt><dd id="diagnosticMasterReader">brak danych</dd></div>
+            </dl>
+            <p class="field-help">Kontaktrony są wyłączone. Zwroty są potwierdzane wyłącznie przez RFID w skrytce.</p>
+          </div>
+        </div>
+
+        <div class="split-grid">
+          <div class="card">
+            <div class="section-header">
+              <div>
+                <h2>Sesje zwrotu</h2>
+                <p>Aktywne oczekiwanie na przedmiot.</p>
+              </div>
+              <button class="secondary-button" type="button" onclick="loadReturnSessions()">Odśwież</button>
+            </div>
+            <div id="diagnosticReturnsList" class="return-sessions-list"></div>
           </div>
 
           <div class="card">

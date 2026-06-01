@@ -25,6 +25,12 @@ const DEFAULT_DEVICE_CONFIG = {
   },
   diagnostics: {
     enabled: true
+  },
+  returns: {
+    doorSensorsEnabled: false,
+    returnSessionTimeoutSeconds: 120,
+    readerFreshnessMs: 180000,
+    masterScanDebounceMs: 3000
   }
 };
 
@@ -82,6 +88,9 @@ function normalizeDeviceConfig(config = {}) {
   const diagnostics = typeof source.diagnostics === "object" && source.diagnostics !== null
     ? source.diagnostics
     : {};
+  const returns = typeof source.returns === "object" && source.returns !== null
+    ? source.returns
+    : {};
 
   const minLevel = normalizeString(remoteLogging.minLevel, defaultConfig.remoteLogging.minLevel).toLowerCase();
 
@@ -107,6 +116,18 @@ function normalizeDeviceConfig(config = {}) {
     },
     diagnostics: {
       enabled: normalizeBoolean(diagnostics.enabled, defaultConfig.diagnostics.enabled)
+    },
+    returns: {
+      // Faza testowa bez kontaktronów: zwrot potwierdza wyłącznie RFID w skrytce.
+      doorSensorsEnabled: normalizeBoolean(returns.doorSensorsEnabled, defaultConfig.returns.doorSensorsEnabled),
+      returnSessionTimeoutSeconds: clampNumber(
+        returns.returnSessionTimeoutSeconds,
+        defaultConfig.returns.returnSessionTimeoutSeconds,
+        30,
+        1800
+      ),
+      readerFreshnessMs: clampNumber(returns.readerFreshnessMs, defaultConfig.returns.readerFreshnessMs, 10000, 900000),
+      masterScanDebounceMs: clampNumber(returns.masterScanDebounceMs, defaultConfig.returns.masterScanDebounceMs, 1000, 10000)
     }
   };
 }

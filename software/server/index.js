@@ -41,6 +41,7 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const DEVICE_STATUS_BROADCAST_INTERVAL_MS = 30000;
+const RETURN_SESSION_EXPIRY_INTERVAL_MS = 15000;
 
 if (!MONGODB_URI) {
   throw new Error("Brakuje zmiennej środowiskowej MONGODB_URI.");
@@ -190,19 +191,21 @@ function buildSystemStatus() {
   return {
     serverTime: new Date().toISOString(),
     database: getDatabaseStatus(),
-    esp32: getEsp32Status()
+    esp32: getEsp32Status(),
+    returns: lockerService.getReturnRuntimeConfig()
   };
 }
 
 async function buildOperationalAlerts() {
-  const [lockers, activeCodes, invalidLogs] = await Promise.all([
+  const [lockers, activeCodes, invalidLogs, returnAlerts] = await Promise.all([
     lockerService.getLockers(),
     lockerService.getActiveCodes(),
     lockerService.getLogs({
       event: "INVALID_CODE",
       from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
       limit: 8
-    })
+    }),
+    lockerService.getReturnAlerts()
   ]);
   const status = buildSystemStatus();
   const alerts = [];
@@ -264,7 +267,7 @@ async function buildOperationalAlerts() {
     });
   }
 
-  return alerts;
+  return [...returnAlerts, ...alerts];
 }
 
 const loginRateLimit = createRateLimit({
@@ -350,6 +353,10 @@ lockerService.on("device-config-updated", config => {
   io.emit("device-config-updated", config);
 });
 
+lockerService.on("return-session-changed", session => {
+  io.emit("return-session-changed", session);
+});
+
 app.use(express.static(PUBLIC_DIR));
 
 app.get("/", (req, res) => {
@@ -422,6 +429,10 @@ app.use([
   "/users",
   "/rfid-items",
   "/rfid-items/tag-assignment",
+  "/rfid/master-scan",
+  "/api/rfid/master-scan",
+  "/returns",
+  "/api/returns",
   "/panel-users",
   "/active-codes",
   "/logs",
@@ -439,6 +450,10 @@ app.use([
   "/release-all-lockers",
   "/users",
   "/rfid-items",
+  "/rfid/master-scan",
+  "/api/rfid/master-scan",
+  "/returns",
+  "/api/returns",
   "/panel-users",
   "/device/config/admin",
   "/logs/clear"
@@ -453,6 +468,37 @@ app.post("/verify-code", requireDeviceKey, asyncHandler(async (req, res) => {
 app.post("/verify-tag", requireDeviceKey, asyncHandler(async (req, res) => {
   const { tagId } = req.body;
   const result = await lockerService.verifyRfidTag(tagId, { source: "rfid-user" });
+  res.json(result);
+}));
+
+async function handleMasterScanRequest(req, res) {
+  const result = await lockerService.handleMasterRfidScan({
+    uid: req.body.uid || req.body.tagId,
+    readerId: req.body.readerId || "MASTER"
+  }, {
+    source: "web",
+    actor: getSessionActor(req),
+    userId: req.session?.userId || null,
+    sourceReader: req.body.readerId || "MASTER"
+  });
+
+  res.status(result.ok === false ? 200 : 201).json(result);
+}
+
+app.post("/rfid/master-scan", requireRoles("master", "admin", "operator"), asyncHandler(handleMasterScanRequest));
+app.post("/api/rfid/master-scan", requireRoles("master", "admin", "operator"), asyncHandler(handleMasterScanRequest));
+
+app.post("/device/rfid/master-scan", requireDeviceKey, asyncHandler(async (req, res) => {
+  const result = await lockerService.handleMasterRfidScan({
+    uid: req.body.uid || req.body.tagId,
+    readerId: req.body.readerId || "MASTER"
+  }, {
+    source: "device",
+    actor: req.body.deviceId || "esp32",
+    deviceId: req.body.deviceId,
+    sourceReader: req.body.readerId || "MASTER"
+  });
+
   res.json(result);
 }));
 
@@ -505,6 +551,41 @@ app.get("/lockers", asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
+async function listActiveReturns(req, res) {
+  const [sessions, config] = await Promise.all([
+    lockerService.getActiveReturnSessions(),
+    lockerService.getReturnConfig()
+  ]);
+
+  res.json({
+    sessions,
+    config
+  });
+}
+
+app.get("/returns/active", asyncHandler(listActiveReturns));
+app.get("/api/returns/active", asyncHandler(listActiveReturns));
+
+async function getReturnSession(req, res) {
+  res.json(await lockerService.getReturnSession(req.params.id));
+}
+
+app.get("/returns/:id", asyncHandler(getReturnSession));
+app.get("/api/returns/:id", asyncHandler(getReturnSession));
+
+async function cancelReturnSession(req, res) {
+  const result = await lockerService.cancelReturnSession(req.params.id, {
+    source: "web",
+    actor: getSessionActor(req),
+    reason: req.body?.reason || "MANUAL_CANCEL"
+  });
+
+  res.json(result);
+}
+
+app.post("/returns/:id/cancel", requireRoles("master", "admin", "operator"), asyncHandler(cancelReturnSession));
+app.post("/api/returns/:id/cancel", requireRoles("master", "admin", "operator"), asyncHandler(cancelReturnSession));
+
 app.get("/users", asyncHandler(async (req, res) => {
   const users = await lockerService.getRfidUsers();
   res.json(users);
@@ -536,7 +617,9 @@ app.post("/rfid-items", requireRoles("master", "admin"), asyncHandler(async (req
   const result = await lockerService.createRfidItem({
     name: req.body.name,
     tagId: req.body.tagId,
-    itemType: req.body.itemType
+    itemType: req.body.itemType,
+    assignedLocker: req.body.assignedLocker ?? req.body.assigned_locker_id,
+    status: req.body.status
   }, {
     source: "web",
     actor: getSessionActor(req),
@@ -598,7 +681,9 @@ app.put("/rfid-items/:itemId", requireRoles("master", "admin"), asyncHandler(asy
   const result = await lockerService.updateRfidItem(req.params.itemId, {
     name: req.body.name,
     tagId: req.body.tagId,
-    itemType: req.body.itemType
+    itemType: req.body.itemType,
+    assignedLocker: req.body.assignedLocker ?? req.body.assigned_locker_id,
+    status: req.body.status
   }, {
     source: "web",
     actor: getSessionActor(req),
@@ -884,6 +969,11 @@ async function startServer() {
     console.log("Połączono z MongoDB ✅");
     await lockerService.hydrateRuntimeState();
     await panelUserService.ensureSeededFromEnv();
+    setInterval(() => {
+      lockerService.expireReturnSessions().catch(error => {
+        console.error("Nie udało się wygasić sesji zwrotu.", error);
+      });
+    }, RETURN_SESSION_EXPIRY_INTERVAL_MS);
 
     server.listen(PORT, HOST, () => {
       console.log(`Server działa na ${HOST}:${PORT}`);

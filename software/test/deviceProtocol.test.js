@@ -100,7 +100,13 @@ test("normalizes remote device config with guarded ranges", () => {
     lockPulseMs: 9000,
     remoteLogging: { enabled: false, minLevel: "WARN" },
     codeRateLimit: { maxFailures: 0, windowMs: 10, lockoutMs: 2000 },
-    servicePanel: { enabled: false }
+    servicePanel: { enabled: false },
+    returns: {
+      doorSensorsEnabled: true,
+      returnSessionTimeoutSeconds: 5,
+      readerFreshnessMs: 1,
+      masterScanDebounceMs: 50000
+    }
   });
 
   assert.equal(config.heartbeatIntervalMs, 10000);
@@ -111,6 +117,10 @@ test("normalizes remote device config with guarded ranges", () => {
   assert.equal(config.codeRateLimit.windowMs, 30000);
   assert.equal(config.codeRateLimit.lockoutMs, 5000);
   assert.equal(config.servicePanel.enabled, false);
+  assert.equal(config.returns.doorSensorsEnabled, true);
+  assert.equal(config.returns.returnSessionTimeoutSeconds, 30);
+  assert.equal(config.returns.readerFreshnessMs, 10000);
+  assert.equal(config.returns.masterScanDebounceMs, 10000);
 });
 
 test("builds device config response for firmware", () => {
@@ -125,6 +135,8 @@ test("builds device config response for firmware", () => {
   assert.equal(response.deviceId, "esp32-test");
   assert.equal(response.configVersion, 12);
   assert.equal(response.config.lockPulseMs, 900);
+  assert.equal(response.config.returns.doorSensorsEnabled, false);
+  assert.equal(response.config.returns.returnSessionTimeoutSeconds, 120);
 });
 
 test("normalizes device log and diagnostic payloads", () => {

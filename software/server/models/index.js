@@ -1,5 +1,17 @@
 const mongoose = require("mongoose");
 
+const RFID_ITEM_STATUSES = ["IN_LOCKER", "CHECKED_OUT", "RETURN_PENDING", "UNKNOWN", "CONFLICT"];
+const RETURN_SESSION_STATUSES = [
+  "WAITING_FOR_ITEM",
+  "ITEM_DETECTED",
+  "WAITING_FOR_DOOR_CLOSE",
+  "COMPLETED",
+  "MISMATCH",
+  "EXPIRED",
+  "CANCELLED",
+  "BLOCKED"
+];
+
 const CodeSchema = new mongoose.Schema({
   code: {
     type: String,
@@ -440,6 +452,24 @@ const RfidItemSchema = new mongoose.Schema({
     required: true,
     enum: ["brelok", "karta", "inne", "klucz_master", "karta_master"]
   },
+  assignedLocker: {
+    type: Number,
+    default: null,
+    min: 1
+  },
+  status: {
+    type: String,
+    enum: RFID_ITEM_STATUSES,
+    default: "UNKNOWN"
+  },
+  lastSeenAt: {
+    type: Date,
+    default: null
+  },
+  lastMovementAt: {
+    type: Date,
+    default: null
+  },
   active: {
     type: Boolean,
     default: true
@@ -453,6 +483,91 @@ const RfidItemSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+RfidItemSchema.index({ assignedLocker: 1 });
+RfidItemSchema.index({ status: 1 });
+
+const ReturnSessionSchema = new mongoose.Schema({
+  itemId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "RfidItem",
+    required: true
+  },
+  locker: {
+    type: Number,
+    required: true,
+    min: 1
+  },
+  expectedUid: {
+    type: String,
+    required: true,
+    uppercase: true,
+    trim: true
+  },
+  detectedUid: {
+    type: String,
+    default: null,
+    uppercase: true,
+    trim: true
+  },
+  itemName: {
+    type: String,
+    default: null,
+    trim: true
+  },
+  status: {
+    type: String,
+    required: true,
+    enum: RETURN_SESSION_STATUSES,
+    default: "WAITING_FOR_ITEM"
+  },
+  startedAt: {
+    type: Date,
+    default: Date.now
+  },
+  expiresAt: {
+    type: Date,
+    required: true
+  },
+  completedAt: {
+    type: Date,
+    default: null
+  },
+  failedAt: {
+    type: Date,
+    default: null
+  },
+  failureReason: {
+    type: String,
+    default: null
+  },
+  initiatedByUserId: {
+    type: String,
+    default: null
+  },
+  initiatedByUid: {
+    type: String,
+    default: null,
+    uppercase: true,
+    trim: true
+  },
+  sourceReader: {
+    type: String,
+    default: "MASTER",
+    trim: true
+  },
+  commandId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "DeviceCommand",
+    default: null
+  }
+}, {
+  timestamps: true
+});
+
+ReturnSessionSchema.index({ itemId: 1, status: 1 });
+ReturnSessionSchema.index({ locker: 1, status: 1 });
+ReturnSessionSchema.index({ status: 1, expiresAt: 1 });
 
 const PanelUserSchema = new mongoose.Schema({
   username: {
@@ -500,6 +615,7 @@ const DeviceState = mongoose.models.DeviceState || mongoose.model("DeviceState",
 const DeviceMessageReceipt = mongoose.models.DeviceMessageReceipt || mongoose.model("DeviceMessageReceipt", DeviceMessageReceiptSchema);
 const RfidUser = mongoose.models.RfidUser || mongoose.model("RfidUser", RfidUserSchema);
 const RfidItem = mongoose.models.RfidItem || mongoose.model("RfidItem", RfidItemSchema);
+const ReturnSession = mongoose.models.ReturnSession || mongoose.model("ReturnSession", ReturnSessionSchema);
 const PanelUser = mongoose.models.PanelUser || mongoose.model("PanelUser", PanelUserSchema);
 
 module.exports = {
@@ -512,5 +628,8 @@ module.exports = {
   Locker,
   RfidUser,
   RfidItem,
+  RFID_ITEM_STATUSES,
+  ReturnSession,
+  RETURN_SESSION_STATUSES,
   PanelUser
 };

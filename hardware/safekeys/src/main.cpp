@@ -36,7 +36,7 @@
   - debug po UART i czytelne logi zdarzeń
   - obsługa kodów z keypadu
   - raportowanie obecności tagów w skrytkach do backendu
-  - obsługa master RFID przez /verify-tag
+  - obsługa master RFID przez /verify-tag i return.master-scan
   - polling /device/actions dla pełnego testowania integracji backend <-> ESP32
 
   Uwaga:
@@ -118,7 +118,7 @@ static const uint8_t RFID_SPI_MOSI_PIN = 13;
 static const uint8_t RFID_RST_PIN = 15;
 static const uint8_t RFID_LOCKER_SS_PINS[LOCKER_COUNT] = { 5, 16, 17 };
 static const uint8_t RFID_MASTER_SS_PIN = 32;
-static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_max;
+static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_avg;
 
 static const unsigned long WIFI_RETRY_MS = 5000;
 static const unsigned long WIFI_RETRY_MAX_MS = 60000;
@@ -381,6 +381,7 @@ enum class NetworkJobType : uint8_t {
   DeviceActionsPoll,
   VerifyCode,
   VerifyMasterTag,
+  ReturnMasterScan,
   AccessSelectionEvent,
   TagAssignmentResult,
   DeviceLog,
@@ -727,6 +728,7 @@ bool sendDeviceCommandAckWs(const NetworkJob& job);
 bool sendTagAssignmentResultWs(const NetworkJob& job);
 bool sendVerifyCodeWs(const NetworkJob& job);
 bool sendVerifyMasterTagWs(const NetworkJob& job);
+bool sendReturnMasterScanWs(const NetworkJob& job);
 bool sendAccessSelectionEventWs(const NetworkJob& job);
 bool sendDeviceLogWs(const NetworkJob& job);
 bool sendDeviceDiagnosticWs(const NetworkJob& job);
@@ -736,6 +738,7 @@ bool postDeviceDiagnostic(const NetworkJob& job);
 bool postDeviceStateBatch(const NetworkJob& job);
 bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postVerifyMasterTag(const char* tagId, NetworkResult& result);
+bool postReturnMasterScan(const NetworkJob& job);
 bool postCommandAck(const NetworkJob& job);
 bool postAccessSelectionEvent(const NetworkJob& job);
 bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
@@ -1501,6 +1504,19 @@ void networkTaskMain(void* parameter) {
           break;
         }
         shouldPublishResult = !result.requestOk;
+        break;
+      }
+
+      case NetworkJobType::ReturnMasterScan: {
+        bool requestOk = sendReturnMasterScanWs(job);
+        if (!requestOk && shouldUseHttpsFallback(millis())) {
+          requestOk = postReturnMasterScan(job);
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        } else {
+          noteNetworkFailure();
+        }
         break;
       }
 
@@ -3962,6 +3978,7 @@ bool isPriorityNetworkJob(const NetworkJob& job) {
     case NetworkJobType::CommandAck:
     case NetworkJobType::VerifyCode:
     case NetworkJobType::VerifyMasterTag:
+    case NetworkJobType::ReturnMasterScan:
     case NetworkJobType::AccessSelectionEvent:
     case NetworkJobType::DeviceDiagnostic:
       return true;
@@ -5015,6 +5032,36 @@ bool sendVerifyMasterTagWs(const NetworkJob& job) {
   return sent;
 }
 
+bool sendReturnMasterScanWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "returnscan", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "return.master-scan";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["uid"] = job.text1;
+  payload["readerId"] = "MASTER";
+
+  char body[256];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] return master scan payload too large.");
+    return false;
+  }
+
+  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  Serial.printf("[RFID RETURN] master scan sent uid=%s requestId=%s ok=%s\n", job.text1, messageId, sent ? "true" : "false");
+  return sent;
+}
+
 bool sendAccessSelectionEventWs(const NetworkJob& job) {
   if (!isDeviceWebSocketReady()) {
     return false;
@@ -5315,6 +5362,25 @@ bool postAccessSelectionEvent(const NetworkJob& job) {
   }
 
   return postDeviceSyncMessage(messageBody, "/device/sync access.selection");
+}
+
+bool postReturnMasterScan(const NetworkJob& job) {
+  JsonDocument doc;
+  doc["type"] = "return.master-scan";
+  doc["deviceId"] = DEVICE_ID;
+  doc["seq"] = nextDeviceSequence();
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["uid"] = job.text1;
+  payload["readerId"] = "MASTER";
+
+  char messageBody[256];
+  const size_t messageLen = serializeJson(doc, messageBody, sizeof(messageBody));
+  if (messageLen == 0 || messageLen >= sizeof(messageBody)) {
+    Serial.println("Return master scan HTTPS payload too large.");
+    return false;
+  }
+
+  return postDeviceSyncMessage(messageBody, "/device/sync return.master-scan");
 }
 
 bool postDeviceStateBatch(const NetworkJob& job) {
@@ -7125,6 +7191,15 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         } else {
           clearPendingMasterTag();
           Serial.println("Failed to queue master RFID verification.");
+        }
+
+        NetworkJob returnJob = {};
+        returnJob.type = NetworkJobType::ReturnMasterScan;
+        copyStringToBuffer(runtime.stableUid, returnJob.text1, sizeof(returnJob.text1));
+        if (enqueueNetworkJob(returnJob)) {
+          Serial.printf("[RFID RETURN] queued master scan uid=%s\n", runtime.stableUid.c_str());
+        } else {
+          Serial.println("Failed to queue return master scan.");
         }
       }
     }

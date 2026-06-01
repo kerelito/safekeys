@@ -2,6 +2,7 @@ const ALLOWED_LOCKERS = [1, 2, 3];
 const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
 const PANEL_ROLES = ["master", "admin", "operator", "viewer"];
 const RFID_ITEM_TYPES = ["brelok", "karta", "inne", "klucz_master", "karta_master"];
+const RFID_ITEM_STATUSES = ["IN_LOCKER", "CHECKED_OUT", "RETURN_PENDING", "UNKNOWN", "CONFLICT"];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function createHttpError(status, message) {
@@ -20,6 +21,20 @@ function assertValidLocker(locker) {
   if (!Number.isInteger(locker) || !ALLOWED_LOCKERS.includes(locker)) {
     throw createHttpError(400, "Nieprawidłowy numer skrytki.");
   }
+}
+
+function assertValidAssignedLocker(locker, { required = true } = {}) {
+  if (locker === null || locker === undefined || locker === "") {
+    if (required) {
+      throw createHttpError(400, "Przypisz przedmiot do konkretnej skrytki.");
+    }
+
+    return null;
+  }
+
+  const normalizedLocker = Number(locker);
+  assertValidLocker(normalizedLocker);
+  return normalizedLocker;
 }
 
 function assertValidHours(hours) {
@@ -78,6 +93,18 @@ function assertValidRfidItemType(itemType) {
   }
 
   return itemType;
+}
+
+function assertValidRfidItemStatus(status, fallback = "UNKNOWN") {
+  const normalizedStatus = typeof status === "string" && status.trim()
+    ? status.trim().toUpperCase()
+    : fallback;
+
+  if (!RFID_ITEM_STATUSES.includes(normalizedStatus)) {
+    throw createHttpError(400, "Wybierz prawidlowy status przedmiotu RFID.");
+  }
+
+  return normalizedStatus;
 }
 
 function assertValidPanelUsername(username) {
@@ -159,8 +186,10 @@ module.exports = {
   ALLOWED_HOURS,
   ALLOWED_LOCKERS,
   PANEL_ROLES,
+  RFID_ITEM_STATUSES,
   RFID_ITEM_TYPES,
   assertValidAllowedLockers,
+  assertValidAssignedLocker,
   assertValidCode,
   assertValidDoorClosed,
   assertValidHasTag,
@@ -172,6 +201,7 @@ module.exports = {
   assertValidPanelUsername,
   assertValidRecipientEmail,
   assertValidRfidItemName,
+  assertValidRfidItemStatus,
   assertValidRfidItemType,
   assertValidTagId,
   assertValidUserName,
