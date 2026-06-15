@@ -53,7 +53,7 @@ static const char* DEVICE_ID = "esp32-main";
 static const char* DEVICE_WS_HOST = "www.safekeys.pl";
 static const uint16_t DEVICE_WS_PORT = 443;
 static const uint16_t DEVICE_PROTOCOL_VERSION = 2;
-static const char* FIRMWARE_VERSION = "safekeys-esp32-v4-service-panel";
+static const char* FIRMWARE_VERSION = "safekeys-esp32-v4-service-panel-ws-framed";
 
 static const char* SERVICE_PANEL_USERNAME = "admin";
 static const char* SERVICE_PANEL_PASSWORD = "safekeys-admin";
@@ -138,9 +138,12 @@ static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const unsigned long DEVICE_WS_STABLE_SESSION_MS = 30000;
 static const unsigned long DEVICE_WS_CONNECT_ATTEMPT_TIMEOUT_MS = 12000;
+static const unsigned long DEVICE_WS_HELLO_DELAY_MS = 150;
 static const unsigned long DEVICE_WS_HEAP_RETRY_MS = 30000;
 static const uint32_t DEVICE_WS_MIN_FREE_HEAP = 70000;
 static const uint32_t DEVICE_WS_MIN_LARGEST_BLOCK = 32768;
+static const size_t DEVICE_WS_HEADER_RESERVE = WEBSOCKETS_MAX_HEADER_SIZE;
+static const size_t DEVICE_WS_SEND_PAYLOAD_MAX = 1536;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 20000;
 static const unsigned long DEVICE_VERIFY_CODE_RESULT_GRACE_MS = 5000;
@@ -617,11 +620,13 @@ volatile bool deviceWsConfigured = false;
 volatile bool deviceWsReconnectRequested = true;
 volatile bool deviceWsConnectAttemptActive = false;
 volatile bool deviceWsHelloSent = false;
+volatile bool deviceWsHelloPending = false;
 volatile bool deviceWsServerHelloSeen = false;
 volatile unsigned long lastDeviceWsServiceMs = 0;
 volatile unsigned long lastDeviceWsConnectAttemptMs = 0;
 volatile unsigned long nextDeviceWsConnectAttemptMs = 0;
 volatile unsigned long lastDeviceWsConnectedMs = 0;
+volatile unsigned long deviceWsHelloDueMs = 0;
 unsigned long deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
 unsigned long lastDeviceWsHeartbeatMs = 0;
 unsigned long lastDeviceStateBatchMs = 0;
@@ -663,6 +668,8 @@ uint16_t staleStateAckLogSuppressed = 0;
 unsigned long lastDuplicateStateSuppressedLogMs = 0;
 char deviceBootId[17] = "";
 char deviceWsPath[96] = "";
+uint8_t deviceWsSendBuffer[DEVICE_WS_HEADER_RESERVE + DEVICE_WS_SEND_PAYLOAD_MAX + 1] = {};
+uint8_t deviceWsTxDebugFramesRemaining = 8;
 bool lockerInputSnapshotReady[LOCKER_COUNT] = { false, false, false };
 bool lastLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
 bool lastLockerLockClosed[LOCKER_COUNT] = { true, true, true };
@@ -723,6 +730,8 @@ bool hasEnoughHeapForDeviceWebSocket();
 bool isDeviceWebSocketOpen();
 bool isDeviceWebSocketReady();
 bool isDeviceWebSocketStable(unsigned long now);
+bool sendDeviceWebSocketText(const char* payload, size_t length);
+void maybeSendDeviceHello(unsigned long now);
 bool shouldUseHttpsFallback(unsigned long now);
 void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length);
 void handleDeviceWebSocketMessage(const char* payload, size_t length);
@@ -2433,6 +2442,8 @@ void serviceDeviceWebSocket(unsigned long now) {
     lastDeviceWsServiceMs = now;
     deviceWebSocket.loop();
   }
+
+  maybeSendDeviceHello(millis());
 }
 
 void configureDeviceWebSocket() {
@@ -2489,7 +2500,9 @@ void disconnectDeviceWebSocket() {
   deviceWsConnected = false;
   deviceWsConnectAttemptActive = false;
   deviceWsHelloSent = false;
+  deviceWsHelloPending = false;
   deviceWsServerHelloSeen = false;
+  deviceWsHelloDueMs = 0;
   deviceWsReconnectRequested = true;
   nextDeviceWsConnectAttemptMs = 0;
 }
@@ -2515,13 +2528,53 @@ bool isDeviceWebSocketOpen() {
 }
 
 bool isDeviceWebSocketReady() {
-  return isDeviceWebSocketOpen() && deviceWsServerHelloSeen;
+  return isDeviceWebSocketOpen() && deviceWsServerHelloSeen && deviceWsHelloSent;
 }
 
 bool isDeviceWebSocketStable(unsigned long now) {
   return isDeviceWebSocketReady()
     && lastDeviceWsConnectedMs != 0
     && now - lastDeviceWsConnectedMs >= DEVICE_WS_STABLE_SESSION_MS;
+}
+
+bool sendDeviceWebSocketText(const char* payload, size_t length) {
+  if (!isDeviceWebSocketOpen() || payload == nullptr || length == 0) {
+    return false;
+  }
+
+  if (length > DEVICE_WS_SEND_PAYLOAD_MAX) {
+    Serial.printf("[WS] payload too large for framed send bytes=%u\n", static_cast<unsigned int>(length));
+    return false;
+  }
+
+  memcpy(deviceWsSendBuffer + DEVICE_WS_HEADER_RESERVE, payload, length);
+  deviceWsSendBuffer[DEVICE_WS_HEADER_RESERVE + length] = '\0';
+  if (deviceWsTxDebugFramesRemaining > 0) {
+    deviceWsTxDebugFramesRemaining -= 1;
+    Serial.printf(
+      "[WS] tx framed bytes=%u first=0x%02X heap=%lu largest=%lu\n",
+      static_cast<unsigned int>(length),
+      static_cast<unsigned int>(static_cast<uint8_t>(payload[0])),
+      static_cast<unsigned long>(ESP.getFreeHeap()),
+      static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT))
+    );
+  }
+  return deviceWebSocket.sendTXT(deviceWsSendBuffer, length, true);
+}
+
+void maybeSendDeviceHello(unsigned long now) {
+  if (
+    !deviceWsHelloPending ||
+    deviceWsHelloSent ||
+    !isDeviceWebSocketOpen() ||
+    !deviceWsServerHelloSeen ||
+    (deviceWsHelloDueMs != 0 && now < deviceWsHelloDueMs)
+  ) {
+    return;
+  }
+
+  deviceWsHelloPending = false;
+  sendDeviceHello();
 }
 
 bool shouldUseHttpsFallback(unsigned long now) {
@@ -2546,14 +2599,15 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsConnected = true;
       deviceWsConnectAttemptActive = false;
       deviceWsHelloSent = false;
+      deviceWsHelloPending = false;
       deviceWsServerHelloSeen = false;
+      deviceWsHelloDueMs = 0;
       lastDeviceWsConnectedMs = millis();
       lastDeviceWsHeartbeatMs = 0;
       requestFullStateResync("ws connected");
       deviceStateBatchQueued = false;
       resetDeviceActionsPollCadence();
       Serial.printf("[WS] connected: %.*s\n", static_cast<int>(length), payload);
-      sendDeviceHello();
       break;
 
     case WStype_DISCONNECTED:
@@ -2571,7 +2625,9 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsConnected = false;
       deviceWsConnectAttemptActive = false;
       deviceWsHelloSent = false;
+      deviceWsHelloPending = false;
       deviceWsServerHelloSeen = false;
+      deviceWsHelloDueMs = 0;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = disconnectedAtMs + deviceWsReconnectDelayMs;
       if (codeVerificationPending) {
@@ -2592,7 +2648,9 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsConnected = false;
       deviceWsConnectAttemptActive = false;
       deviceWsHelloSent = false;
+      deviceWsHelloPending = false;
       deviceWsServerHelloSeen = false;
+      deviceWsHelloDueMs = 0;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
       if (codeVerificationPending) {
@@ -2634,7 +2692,9 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
       deviceStateBatchQueued = false;
     }
     if (!deviceWsHelloSent) {
-      sendDeviceHello();
+      deviceWsHelloPending = true;
+      deviceWsHelloDueMs = millis() + DEVICE_WS_HELLO_DELAY_MS;
+      Serial.printf("[WS] hello scheduled in %lums\n", static_cast<unsigned long>(DEVICE_WS_HELLO_DELAY_MS));
     }
     return;
   }
@@ -4851,17 +4911,15 @@ bool sendDeviceHello() {
   doc["deviceId"] = DEVICE_ID;
   doc["messageId"] = messageId;
   doc["seq"] = sequence;
-  JsonObject payload = doc["payload"].to<JsonObject>();
-  buildHeartbeatPayload(payload);
 
-  char body[1024];
+  char body[256];
   const size_t bodyLen = serializeJson(doc, body, sizeof(body));
   if (bodyLen == 0 || bodyLen >= sizeof(body)) {
     Serial.println("[WS] hello payload too large.");
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     deviceWsHelloSent = true;
   }
@@ -4894,7 +4952,7 @@ bool sendDeviceHeartbeatWs() {
   }
 
   const unsigned long startedAt = millis();
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     lastHeartbeatPingMs = static_cast<long>(millis() - startedAt);
     lastDeviceWsHeartbeatMs = millis();
@@ -4950,7 +5008,7 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
   if (sent) {
     panelStatusResultPending = true;
@@ -4991,7 +5049,7 @@ bool sendDeviceCommandAckWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] command ack %s actionId=%s\n", sent ? "sent" : "failed", job.text1);
   return sent;
 }
@@ -5026,7 +5084,7 @@ bool sendTagAssignmentResultWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] tag assignment result %s assignmentId=%s\n", sent ? "sent" : "failed", job.text1);
   return sent;
 }
@@ -5055,7 +5113,7 @@ bool sendVerifyCodeWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     copyCStringToBuffer(messageId, pendingCodeMessageId, sizeof(pendingCodeMessageId));
     pendingCodeSentMs = millis();
@@ -5092,7 +5150,7 @@ bool sendVerifyMasterTagWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     copyCStringToBuffer(messageId, pendingMasterTagMessageId, sizeof(pendingMasterTagMessageId));
     pendingMasterTagSentMs = millis();
@@ -5145,7 +5203,7 @@ bool sendAccessSelectionEventWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] access selection %s event=%s uid=%s\n", sent ? "sent" : "failed", job.text3, job.text1);
   return sent;
 }
@@ -5179,7 +5237,7 @@ bool sendDeviceLogWs(const NetworkJob& job) {
     return false;
   }
 
-  return deviceWebSocket.sendTXT(body, bodyLen);
+  return sendDeviceWebSocketText(body, bodyLen);
 }
 
 bool sendDeviceDiagnosticWs(const NetworkJob& job) {
@@ -5214,7 +5272,7 @@ bool sendDeviceDiagnosticWs(const NetworkJob& job) {
     return false;
   }
 
-  return deviceWebSocket.sendTXT(body, bodyLen);
+  return sendDeviceWebSocketText(body, bodyLen);
 }
 
 bool postDeviceLog(const NetworkJob& job) {
