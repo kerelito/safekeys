@@ -44,8 +44,8 @@
   - domyślnie ENABLE_LOCKER_SWITCH_INPUTS = false, bo aktualnie testujemy zestaw z RFID
 */
 
-static const char* WIFI_SSID = "TP-Link_70FC";
-static const char* WIFI_PASSWORD = "13793814";
+static const char* WIFI_SSID = "iPhone (Karol)";
+static const char* WIFI_PASSWORD = "123456789";
 
 static const char* API_BASE_URL = "https://www.safekeys.pl";
 static const char* DEVICE_API_KEY = "9f0c2a7e8b6d4f1a0c3e5b789abc1234567890abcdef1234567890abcdefabcd";
@@ -88,7 +88,12 @@ static const uint8_t STRIP_PIN = 4;
 static const uint16_t TOTAL_LEDS = 60;
 static const uint8_t LOCKER_COUNT = 3;
 static const uint8_t LOCK_RELAY_COUNT = 4;
-static const uint8_t LEDS_PER_LOCKER = 20;
+static const uint8_t LEDS_PER_LOCKER = 10;
+static const uint16_t LOCKER_LED_SEGMENT_STARTS[LOCKER_COUNT] = {
+  1,  // LED 0 stays neutral before locker 1
+  13, // LED 11-12 stay neutral before locker 2
+  25  // LED 23-24 stay neutral before locker 3
+};
 static const uint8_t LOCK_RELAY_PINS[LOCK_RELAY_COUNT] = {
   27, // locker 1
   26, // locker 2
@@ -131,11 +136,14 @@ static const unsigned long DEVICE_ACTIONS_POLL_INTERVAL_MS = 8000;
 static const unsigned long DEVICE_ACTIONS_POLL_INTERVAL_MAX_MS = 60000;
 static const unsigned long DEVICE_ACTIONS_LONG_POLL_WAIT_MS = 3000;
 static const unsigned long DEVICE_WS_SERVICE_INTERVAL_MS = 20;
-static const unsigned long DEVICE_WS_RECONNECT_BASE_MS = 2000;
+static const unsigned long DEVICE_WS_RECONNECT_BASE_MS = 5000;
 static const unsigned long DEVICE_WS_RECONNECT_MAX_MS = 60000;
 static const unsigned long DEVICE_WS_PING_INTERVAL_MS = 15000;
 static const unsigned long DEVICE_WS_PONG_TIMEOUT_MS = 5000;
 static const uint8_t DEVICE_WS_DISCONNECT_TIMEOUT_COUNT = 2;
+static const bool DEVICE_WS_CLIENT_HEARTBEAT_ENABLED = false;
+static const size_t DEVICE_WS_FRAME_HEADER_RESERVE = 14;
+static const size_t DEVICE_WS_TX_BUFFER_SIZE = DEVICE_WS_FRAME_HEADER_RESERVE + 1280 + 1;
 static const unsigned long DEVICE_WS_FALLBACK_AFTER_MS = 45000;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 20000;
@@ -188,6 +196,7 @@ static const unsigned long NETWORK_QUEUE_WAIT_MS = 500;
 static const uint16_t HTTP_CONNECT_TIMEOUT_MS = 8000;
 static const uint16_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
 static const uint16_t HTTP_TLS_HANDSHAKE_TIMEOUT_SECONDS = 20;
+static const uint32_t HTTP_TLS_MIN_LARGEST_BLOCK_BYTES = 48UL * 1024UL;
 static const uint8_t NETWORK_QUEUE_LENGTH = 12;
 static const uint16_t NETWORK_TASK_STACK_SIZE = 8192;
 static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 45;
@@ -622,6 +631,7 @@ volatile unsigned long lastWifiRecoveryAttemptMs = 0;
 unsigned long deviceActionsPollIntervalMs = DEVICE_ACTIONS_POLL_INTERVAL_MS;
 volatile bool deviceWsConnected = false;
 volatile bool deviceWsConfigured = false;
+volatile bool deviceWsStarted = false;
 volatile bool deviceWsReconnectRequested = true;
 volatile bool deviceWsHelloSent = false;
 volatile bool deviceWsServerHelloSeen = false;
@@ -738,14 +748,17 @@ void serviceDeviceWebSocket(unsigned long now);
 void configureDeviceWebSocket();
 void connectDeviceWebSocket(unsigned long now, bool forceNow = false);
 void disconnectDeviceWebSocket();
+bool isDeviceWebSocketTransportOpen();
 bool isDeviceWebSocketReady();
 bool shouldUseHttpsFallback(unsigned long now);
+void scheduleDeviceWebSocketReconnect(unsigned long now);
 void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length);
 void handleDeviceWebSocketMessage(const char* payload, size_t length);
 void handleTagVerifyResultMessage(JsonDocument& doc);
 void handleCodeVerifyResultMessage(JsonDocument& doc);
 void handleLockerStatusResultMessage(JsonDocument& doc);
 bool sendDeviceHello();
+bool sendDeviceWebSocketText(const char* body, size_t bodyLen);
 bool sendDeviceHeartbeatWs();
 bool sendDeviceStateBatchWs(const NetworkJob& job);
 bool sendDeviceCommandAckWs(const NetworkJob& job);
@@ -769,6 +782,7 @@ bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
 uint32_t nextDeviceSequence();
 void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence);
 void buildHeartbeatPayload(JsonObject payload);
+void populateRemoteConfigResult(NetworkResult& result, JsonObject config, uint32_t configVersion);
 void applyRemoteConfigResult(const NetworkResult& result);
 void maybeFetchRemoteConfig(unsigned long now);
 void queueDeviceLog(const char* level, const char* event, const char* message);
@@ -1689,7 +1703,11 @@ void loop() {
     maybeSendHeartbeat(now);
   } else if (maybeQueueDeviceStateBatch(now)) {
     // Limit background network traffic to one request per loop.
-  } else if (!isDeviceWebSocketReady() && (lastDeviceActionsPollMs == 0 || now - lastDeviceActionsPollMs >= deviceActionsPollIntervalMs)) {
+  } else if (
+    !isDeviceWebSocketReady() &&
+    shouldUseHttpsFallback(now) &&
+    (lastDeviceActionsPollMs == 0 || now - lastDeviceActionsPollMs >= deviceActionsPollIntervalMs)
+  ) {
     maybePollDeviceActions(now);
   }
 }
@@ -1762,6 +1780,8 @@ void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       deviceStateBatchQueued = false;
       deviceWsReconnectRequested = true;
       nextDeviceWsConnectAttemptMs = 0;
+      lastDeviceWsConnectAttemptMs = millis();
+      lastDeviceWsConnectedMs = 0;
       nextRemoteConfigFetchMs = 0;
       resetDeviceActionsPollCadence();
       if (serviceSetupPortalActive) {
@@ -2442,7 +2462,7 @@ void serviceDeviceWebSocket(unsigned long now) {
     configureDeviceWebSocket();
   }
 
-  if (!deviceWsConnected && (deviceWsReconnectRequested || now >= nextDeviceWsConnectAttemptMs)) {
+  if (!deviceWsStarted && !deviceWsConnected && (deviceWsReconnectRequested || now >= nextDeviceWsConnectAttemptMs)) {
     connectDeviceWebSocket(now);
   }
 
@@ -2458,16 +2478,26 @@ void configureDeviceWebSocket() {
 
   deviceWebSocket.onEvent(handleDeviceWebSocketEvent);
   deviceWebSocket.setExtraHeaders(extraHeaders);
-  deviceWebSocket.enableHeartbeat(
-    DEVICE_WS_PING_INTERVAL_MS,
-    DEVICE_WS_PONG_TIMEOUT_MS,
-    DEVICE_WS_DISCONNECT_TIMEOUT_COUNT
-  );
+  deviceWebSocket.setReconnectInterval(DEVICE_WS_RECONNECT_BASE_MS);
+  if (DEVICE_WS_CLIENT_HEARTBEAT_ENABLED) {
+    deviceWebSocket.enableHeartbeat(
+      DEVICE_WS_PING_INTERVAL_MS,
+      DEVICE_WS_PONG_TIMEOUT_MS,
+      DEVICE_WS_DISCONNECT_TIMEOUT_COUNT
+    );
+  } else {
+    Serial.println("[WS] client ping disabled; backend ping and app heartbeat remain active.");
+  }
   deviceWsConfigured = true;
 }
 
 void connectDeviceWebSocket(unsigned long now, bool forceNow) {
   if (!isWifiReady() || deviceWsConnected) {
+    return;
+  }
+
+  if (deviceWsStarted && !forceNow) {
+    deviceWsReconnectRequested = false;
     return;
   }
 
@@ -2488,6 +2518,8 @@ void connectDeviceWebSocket(unsigned long now, bool forceNow) {
   );
 
   deviceWebSocket.beginSSL(DEVICE_WS_HOST, DEVICE_WS_PORT, DEVICE_WS_PATH);
+  deviceWebSocket.setReconnectInterval(deviceWsReconnectDelayMs);
+  deviceWsStarted = true;
   deviceWsReconnectDelayMs = min(DEVICE_WS_RECONNECT_MAX_MS, deviceWsReconnectDelayMs * 2);
 }
 
@@ -2516,10 +2548,28 @@ bool shouldUseHttpsFallback(unsigned long now) {
   }
 
   if (lastDeviceWsConnectAttemptMs == 0) {
-    return true;
+    return false;
+  }
+
+  if (nextDeviceWsConnectAttemptMs != 0 && now < nextDeviceWsConnectAttemptMs) {
+    return false;
+  }
+
+  if (lastDeviceWsConnectedMs != 0 && now - lastDeviceWsConnectedMs < DEVICE_WS_FALLBACK_AFTER_MS) {
+    return false;
   }
 
   return now - lastDeviceWsConnectAttemptMs >= DEVICE_WS_FALLBACK_AFTER_MS;
+}
+
+void scheduleDeviceWebSocketReconnect(unsigned long now) {
+  deviceWsConnected = false;
+  deviceWsHelloSent = false;
+  deviceWsServerHelloSeen = false;
+  deviceWsReconnectRequested = false;
+  nextDeviceWsConnectAttemptMs = now + deviceWsReconnectDelayMs;
+  deviceWebSocket.setReconnectInterval(deviceWsReconnectDelayMs);
+  deviceWsReconnectDelayMs = min(DEVICE_WS_RECONNECT_MAX_MS, deviceWsReconnectDelayMs * 2);
 }
 
 void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -2529,8 +2579,12 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       deviceWsHelloSent = false;
       deviceWsServerHelloSeen = false;
       deviceWsReconnectDelayMs = DEVICE_WS_RECONNECT_BASE_MS;
-      lastDeviceWsConnectedMs = millis();
+      lastDeviceWsConnectAttemptMs = millis();
+      lastDeviceWsConnectedMs = lastDeviceWsConnectAttemptMs;
       lastDeviceWsHeartbeatMs = 0;
+      nextDeviceWsConnectAttemptMs = 0;
+      deviceWsReconnectRequested = false;
+      deviceWebSocket.setReconnectInterval(DEVICE_WS_RECONNECT_BASE_MS);
       requestFullStateResync("ws connected");
       deviceStateBatchQueued = false;
       resetDeviceActionsPollCadence();
@@ -2542,11 +2596,7 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
       if (deviceWsConnected) {
         Serial.printf("[WS] disconnected%s%.*s\n", length > 0 ? ": " : "", static_cast<int>(length), payload);
       }
-      deviceWsConnected = false;
-      deviceWsHelloSent = false;
-      deviceWsServerHelloSeen = false;
-      deviceWsReconnectRequested = true;
-      nextDeviceWsConnectAttemptMs = millis() + deviceWsReconnectDelayMs;
+      scheduleDeviceWebSocketReconnect(millis());
       if (codeVerificationPending) {
         failPendingCodeVerification("WebSocket disconnected.");
       }
@@ -2561,10 +2611,7 @@ void handleDeviceWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) 
 
     case WStype_ERROR:
       Serial.printf("[WS] error: %.*s\n", static_cast<int>(length), payload);
-      deviceWsConnected = false;
-      deviceWsHelloSent = false;
-      deviceWsServerHelloSeen = false;
-      deviceWsReconnectRequested = true;
+      scheduleDeviceWebSocketReconnect(millis());
       if (codeVerificationPending) {
         failPendingCodeVerification("WebSocket error.");
       }
@@ -2599,6 +2646,21 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
     const bool resyncRequired = doc["resyncRequired"] | false;
     deviceWsServerHelloSeen = true;
     Serial.printf("[WS] server hello, resync=%s connectionId=%s\n", resyncRequired ? "true" : "false", doc["connectionId"] | "(none)");
+    JsonObject config = doc["config"].as<JsonObject>();
+    if (!config.isNull()) {
+      const uint32_t configVersion = static_cast<uint32_t>(doc["configVersion"] | 1);
+      if (remoteConfigVersion == 0 || configVersion != remoteConfigVersion) {
+        NetworkResult result = {};
+        result.type = NetworkResultType::RemoteConfig;
+        result.requestOk = true;
+        populateRemoteConfigResult(result, config, configVersion);
+        if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &result, 0) != pdTRUE) {
+          Serial.println("[WS] remote config result queue full.");
+        }
+      } else {
+        nextRemoteConfigFetchMs = millis() + REMOTE_CONFIG_FETCH_INTERVAL_MS;
+      }
+    }
     if (resyncRequired) {
       requestFullStateResync("server hello");
       deviceStateBatchQueued = false;
@@ -3100,6 +3162,10 @@ void maybeSendHeartbeat(unsigned long now) {
 
 void maybePollDeviceActions(unsigned long now) {
   if (isBackgroundNetworkBackoffActive(now)) {
+    return;
+  }
+
+  if (!shouldUseHttpsFallback(now)) {
     return;
   }
 
@@ -4715,6 +4781,31 @@ void buildHeartbeatPayload(JsonObject payload) {
   }
 }
 
+void populateRemoteConfigResult(NetworkResult& result, JsonObject config, uint32_t configVersion) {
+  result.configVersion = configVersion == 0 ? 1 : configVersion;
+  result.heartbeatIntervalMs = static_cast<uint32_t>(config["heartbeatIntervalMs"] | HEARTBEAT_INTERVAL_MS);
+  result.deviceActionsPollIntervalMs = static_cast<uint32_t>(config["deviceActionsPollIntervalMs"] | DEVICE_ACTIONS_POLL_INTERVAL_MS);
+  result.lockPulseMs = static_cast<uint32_t>(config["lockPulseMs"] | LOCK_UNLOCK_PULSE_MS);
+
+  JsonObject remoteLogging = config["remoteLogging"].as<JsonObject>();
+  result.boolValue1 = remoteLogging.isNull() ? true : (remoteLogging["enabled"] | true);
+
+  JsonObject codeRateLimit = config["codeRateLimit"].as<JsonObject>();
+  result.boolValue2 = codeRateLimit.isNull() ? true : (codeRateLimit["enabled"] | true);
+  result.codeRateLimitMaxFailures = static_cast<uint8_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT : (codeRateLimit["maxFailures"] | CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT));
+  result.codeRateLimitWindowMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_WINDOW_MS_DEFAULT : (codeRateLimit["windowMs"] | CODE_RATE_LIMIT_WINDOW_MS_DEFAULT));
+  result.codeRateLimitLockoutMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT : (codeRateLimit["lockoutMs"] | CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT));
+
+  JsonObject servicePanel = config["servicePanel"].as<JsonObject>();
+  result.boolValue3 = servicePanel.isNull() ? true : (servicePanel["enabled"] | true);
+
+  JsonObject ota = config["ota"].as<JsonObject>();
+  result.boolValue4 = ota.isNull() ? true : (ota["enabled"] | true);
+
+  JsonObject diagnostics = config["diagnostics"].as<JsonObject>();
+  result.boolValue5 = diagnostics.isNull() ? true : (diagnostics["enabled"] | true);
+}
+
 void applyRemoteConfigResult(const NetworkResult& result) {
   if (!result.requestOk || result.configVersion == 0) {
     return;
@@ -4773,6 +4864,10 @@ void maybeFetchRemoteConfig(unsigned long now) {
   }
 
   if (!isWifiReady() || isBackgroundNetworkBackoffActive(now)) {
+    return;
+  }
+
+  if (!shouldUseHttpsFallback(now)) {
     return;
   }
 
@@ -4838,12 +4933,28 @@ bool sendDeviceHello() {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     deviceWsHelloSent = true;
   }
   Serial.printf("[WS] hello %s seq=%lu\n", sent ? "sent" : "failed", static_cast<unsigned long>(sequence));
   return sent;
+}
+
+bool sendDeviceWebSocketText(const char* body, size_t bodyLen) {
+  if (!isDeviceWebSocketReady() || body == nullptr || bodyLen == 0) {
+    return false;
+  }
+
+  static uint8_t txBuffer[DEVICE_WS_TX_BUFFER_SIZE];
+  if (bodyLen + DEVICE_WS_FRAME_HEADER_RESERVE >= sizeof(txBuffer)) {
+    Serial.printf("[WS] frame payload too large bytes=%u\n", static_cast<unsigned int>(bodyLen));
+    return false;
+  }
+
+  memcpy(txBuffer + DEVICE_WS_FRAME_HEADER_RESERVE, body, bodyLen);
+  txBuffer[DEVICE_WS_FRAME_HEADER_RESERVE + bodyLen] = '\0';
+  return deviceWebSocket.sendTXT(txBuffer, bodyLen, true);
 }
 
 bool sendDeviceHeartbeatWs() {
@@ -4871,7 +4982,7 @@ bool sendDeviceHeartbeatWs() {
   }
 
   const unsigned long startedAt = millis();
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     lastHeartbeatPingMs = static_cast<long>(millis() - startedAt);
     lastDeviceWsHeartbeatMs = millis();
@@ -4927,7 +5038,7 @@ bool sendDeviceStateBatchWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] state batch %s full=%s bytes=%u\n", sent ? "sent" : "failed", job.boolValue ? "true" : "false", static_cast<unsigned int>(bodyLen));
   if (sent) {
     panelStatusResultPending = true;
@@ -4966,7 +5077,7 @@ bool sendDeviceCommandAckWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] command ack %s actionId=%s\n", sent ? "sent" : "failed", job.text1);
   return sent;
 }
@@ -5001,7 +5112,7 @@ bool sendTagAssignmentResultWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] tag assignment result %s assignmentId=%s\n", sent ? "sent" : "failed", job.text1);
   return sent;
 }
@@ -5030,7 +5141,7 @@ bool sendVerifyCodeWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     copyCStringToBuffer(messageId, pendingCodeMessageId, sizeof(pendingCodeMessageId));
     pendingCodeSentMs = millis();
@@ -5067,7 +5178,7 @@ bool sendVerifyMasterTagWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   if (sent) {
     copyCStringToBuffer(messageId, pendingMasterTagMessageId, sizeof(pendingMasterTagMessageId));
     pendingMasterTagSentMs = millis();
@@ -5105,7 +5216,7 @@ bool sendReturnMasterScanWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[RFID RETURN] master scan sent uid=%s requestId=%s ok=%s\n", job.text1, messageId, sent ? "true" : "false");
   return sent;
 }
@@ -5150,7 +5261,7 @@ bool sendAccessSelectionEventWs(const NetworkJob& job) {
     return false;
   }
 
-  const bool sent = deviceWebSocket.sendTXT(body, bodyLen);
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
   Serial.printf("[WS] access selection %s event=%s uid=%s\n", sent ? "sent" : "failed", job.text3, job.text1);
   return sent;
 }
@@ -5184,7 +5295,7 @@ bool sendDeviceLogWs(const NetworkJob& job) {
     return false;
   }
 
-  return deviceWebSocket.sendTXT(body, bodyLen);
+  return sendDeviceWebSocketText(body, bodyLen);
 }
 
 bool sendDeviceDiagnosticWs(const NetworkJob& job) {
@@ -5219,7 +5330,7 @@ bool sendDeviceDiagnosticWs(const NetworkJob& job) {
     return false;
   }
 
-  return deviceWebSocket.sendTXT(body, bodyLen);
+  return sendDeviceWebSocketText(body, bodyLen);
 }
 
 bool postDeviceLog(const NetworkJob& job) {
@@ -5359,23 +5470,7 @@ bool fetchRemoteConfigForTask(NetworkResult& result) {
     return false;
   }
 
-  result.configVersion = static_cast<uint32_t>(doc["configVersion"] | 1);
-  result.heartbeatIntervalMs = static_cast<uint32_t>(config["heartbeatIntervalMs"] | HEARTBEAT_INTERVAL_MS);
-  result.deviceActionsPollIntervalMs = static_cast<uint32_t>(config["deviceActionsPollIntervalMs"] | DEVICE_ACTIONS_POLL_INTERVAL_MS);
-  result.lockPulseMs = static_cast<uint32_t>(config["lockPulseMs"] | LOCK_UNLOCK_PULSE_MS);
-  JsonObject remoteLogging = config["remoteLogging"].as<JsonObject>();
-  result.boolValue1 = remoteLogging.isNull() ? true : (remoteLogging["enabled"] | true);
-  JsonObject codeRateLimit = config["codeRateLimit"].as<JsonObject>();
-  result.boolValue2 = codeRateLimit.isNull() ? true : (codeRateLimit["enabled"] | true);
-  result.codeRateLimitMaxFailures = static_cast<uint8_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT : (codeRateLimit["maxFailures"] | CODE_RATE_LIMIT_MAX_FAILURES_DEFAULT));
-  result.codeRateLimitWindowMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_WINDOW_MS_DEFAULT : (codeRateLimit["windowMs"] | CODE_RATE_LIMIT_WINDOW_MS_DEFAULT));
-  result.codeRateLimitLockoutMs = static_cast<uint32_t>(codeRateLimit.isNull() ? CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT : (codeRateLimit["lockoutMs"] | CODE_RATE_LIMIT_LOCKOUT_MS_DEFAULT));
-  JsonObject servicePanel = config["servicePanel"].as<JsonObject>();
-  JsonObject ota = config["ota"].as<JsonObject>();
-  JsonObject diagnostics = config["diagnostics"].as<JsonObject>();
-  result.boolValue3 = servicePanel.isNull() ? true : (servicePanel["enabled"] | true);
-  result.boolValue4 = ota.isNull() ? true : (ota["enabled"] | true);
-  result.boolValue5 = diagnostics.isNull() ? true : (diagnostics["enabled"] | true);
+  populateRemoteConfigResult(result, config, static_cast<uint32_t>(doc["configVersion"] | 1));
   return true;
 }
 
@@ -6359,7 +6454,7 @@ LockerLedSegment getLockerLedSegment(uint8_t lockerNumber) {
     return { 0, 0, 0, false };
   }
 
-  const uint16_t start = static_cast<uint16_t>((lockerNumber - 1) * LEDS_PER_LOCKER);
+  const uint16_t start = LOCKER_LED_SEGMENT_STARTS[lockerNumber - 1];
   const uint16_t end = static_cast<uint16_t>(min<uint16_t>(TOTAL_LEDS, start + LEDS_PER_LOCKER) - 1);
   if (start >= TOTAL_LEDS || end < start) {
     return { 0, 0, 0, false };
@@ -7539,6 +7634,17 @@ bool beginSecureRequest(HTTPClient& http, WiFiClientSecure& client, const char* 
       requestLabel,
       static_cast<int>(WiFi.status()),
       wifiConnectInProgress ? "yes" : "no"
+    );
+    return false;
+  }
+
+  const uint32_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < HTTP_TLS_MIN_LARGEST_BLOCK_BYTES) {
+    Serial.printf(
+      "Skipping %s: largest free heap block too small for HTTPS TLS (%u < %u).\n",
+      requestLabel,
+      largestBlock,
+      HTTP_TLS_MIN_LARGEST_BLOCK_BYTES
     );
     return false;
   }

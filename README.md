@@ -429,7 +429,11 @@ Pinout glownego firmware da sie odczytac bezposrednio z `hardware/safekeys/src/m
 | Relay locker 2 | `26` |
 | Relay locker 3 | `25` |
 | Relay locker 4 | `33` |
-| LED na skrytke | `20` |
+| LED na skrytke | `10` |
+| Segment LED skrytka 1 | `1..10` |
+| Segment LED skrytka 2 | `13..22` |
+| Segment LED skrytka 3 | `25..34` |
+| LED neutralne / rezerwa | `0`, `11..12`, `23..24`, `35..59` |
 | SPI SCK dla RC522 | `14` |
 | SPI MISO dla RC522 | `12` |
 | SPI MOSI dla RC522 | `13` |

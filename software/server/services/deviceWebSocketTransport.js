@@ -28,7 +28,10 @@ function isDeviceRequestAuthorized(req, deviceApiKey) {
 
 function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
   const deviceApiKey = options.deviceApiKey || "";
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: false
+  });
   const clients = new Map();
 
   async function sendJson(ws, payload) {
@@ -36,7 +39,7 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       return;
     }
 
-    ws.send(JSON.stringify(payload));
+    ws.send(JSON.stringify(payload), { compress: false });
   }
 
   async function sendPendingCommands(ws, { forceRedelivery = false } = {}) {
@@ -245,11 +248,18 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       }
     });
 
-    ws.on("close", async (_code, reason) => {
+    ws.on("close", async (code, reason) => {
       clients.delete(ws.connectionId);
+      const closeReason = reason?.toString("utf8") || "websocket_closed";
+      console.warn("WebSocket urzadzenia zamkniety.", {
+        deviceId: ws.deviceId,
+        connectionId: ws.connectionId,
+        code,
+        reason: closeReason
+      });
       await lockerService.markDeviceDisconnected(
         ws.deviceId,
-        reason?.toString("utf8") || "websocket_closed",
+        closeReason,
         { connectionId: ws.connectionId }
       );
     });
@@ -258,6 +268,7 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       console.error("Blad WebSocket urzadzenia.", {
         deviceId: ws.deviceId,
         connectionId: ws.connectionId,
+        code: error.code || null,
         error: error.message
       });
     });

@@ -1,0 +1,1428 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagram Gantta projektu SafeKeys</title>
+  <style>
+    :root {
+      --page-bg: #f4f7fb;
+      --paper: #ffffff;
+      --ink: #152033;
+      --muted: #5b6678;
+      --line: #d9e2ec;
+      --line-strong: #b9c7d6;
+      --axis-bg: #eef3f8;
+      --phase-bg: #f8fafc;
+      --left-width: 360px;
+      --timeline-width: 1520px;
+      --row-height: 34px;
+      --phase-height: 40px;
+      --radius: 6px;
+      --shadow: 0 18px 45px rgba(37, 54, 75, 0.14);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page-bg);
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .sheet {
+      width: min(100%, 1880px);
+      margin: 24px auto;
+      padding: 26px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      border: 1px solid #e4ebf2;
+    }
+
+    .document-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: start;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .project-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      max-width: 760px;
+      margin-top: 14px;
+    }
+
+    .meta-chip {
+      border: 1px solid #d5dfeb;
+      background: #f8fbff;
+      color: #334257;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 11px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    .print-button {
+      appearance: none;
+      border: 1px solid #a9b8c9;
+      background: #23354d;
+      color: #ffffff;
+      border-radius: var(--radius);
+      padding: 9px 13px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 3px 8px rgba(35, 53, 77, 0.18);
+    }
+
+    .print-button.secondary {
+      background: #ffffff;
+      color: #23354d;
+    }
+
+    .print-button:hover {
+      background: #1b2b40;
+    }
+
+    .print-button.secondary:hover {
+      background: #eef3f8;
+    }
+
+    .print-button:disabled {
+      cursor: wait;
+      opacity: 0.68;
+    }
+
+    .export-status {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-align: right;
+      min-height: 14px;
+    }
+
+    .summary-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 16px 0 12px;
+      color: var(--muted);
+      font-weight: 650;
+    }
+
+    .gantt-scroll {
+      overflow-x: auto;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: #ffffff;
+    }
+
+    .gantt {
+      min-width: calc(var(--left-width) + var(--timeline-width));
+      background: #ffffff;
+    }
+
+    .gantt-row {
+      display: grid;
+      grid-template-columns: var(--left-width) var(--timeline-width);
+      min-height: var(--row-height);
+    }
+
+    .left-cell,
+    .timeline-cell {
+      position: relative;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .left-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 5px 12px;
+      border-right: 1px solid var(--line-strong);
+      background: #ffffff;
+      min-width: 0;
+    }
+
+    .timeline-cell {
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .timeline-cell::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to bottom, rgba(217, 226, 236, 0.32), rgba(217, 226, 236, 0.32));
+      opacity: 0.35;
+      pointer-events: none;
+    }
+
+    .header-row {
+      min-height: 78px;
+      position: sticky;
+      top: 0;
+      z-index: 8;
+    }
+
+    .header-row .left-cell,
+    .header-row .timeline-cell {
+      background: var(--axis-bg);
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    .header-title {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-weight: 780;
+    }
+
+    .header-title small {
+      color: var(--muted);
+      font-weight: 650;
+    }
+
+    .axis {
+      position: relative;
+      height: 78px;
+    }
+
+    .month-band {
+      position: absolute;
+      top: 8px;
+      height: 24px;
+      border-left: 1px solid rgba(110, 127, 147, 0.45);
+      border-right: 1px solid rgba(110, 127, 147, 0.25);
+      background: rgba(255, 255, 255, 0.48);
+      color: #304058;
+      font-size: 11px;
+      font-weight: 800;
+      text-align: center;
+      padding-top: 4px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .axis-tick {
+      position: absolute;
+      top: 38px;
+      bottom: 0;
+      width: 1px;
+      background: #9fb0c4;
+    }
+
+    .axis-tick strong {
+      position: absolute;
+      top: 9px;
+      left: 5px;
+      transform: rotate(-30deg);
+      transform-origin: left top;
+      color: #43546d;
+      font-size: 10px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .grid-line {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: rgba(185, 199, 214, 0.58);
+      pointer-events: none;
+    }
+
+    .grid-line.project-edge {
+      background: rgba(86, 105, 129, 0.72);
+      width: 2px;
+    }
+
+    .milestone-row {
+      min-height: 74px;
+    }
+
+    .milestone-row .left-cell {
+      align-items: flex-start;
+      justify-content: center;
+      flex-direction: column;
+      background: #fbfcfe;
+    }
+
+    .milestone-heading {
+      font-weight: 800;
+      color: #26364c;
+    }
+
+    .milestone-note {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .milestone-cell {
+      background: #fbfcfe;
+      overflow: visible;
+    }
+
+    .milestone-marker {
+      position: absolute;
+      top: 18px;
+      transform: translateX(-50%);
+      z-index: 4;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 132px;
+      pointer-events: none;
+    }
+
+    .milestone-marker.low {
+      top: 37px;
+    }
+
+    .diamond {
+      width: 12px;
+      height: 12px;
+      transform: rotate(45deg);
+      background: #b34f4f;
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 0 1px rgba(120, 30, 30, 0.35);
+      flex: 0 0 auto;
+    }
+
+    .milestone-label {
+      margin-top: 6px;
+      padding: 2px 5px;
+      border: 1px solid rgba(179, 79, 79, 0.25);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #643232;
+      font-size: 9px;
+      font-weight: 720;
+      text-align: center;
+      white-space: normal;
+      line-height: 1.15;
+      box-shadow: 0 2px 5px rgba(31, 45, 61, 0.06);
+    }
+
+    .phase-section {
+      break-inside: avoid-page;
+      page-break-inside: avoid;
+    }
+
+    .phase-row {
+      min-height: var(--phase-height);
+    }
+
+    .phase-row .left-cell {
+      background: var(--phase-bg);
+      border-top: 1px solid var(--line-strong);
+      font-weight: 800;
+    }
+
+    .phase-row .timeline-cell {
+      background: var(--phase-bg);
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .phase-index {
+      display: inline-grid;
+      place-items: center;
+      width: 23px;
+      height: 23px;
+      border-radius: 50%;
+      background: var(--phase-color);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .phase-text {
+      min-width: 0;
+    }
+
+    .phase-name {
+      color: #203049;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .phase-date {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .phase-bar {
+      position: absolute;
+      top: 9px;
+      height: 20px;
+      border-radius: 4px;
+      background: var(--phase-color);
+      box-shadow: inset 0 0 0 1px rgba(20, 32, 51, 0.18);
+    }
+
+    .phase-bar span {
+      position: absolute;
+      left: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 800;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.22);
+      white-space: nowrap;
+    }
+
+    .task-row {
+      min-height: var(--row-height);
+    }
+
+    .task-row .left-cell {
+      padding-left: 46px;
+    }
+
+    .task-number {
+      color: #7a8799;
+      width: 28px;
+      flex: 0 0 auto;
+      font-size: 10px;
+      font-weight: 760;
+      text-align: right;
+    }
+
+    .task-copy {
+      min-width: 0;
+    }
+
+    .task-name {
+      color: #24344d;
+      font-weight: 670;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .date-range {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .task-bar {
+      position: absolute;
+      top: 8px;
+      height: 18px;
+      border-radius: 4px;
+      background: var(--bar-color);
+      box-shadow: inset 0 0 0 1px rgba(17, 28, 45, 0.16), 0 1px 2px rgba(17, 28, 45, 0.08);
+      overflow: visible;
+      z-index: 3;
+    }
+
+    .task-bar::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: linear-gradient(to right, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0));
+      pointer-events: none;
+    }
+
+    .task-bar-label {
+      position: absolute;
+      left: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      max-width: 390px;
+      padding: 2px 6px 2px 7px;
+      border: 1px solid rgba(31, 45, 61, 0.18);
+      border-left: 4px solid var(--bar-color);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.9);
+      color: #172238;
+      font-size: 9px;
+      font-weight: 760;
+      line-height: 1.15;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      box-shadow: 0 1px 4px rgba(17, 28, 45, 0.08);
+    }
+
+    .task-bar.near-end .task-bar-label {
+      right: 6px;
+      left: auto;
+    }
+
+    .task-bar.compact .task-bar-label {
+      max-width: 300px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px 20px;
+      align-items: center;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+      color: #334257;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .legend-title {
+      color: #1f2e45;
+      font-size: 12px;
+      font-weight: 850;
+      margin-right: 4px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 20px;
+    }
+
+    .legend-swatch {
+      width: 28px;
+      height: 10px;
+      border-radius: 3px;
+      background: #2f6f9f;
+      box-shadow: inset 0 0 0 1px rgba(17, 28, 45, 0.18);
+    }
+
+    .legend-phase {
+      height: 14px;
+      background: #7a6f92;
+    }
+
+    .legend-milestone {
+      width: 12px;
+      height: 12px;
+      transform: rotate(45deg);
+      border-radius: 1px;
+      background: #b34f4f;
+      box-shadow: 0 0 0 1px rgba(120, 30, 30, 0.35);
+    }
+
+    .legend-grid {
+      width: 1px;
+      height: 18px;
+      background: #9fb0c4;
+      box-shadow: 7px 0 0 rgba(159, 176, 196, 0.55), 14px 0 0 rgba(159, 176, 196, 0.55);
+    }
+
+    .legend-edge {
+      width: 2px;
+      height: 18px;
+      background: #566981;
+    }
+
+    .footer-note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .export-capture {
+      box-shadow: none;
+      border-color: #cfd8e3;
+      max-width: none;
+    }
+
+    .export-capture .gantt-scroll {
+      overflow: visible;
+    }
+
+    .export-capture .gantt {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .export-capture .header-row {
+      position: static;
+    }
+
+    @media (max-width: 820px) {
+      .sheet {
+        margin: 0;
+        padding: 16px;
+        border-radius: 0;
+      }
+
+      .document-header {
+        grid-template-columns: 1fr;
+      }
+
+      .actions {
+        justify-content: flex-start;
+      }
+
+      .export-status {
+        text-align: left;
+      }
+
+      .summary-line {
+        flex-direction: column;
+        gap: 4px;
+      }
+    }
+
+    @media print {
+      @page {
+        size: A4 landscape;
+        margin: 8mm;
+      }
+
+      :root {
+        --left-width: 250px;
+        --row-height: 23px;
+        --phase-height: 27px;
+      }
+
+      body {
+        background: #ffffff;
+        font-size: 8px;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      .sheet {
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        box-shadow: none;
+      }
+
+      .no-print {
+        display: none !important;
+      }
+
+      .document-header {
+        gap: 8px;
+        padding-bottom: 8px;
+      }
+
+      h1 {
+        font-size: 18px;
+      }
+
+      .subtitle {
+        margin-top: 2px;
+        font-size: 10px;
+      }
+
+      .project-meta {
+        gap: 4px;
+        margin-top: 6px;
+      }
+
+      .meta-chip {
+        padding: 2px 5px;
+        font-size: 7px;
+      }
+
+      .summary-line,
+      .legend,
+      .footer-note {
+        margin-top: 7px;
+      }
+
+      .gantt-scroll {
+        overflow: visible;
+        border-radius: 0;
+      }
+
+      .gantt {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .gantt-row {
+        grid-template-columns: var(--left-width) minmax(0, 1fr);
+      }
+
+      .header-row {
+        min-height: 55px;
+        position: static;
+      }
+
+      .axis {
+        height: 55px;
+      }
+
+      .month-band {
+        top: 5px;
+        height: 17px;
+        font-size: 7px;
+        padding-top: 2px;
+      }
+
+      .axis-tick {
+        top: 27px;
+      }
+
+      .axis-tick strong {
+        top: 5px;
+        left: 3px;
+        font-size: 6px;
+      }
+
+      .left-cell {
+        padding: 3px 6px;
+      }
+
+      .task-row .left-cell {
+        padding-left: 26px;
+      }
+
+      .phase-index {
+        width: 16px;
+        height: 16px;
+        font-size: 7px;
+      }
+
+      .phase-name,
+      .task-name {
+        font-size: 7px;
+      }
+
+      .phase-date,
+      .date-range,
+      .task-number {
+        font-size: 6px;
+      }
+
+      .phase-bar {
+        top: 7px;
+        height: 13px;
+      }
+
+      .phase-bar span {
+        font-size: 6px;
+      }
+
+      .task-bar {
+        top: 5px;
+        height: 13px;
+      }
+
+      .task-bar-label {
+        max-width: 210px;
+        padding: 1px 3px;
+        border-left-width: 2px;
+        font-size: 5.5px;
+      }
+
+      .milestone-row {
+        min-height: 48px;
+      }
+
+      .milestone-marker {
+        width: 80px;
+        top: 11px;
+      }
+
+      .milestone-marker.low {
+        top: 25px;
+      }
+
+      .diamond,
+      .legend-milestone {
+        width: 8px;
+        height: 8px;
+      }
+
+      .milestone-label {
+        margin-top: 4px;
+        padding: 1px 2px;
+        font-size: 5.5px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header class="document-header">
+      <div>
+        <h1>Diagram Gantta projektu SafeKeys</h1>
+        <div class="subtitle">Okres realizacji: 16.03.2025 – 11.06.2025</div>
+        <div class="project-meta" aria-label="Zakres projektu">
+          <span class="meta-chip">ESP32</span>
+          <span class="meta-chip">RFID MFRC522</span>
+          <span class="meta-chip">Bolt Lock 12V</span>
+          <span class="meta-chip">Node.js + MongoDB</span>
+          <span class="meta-chip">WebSocket</span>
+          <span class="meta-chip">Frontend webowy</span>
+          <span class="meta-chip">Obudowa 3D</span>
+        </div>
+      </div>
+      <div class="actions no-print">
+        <div>
+          <button class="print-button secondary" id="png-export-button" type="button" onclick="exportPng()">Eksportuj PNG</button>
+          <div class="export-status" id="export-status" role="status" aria-live="polite"></div>
+        </div>
+        <button class="print-button" type="button" onclick="window.print()">Drukuj / eksportuj PDF</button>
+      </div>
+    </header>
+
+    <div class="summary-line">
+      <span>Zespół: Karol Łempicki, Filip Łagoźny, Hubert Małas</span>
+      <span>Zakres: analiza, elektronika, backend, firmware, frontend, model 3D, integracja, testy, dokumentacja</span>
+    </div>
+
+    <section class="gantt-scroll" aria-label="Diagram Gantta SafeKeys">
+      <div class="gantt" id="gantt"></div>
+    </section>
+
+    <section class="legend" aria-label="Legenda">
+      <span class="legend-title">Legenda</span>
+      <span class="legend-item"><span class="legend-swatch legend-phase"></span>pasek fazy</span>
+      <span class="legend-item"><span class="legend-swatch"></span>zadanie</span>
+      <span class="legend-item"><span class="legend-milestone"></span>kamień milowy</span>
+      <span class="legend-item"><span class="legend-grid"></span>daty kontrolne co 7 dni</span>
+      <span class="legend-item"><span class="legend-edge"></span>początek / koniec projektu</span>
+    </section>
+
+    <div class="footer-note">
+      Wszystkie daty podano w formacie dd.mm.rrrr. Pasek zadania obejmuje dni od daty rozpoczęcia do daty zakończenia włącznie.
+    </div>
+  </main>
+
+  <script>
+    const project = {
+      start: "2025-03-16",
+      end: "2025-06-11"
+    };
+
+    const phases = [
+      {
+        name: "Analiza i planowanie",
+        start: "2025-03-16",
+        end: "2025-03-23",
+        color: "#2f6f9f",
+        tasks: [
+          ["Analiza problemu", "2025-03-16", "2025-03-18"],
+          ["Research istniejących rozwiązań", "2025-03-17", "2025-03-20"],
+          ["Opracowanie koncepcji SafeKeys", "2025-03-19", "2025-03-22"],
+          ["Określenie wymagań funkcjonalnych", "2025-03-21", "2025-03-23"]
+        ]
+      },
+      {
+        name: "Projekt architektury systemu",
+        start: "2025-03-20",
+        end: "2025-03-30",
+        color: "#6d6f9b",
+        tasks: [
+          ["Projekt architektury frontend/backend/ESP32", "2025-03-20", "2025-03-24"],
+          ["Wybór technologii", "2025-03-21", "2025-03-25"],
+          ["Projekt komunikacji WebSocket/HTTP", "2025-03-24", "2025-03-28"],
+          ["Projekt modelu danych", "2025-03-26", "2025-03-30"]
+        ]
+      },
+      {
+        name: "Elektronika i dobór komponentów",
+        start: "2025-03-24",
+        end: "2025-04-06",
+        color: "#4f8f7a",
+        tasks: [
+          ["Dobór ESP32", "2025-03-24", "2025-03-26"],
+          ["Dobór czytników RFID MFRC522", "2025-03-25", "2025-03-29"],
+          ["Dobór zamków Bolt Lock 12V", "2025-03-27", "2025-03-31"],
+          ["Projekt połączeń elektrycznych", "2025-03-31", "2025-04-04"],
+          ["Pierwsze testy elektroniki", "2025-04-03", "2025-04-06"]
+        ]
+      },
+      {
+        name: "Backend",
+        start: "2025-03-31",
+        end: "2025-04-27",
+        color: "#566f9a",
+        tasks: [
+          ["Konfiguracja projektu backendowego", "2025-03-31", "2025-04-03"],
+          ["Projekt bazy MongoDB", "2025-04-02", "2025-04-06"],
+          ["Implementacja API", "2025-04-05", "2025-04-14"],
+          ["Implementacja logiki RFID", "2025-04-12", "2025-04-20"],
+          ["Implementacja zarządzania użytkownikami", "2025-04-15", "2025-04-24"],
+          ["Implementacja zarządzania skrytkami", "2025-04-20", "2025-04-27"]
+        ]
+      },
+      {
+        name: "Firmware ESP32",
+        start: "2025-04-07",
+        end: "2025-05-11",
+        color: "#3c8a9a",
+        tasks: [
+          ["Obsługa WiFi", "2025-04-07", "2025-04-11"],
+          ["Obsługa WebSocket", "2025-04-09", "2025-04-18"],
+          ["Obsługa RFID", "2025-04-14", "2025-04-25"],
+          ["Obsługa LED", "2025-04-21", "2025-04-29"],
+          ["Obsługa keypad", "2025-04-25", "2025-05-02"],
+          ["Obsługa relay", "2025-04-29", "2025-05-05"],
+          ["Obsługa czujników MC-38", "2025-05-02", "2025-05-08"],
+          ["Diagnostyka urządzenia", "2025-05-06", "2025-05-11"]
+        ]
+      },
+      {
+        name: "Frontend",
+        start: "2025-04-14",
+        end: "2025-05-11",
+        color: "#6f8a50",
+        tasks: [
+          ["Dashboard", "2025-04-14", "2025-04-19"],
+          ["Panel użytkowników", "2025-04-18", "2025-04-25"],
+          ["Panel RFID", "2025-04-22", "2025-04-29"],
+          ["Panel skrytek", "2025-04-26", "2025-05-03"],
+          ["Panel logów", "2025-04-30", "2025-05-06"],
+          ["Integracja z backendem", "2025-05-03", "2025-05-10"],
+          ["Wizualizacja stanów systemu", "2025-05-06", "2025-05-11"]
+        ]
+      },
+      {
+        name: "Projekt 3D",
+        start: "2025-04-14",
+        end: "2025-05-18",
+        color: "#8a6f50",
+        tasks: [
+          ["Projekt korpusu", "2025-04-14", "2025-04-20"],
+          ["Projekt drzwi", "2025-04-18", "2025-04-25"],
+          ["Projekt zawiasów", "2025-04-22", "2025-04-30"],
+          ["Projekt części serwisowej", "2025-04-28", "2025-05-05"],
+          ["Dostosowanie obudowy do elektroniki", "2025-05-03", "2025-05-18"]
+        ]
+      },
+      {
+        name: "Wydruki i iteracje",
+        start: "2025-04-28",
+        end: "2025-05-18",
+        color: "#a26e45",
+        tasks: [
+          ["Iteracja wydruku 1", "2025-04-28", "2025-04-30"],
+          ["Iteracja wydruku 2", "2025-05-01", "2025-05-03"],
+          ["Iteracja wydruku 3", "2025-05-04", "2025-05-06"],
+          ["Iteracja wydruku 4", "2025-05-07", "2025-05-09"],
+          ["Iteracja wydruku 5", "2025-05-10", "2025-05-12"],
+          ["Iteracja wydruku 6", "2025-05-13", "2025-05-15"],
+          ["Finalny wydruk", "2025-05-16", "2025-05-18"]
+        ]
+      },
+      {
+        name: "Integracja systemu",
+        start: "2025-05-12",
+        end: "2025-05-25",
+        color: "#437f85",
+        tasks: [
+          ["Montaż elektroniki", "2025-05-12", "2025-05-15"],
+          ["Integracja firmware z backendem", "2025-05-14", "2025-05-19"],
+          ["Integracja frontendu z backendem", "2025-05-16", "2025-05-21"],
+          ["Uruchomienie prototypu", "2025-05-20", "2025-05-23"],
+          ["Test działania pełnego przepływu RFID → ESP32 → backend → frontend", "2025-05-22", "2025-05-25"]
+        ]
+      },
+      {
+        name: "Testy",
+        start: "2025-05-19",
+        end: "2025-06-01",
+        color: "#5f7d69",
+        tasks: [
+          ["Testy RFID", "2025-05-19", "2025-05-21"],
+          ["Testy zamków", "2025-05-20", "2025-05-23"],
+          ["Testy LED", "2025-05-22", "2025-05-24"],
+          ["Testy WebSocket", "2025-05-24", "2025-05-27"],
+          ["Testy kodów jednorazowych", "2025-05-26", "2025-05-29"],
+          ["Testy użytkowników", "2025-05-28", "2025-05-31"],
+          ["Testy stabilności", "2025-05-30", "2025-06-01"]
+        ]
+      },
+      {
+        name: "Poprawki i optymalizacja",
+        start: "2025-05-26",
+        end: "2025-06-04",
+        color: "#8b6d83",
+        tasks: [
+          ["Usuwanie błędów", "2025-05-26", "2025-05-29"],
+          ["Poprawa UX", "2025-05-28", "2025-05-31"],
+          ["Poprawa logiki urządzenia", "2025-05-30", "2025-06-02"],
+          ["Poprawki komunikacji", "2025-06-01", "2025-06-03"],
+          ["Stabilizacja prototypu", "2025-06-02", "2025-06-04"]
+        ]
+      },
+      {
+        name: "Dokumentacja",
+        start: "2025-05-19",
+        end: "2025-06-11",
+        color: "#66788c",
+        tasks: [
+          ["Dokumentacja techniczna", "2025-05-19", "2025-06-05"],
+          ["Diagramy", "2025-05-21", "2025-05-30"],
+          ["Schematy", "2025-05-24", "2025-06-03"],
+          ["Opis modelu 3D", "2025-05-28", "2025-06-06"],
+          ["Opis elektroniki", "2025-05-31", "2025-06-08"],
+          ["Przygotowanie pracy inżynierskiej", "2025-06-04", "2025-06-11"]
+        ]
+      },
+      {
+        name: "Odbiór końcowy",
+        start: "2025-06-09",
+        end: "2025-06-11",
+        color: "#9a5c59",
+        tasks: [
+          ["Weryfikacja projektu", "2025-06-09", "2025-06-10"],
+          ["Przygotowanie prezentacji", "2025-06-09", "2025-06-11"],
+          ["Oddanie dokumentacji", "2025-06-11", "2025-06-11"]
+        ]
+      }
+    ];
+
+    const milestones = [
+      ["Pomysł projektu", "2025-03-16"],
+      ["Zakończenie projektu architektury", "2025-03-30"],
+      ["Wybrane komponenty", "2025-04-06"],
+      ["Podstawowy backend", "2025-04-27"],
+      ["Działający firmware i frontend", "2025-05-11"],
+      ["Finalny wydruk obudowy", "2025-05-18"],
+      ["Zintegrowany prototyp", "2025-05-25"],
+      ["Zakończenie testów", "2025-06-01"],
+      ["Oddanie dokumentacji", "2025-06-11"]
+    ];
+
+    const MS_PER_DAY = 24 * 60 * 60 * 1000;
+    const monthNames = [
+      "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+      "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+    ];
+
+    const projectStart = parseDate(project.start);
+    const projectEnd = parseDate(project.end);
+    const totalDays = daysBetween(projectStart, projectEnd) + 1;
+    const ticks = createTicks();
+
+    function parseDate(value) {
+      const parts = value.split("-").map(Number);
+      return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    }
+
+    function daysBetween(start, end) {
+      return Math.round((end.getTime() - start.getTime()) / MS_PER_DAY);
+    }
+
+    function addDays(date, days) {
+      return new Date(date.getTime() + days * MS_PER_DAY);
+    }
+
+    function formatDate(value) {
+      const date = typeof value === "string" ? parseDate(value) : value;
+      return [
+        String(date.getUTCDate()).padStart(2, "0"),
+        String(date.getUTCMonth() + 1).padStart(2, "0"),
+        date.getUTCFullYear()
+      ].join(".");
+    }
+
+    function formatRange(start, end) {
+      return `${formatDate(start)} – ${formatDate(end)}`;
+    }
+
+    function positionPct(value) {
+      const date = typeof value === "string" ? parseDate(value) : value;
+      return daysBetween(projectStart, date) / totalDays * 100;
+    }
+
+    function widthPct(start, end) {
+      return (daysBetween(parseDate(start), parseDate(end)) + 1) / totalDays * 100;
+    }
+
+    function clampDate(date, min, max) {
+      return new Date(Math.min(Math.max(date.getTime(), min.getTime()), max.getTime()));
+    }
+
+    function createTicks() {
+      const result = [];
+      let current = new Date(projectStart);
+      while (current <= projectEnd) {
+        result.push(new Date(current));
+        current = addDays(current, 7);
+      }
+      if (result[result.length - 1].getTime() !== projectEnd.getTime()) {
+        result.push(new Date(projectEnd));
+      }
+      return result;
+    }
+
+    function createMonthSegments() {
+      const result = [];
+      let cursor = new Date(Date.UTC(projectStart.getUTCFullYear(), projectStart.getUTCMonth(), 1));
+
+      while (cursor <= projectEnd) {
+        const year = cursor.getUTCFullYear();
+        const month = cursor.getUTCMonth();
+        const first = new Date(Date.UTC(year, month, 1));
+        const last = new Date(Date.UTC(year, month + 1, 0));
+        const start = clampDate(first, projectStart, projectEnd);
+        const end = clampDate(last, projectStart, projectEnd);
+        result.push({
+          label: `${monthNames[month]} ${year}`,
+          start,
+          end
+        });
+        cursor = new Date(Date.UTC(year, month + 1, 1));
+      }
+
+      return result;
+    }
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) {
+        node.className = className;
+      }
+      if (text !== undefined) {
+        node.textContent = text;
+      }
+      return node;
+    }
+
+    function addGridLines(cell) {
+      ticks.forEach((tick, index) => {
+        const line = el("span", "grid-line");
+        if (index === 0 || tick.getTime() === projectEnd.getTime()) {
+          line.classList.add("project-edge");
+        }
+        line.style.left = `${positionPct(tick)}%`;
+        cell.appendChild(line);
+      });
+    }
+
+    function makeRow(kind) {
+      const row = el("div", `gantt-row ${kind}`);
+      const left = el("div", "left-cell");
+      const timeline = el("div", "timeline-cell");
+      row.append(left, timeline);
+      return { row, left, timeline };
+    }
+
+    function renderAxis(container) {
+      const axis = el("div", "axis");
+
+      createMonthSegments().forEach((segment) => {
+        const band = el("div", "month-band", segment.label);
+        band.style.left = `${positionPct(segment.start)}%`;
+        band.style.width = `${(daysBetween(segment.start, segment.end) + 1) / totalDays * 100}%`;
+        axis.appendChild(band);
+      });
+
+      ticks.forEach((tick) => {
+        const mark = el("div", "axis-tick");
+        mark.style.left = `${positionPct(tick)}%`;
+        mark.appendChild(el("strong", "", formatDate(tick).slice(0, 5)));
+        axis.appendChild(mark);
+      });
+
+      container.appendChild(axis);
+    }
+
+    function renderHeader(gantt) {
+      const { row, left, timeline } = makeRow("header-row");
+      const title = el("div", "header-title");
+      title.append(
+        el("span", "", "Faza / zadanie"),
+        el("small", "", "Plan od 16.03.2025 do 11.06.2025")
+      );
+      left.appendChild(title);
+      renderAxis(timeline);
+      gantt.appendChild(row);
+    }
+
+    function renderMilestones(gantt) {
+      const { row, left, timeline } = makeRow("milestone-row");
+      timeline.classList.add("milestone-cell");
+      addGridLines(timeline);
+
+      left.append(
+        el("div", "milestone-heading", "Kamienie milowe"),
+        el("div", "milestone-note", "romby na osi czasu")
+      );
+
+      milestones.forEach(([name, date], index) => {
+        const marker = el("div", `milestone-marker ${index % 2 ? "low" : "high"}`);
+        marker.style.left = `${positionPct(date)}%`;
+        marker.setAttribute("title", `${formatDate(date)} — ${name}`);
+        marker.append(
+          el("span", "diamond"),
+          el("span", "milestone-label", `${formatDate(date).slice(0, 5)} · ${name}`)
+        );
+        timeline.appendChild(marker);
+      });
+
+      gantt.appendChild(row);
+    }
+
+    function renderPhase(gantt, phase, phaseIndex) {
+      const section = el("section", "phase-section");
+      section.style.setProperty("--phase-color", phase.color);
+
+      const phaseRow = makeRow("phase-row");
+      addGridLines(phaseRow.timeline);
+
+      const index = el("span", "phase-index", String(phaseIndex + 1));
+      const copy = el("div", "phase-text");
+      copy.append(
+        el("div", "phase-name", phase.name),
+        el("div", "phase-date", formatRange(phase.start, phase.end))
+      );
+      phaseRow.left.append(index, copy);
+
+      const phaseBar = el("div", "phase-bar");
+      phaseBar.style.left = `${positionPct(phase.start)}%`;
+      phaseBar.style.width = `${widthPct(phase.start, phase.end)}%`;
+      phaseBar.setAttribute("title", `${phase.name}: ${formatRange(phase.start, phase.end)}`);
+      phaseBar.appendChild(el("span", "", `${phase.name} · ${formatRange(phase.start, phase.end)}`));
+      phaseRow.timeline.appendChild(phaseBar);
+      section.appendChild(phaseRow.row);
+
+      phase.tasks.forEach(([taskName, start, end], taskIndex) => {
+        const taskRow = makeRow("task-row");
+        addGridLines(taskRow.timeline);
+
+        taskRow.left.appendChild(el("span", "task-number", `${phaseIndex + 1}.${taskIndex + 1}`));
+        const taskCopy = el("div", "task-copy");
+        taskCopy.append(
+          el("div", "task-name", taskName),
+          el("div", "date-range", formatRange(start, end))
+        );
+        taskRow.left.appendChild(taskCopy);
+
+        const bar = el("div", "task-bar");
+        const left = positionPct(start);
+        const width = widthPct(start, end);
+        bar.style.left = `${left}%`;
+        bar.style.width = `${width}%`;
+        bar.style.setProperty("--bar-color", phase.color);
+        bar.setAttribute("title", `${taskName}: ${formatRange(start, end)}`);
+        bar.setAttribute("aria-label", `${taskName}: ${formatRange(start, end)}`);
+        if (left > 76) {
+          bar.classList.add("near-end");
+        }
+        if (width < 5.5) {
+          bar.classList.add("compact");
+        }
+        bar.appendChild(el("span", "task-bar-label", `${taskName} · ${formatRange(start, end)}`));
+        taskRow.timeline.appendChild(bar);
+
+        section.appendChild(taskRow.row);
+      });
+
+      gantt.appendChild(section);
+    }
+
+    function setExportStatus(message) {
+      const status = document.getElementById("export-status");
+      if (status) {
+        status.textContent = message;
+      }
+    }
+
+    function nextFrame() {
+      return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+
+    function loadImage(url) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Nie udało się przygotować obrazu PNG."));
+        image.src = url;
+      });
+    }
+
+    function canvasToPngBlob(canvas) {
+      return new Promise((resolve, reject) => {
+        if (canvas.toBlob) {
+          canvas.toBlob((blob) => {
+            if (blob) {
+              resolve(blob);
+            } else {
+              reject(new Error("Przeglądarka nie zwróciła pliku PNG."));
+            }
+          }, "image/png");
+          return;
+        }
+
+        const dataUrl = canvas.toDataURL("image/png");
+        const binary = atob(dataUrl.split(",")[1]);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        resolve(new Blob([bytes], { type: "image/png" }));
+      });
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function exportPng() {
+      const button = document.getElementById("png-export-button");
+      const source = document.querySelector(".sheet");
+      const gantt = document.getElementById("gantt");
+      let sandbox = null;
+      let svgUrl = null;
+
+      if (!source || !gantt) {
+        setExportStatus("Nie znaleziono diagramu do eksportu.");
+        return;
+      }
+
+      try {
+        if (button) {
+          button.disabled = true;
+        }
+        setExportStatus("Przygotowuję PNG...");
+
+        if (document.fonts && document.fonts.ready) {
+          await document.fonts.ready;
+        }
+
+        const sourceStyle = getComputedStyle(source);
+        const paddingX = parseFloat(sourceStyle.paddingLeft) + parseFloat(sourceStyle.paddingRight);
+        const exportWidth = Math.ceil(Math.max(
+          source.scrollWidth,
+          source.getBoundingClientRect().width,
+          gantt.scrollWidth + paddingX
+        ));
+
+        sandbox = document.createElement("div");
+        sandbox.style.position = "fixed";
+        sandbox.style.left = "-100000px";
+        sandbox.style.top = "0";
+        sandbox.style.width = `${exportWidth}px`;
+        sandbox.style.background = "#ffffff";
+        sandbox.style.pointerEvents = "none";
+        sandbox.style.zIndex = "-1";
+
+        const clone = source.cloneNode(true);
+        clone.classList.add("export-capture");
+        clone.style.width = `${exportWidth}px`;
+        clone.style.margin = "0";
+        clone.querySelectorAll(".no-print, .no-export").forEach((node) => node.remove());
+
+        sandbox.appendChild(clone);
+        document.body.appendChild(sandbox);
+        await nextFrame();
+
+        const width = Math.ceil(clone.offsetWidth);
+        const height = Math.ceil(clone.scrollHeight);
+        const css = Array.from(document.querySelectorAll("style"))
+          .map((style) => style.textContent)
+          .join("\n");
+        const serialized = new XMLSerializer().serializeToString(clone);
+        const svg = [
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+          "<foreignObject width=\"100%\" height=\"100%\">",
+          "<div xmlns=\"http://www.w3.org/1999/xhtml\">",
+          `<style>${css}</style>`,
+          serialized,
+          "</div>",
+          "</foreignObject>",
+          "</svg>"
+        ].join("");
+
+        svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+        const image = await loadImage(svgUrl);
+        const canvas = document.createElement("canvas");
+        const maxPixels = 24000000;
+        let scale = Math.min(2, window.devicePixelRatio || 1.5);
+        if (width * height * scale * scale > maxPixels) {
+          scale = Math.sqrt(maxPixels / (width * height));
+        }
+        scale = Math.max(1, scale);
+
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        const context = canvas.getContext("2d");
+        context.setTransform(scale, 0, 0, scale, 0, 0);
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, width, height);
+        context.drawImage(image, 0, 0, width, height);
+
+        const pngBlob = await canvasToPngBlob(canvas);
+        downloadBlob(pngBlob, "safekeys-diagram-gantta-2025-03-16-2025-06-11.png");
+        setExportStatus("PNG gotowy do pobrania.");
+        setTimeout(() => setExportStatus(""), 3500);
+      } catch (error) {
+        console.error(error);
+        setExportStatus("Nie udało się wyeksportować PNG.");
+        alert("Nie udało się wyeksportować PNG w tej przeglądarce. Spróbuj otworzyć plik w Chrome, Edge albo Firefox.");
+      } finally {
+        if (svgUrl) {
+          URL.revokeObjectURL(svgUrl);
+        }
+        if (sandbox) {
+          sandbox.remove();
+        }
+        if (button) {
+          button.disabled = false;
+        }
+      }
+    }
+
+    function render() {
+      const gantt = document.getElementById("gantt");
+      renderHeader(gantt);
+      renderMilestones(gantt);
+      phases.forEach((phase, index) => renderPhase(gantt, phase, index));
+    }
+
+    render();
+  </script>
+</body>
+</html>
