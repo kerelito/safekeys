@@ -21,6 +21,9 @@ let logsCount = 0;
 let recentLogsData = [];
 let alertsData = [];
 let remoteActionsData = [];
+let activeReturnsData = [];
+let returnHistoryData = [];
+let returnSummaryData = { active: 0, completedToday: 0, failedToday: 0, conflicts: 0 };
 let confirmResolver = null;
 let logSearchDebounceId = null;
 let selectedLockerDetailsNumber = null;
@@ -32,6 +35,25 @@ const RFID_ITEM_TYPE_LABELS = {
   inne: "Inne",
   klucz_master: "Klucz master",
   karta_master: "Karta master"
+};
+
+const RFID_ITEM_STATUS_LABELS = {
+  IN_LOCKER: "W skrytce",
+  CHECKED_OUT: "Wydany",
+  RETURN_PENDING: "Oczekuje na zwrot",
+  RETURN_IN_PROGRESS: "Zwrot w toku",
+  CONFLICT: "Konflikt",
+  UNKNOWN: "Nieznany",
+  UNASSIGNED: "Brak przypisania"
+};
+
+const RETURN_SESSION_STATUS_LABELS = {
+  PENDING: "Oczekuje",
+  IN_PROGRESS: "W toku",
+  COMPLETED: "Zakończony",
+  FAILED: "Błąd",
+  EXPIRED: "Timeout",
+  CANCELLED: "Anulowany"
 };
 
 const PANEL_ROLE_LABELS = {
@@ -53,7 +75,11 @@ const LOCKER_REFRESH_EVENTS = [
   "LOCKER_DOOR_OPENED",
   "LOCKER_DOOR_CLOSED",
   "REMOTE_UNLOCK_REQUESTED",
-  "REMOTE_RELEASE_ALL_REQUESTED"
+  "REMOTE_RELEASE_ALL_REQUESTED",
+  "RETURN_COMPLETED",
+  "RETURN_FAILED",
+  "RETURN_EXPIRED",
+  "RETURN_CANCELLED"
 ];
 
 const RFID_USER_REFRESH_EVENTS = [
@@ -65,7 +91,14 @@ const RFID_USER_REFRESH_EVENTS = [
 const RFID_ITEM_REFRESH_EVENTS = [
   "RFID_ITEM_CREATED",
   "RFID_ITEM_UPDATED",
-  "RFID_ITEM_DELETED"
+  "RFID_ITEM_DELETED",
+  "RETURN_STARTED",
+  "RETURN_COMPLETED",
+  "RETURN_FAILED",
+  "RETURN_EXPIRED",
+  "RETURN_CANCELLED",
+  "RETURN_WRONG_ITEM",
+  "RETURN_WRONG_LOCKER"
 ];
 
 const PANEL_USER_REFRESH_EVENTS = [
@@ -134,7 +167,24 @@ const LOG_EVENT_PRESENTERS = {
   RFID_TAG_ASSIGNMENT_STARTED: log => ({ text: `Rozpoczęto nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-info" }),
   RFID_TAG_ASSIGNMENT_COMPLETED: log => ({ text: `Nadano tag RFID${formatLogItemLabel(log)}`, className: "log-success" }),
   RFID_TAG_ASSIGNMENT_FAILED: () => ({ text: "Nie udało się nadać taga RFID", className: "log-error" }),
-  RFID_TAG_ASSIGNMENT_CANCELLED: log => ({ text: `Anulowano nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-warning" })
+  RFID_TAG_ASSIGNMENT_CANCELLED: log => ({ text: `Anulowano nadawanie taga RFID${log.itemName ? ` dla ${log.itemName}` : ""}`, className: "log-warning" }),
+  RETURN_MASTER_SCAN: log => ({ text: `Master RFID: skan zwrotu${formatLogItemLabel(log)}`, className: "log-info" }),
+  RETURN_STARTED: log => ({ text: `Rozpoczęto zwrot S${log.locker}${formatLogItemLabel(log)}`, className: "log-info" }),
+  RETURN_LOCKER_OPENED: log => ({ text: `Otwarta skrytka zwrotu S${log.locker}`, className: "log-info" }),
+  RETURN_LOCK_HELD: log => ({ text: `Zamek S${log.locker} trzymany dla zwrotu`, className: "log-warning" }),
+  RETURN_ITEM_DETECTED: log => ({ text: `Wykryto przedmiot zwrotu S${log.locker}${formatLogItemLabel(log)}`, className: log.success === false ? "log-error" : "log-success" }),
+  RETURN_DOOR_OPENED: log => ({ text: `Otwarte drzwi podczas zwrotu S${log.locker}`, className: "log-warning" }),
+  RETURN_DOOR_CLOSED: log => ({ text: `Zamknięte drzwi podczas zwrotu S${log.locker}`, className: "log-success" }),
+  RETURN_COMPLETED: log => ({ text: `Zwrot zakończony S${log.locker}${formatLogItemLabel(log)}`, className: "log-success" }),
+  RETURN_FAILED: log => ({ text: `Zwrot nieudany S${log.locker}${formatLogItemLabel(log)}`, className: "log-error" }),
+  RETURN_EXPIRED: log => ({ text: `Zwrot wygasł S${log.locker}${formatLogItemLabel(log)}`, className: "log-error" }),
+  RETURN_CANCELLED: log => ({ text: `Zwrot anulowany S${log.locker}${formatLogItemLabel(log)}`, className: "log-warning" }),
+  RETURN_WRONG_ITEM: log => ({ text: `Niewłaściwy przedmiot w S${log.locker}${formatLogItemLabel(log)}`, className: "log-error" }),
+  RETURN_WRONG_LOCKER: log => ({ text: `Przedmiot w złej skrytce S${log.locker}${formatLogItemLabel(log)}`, className: "log-error" }),
+  RETURN_NO_ASSIGNED_LOCKER: log => ({ text: `Brak przypisanej skrytki${formatLogItemLabel(log)}`, className: "log-error" }),
+  RETURN_ITEM_ALREADY_IN_LOCKER: log => ({ text: `Przedmiot już w skrytce${formatLogItemLabel(log)}`, className: "log-warning" }),
+  RETURN_UNKNOWN_UID: log => ({ text: `Nieznany UID zwrotu ${log.tagId || ""}`.trim(), className: "log-error" }),
+  RETURN_LOCK_RELEASED: log => ({ text: `Zamek zwrotu S${log.locker} wyłączony`, className: log.success === false ? "log-warning" : "log-success" })
 };
 
 function formatRelativeTime(value) {
@@ -262,11 +312,18 @@ function updateOverviewMetrics() {
   setText("metricRfidItems", String(rfidItemsData.length));
   setText("metricRfidTags", String(rfidTags));
   setText("metricAlerts", String(alertsData.length));
+  setText("metricActiveReturns", String(returnSummaryData.active ?? activeReturnsData.length));
+  setText("metricReturnsToday", String(returnSummaryData.completedToday ?? 0));
+  setText("metricReturnFailures", String(returnSummaryData.failedToday ?? 0));
+  setText("metricReturnConflicts", String(returnSummaryData.conflicts ?? 0));
 
   setText("activeCodesCount", String(activeCodesData.length));
   setText("logsCount", String(logsCount));
   setText("remoteActionsCount", String(remoteActionsData.length));
   setText("dashboardRemoteActionsCount", String(remoteActionsData.length));
+  setText("returnsCount", String(activeReturnsData.length + returnHistoryData.length));
+  setText("activeReturnsCount", String(activeReturnsData.length));
+  setText("returnHistoryCount", String(returnHistoryData.length));
   setText("rfidUsersCount", String(rfidUsersData.length));
   setText("rfidItemsCount", String(rfidItemsData.length));
   setText("panelUsersCount", String(panelUsersData.length));
@@ -564,6 +621,7 @@ function updateMasterUi() {
   updateRfidItemTypeOptions();
   renderRfidUsers();
   renderRfidItems();
+  renderReturns();
 
   if (!isMaster && currentPage === "panelUsers") {
     setPage("dashboard");
@@ -657,6 +715,22 @@ function connectSocket() {
       cancelRfidTagAssignment({ reason: "cleanup_after_result", silentSuccess: true, silentNotFound: true });
     }
   });
+  socket.on("rfid-item-changed", item => {
+    const index = rfidItemsData.findIndex(candidate => candidate._id === item._id);
+    if (index >= 0) {
+      rfidItemsData[index] = item;
+    } else {
+      rfidItemsData.push(item);
+    }
+    renderRfidItems();
+    loadReturnSummary();
+  });
+  socket.on("return-session-changed", async session => {
+    applyReturnSessionUpdate(session);
+    renderReturns();
+    await loadReturnSummary();
+    await loadRemoteActions();
+  });
   socket.on("active-codes-changed", async () => {
     await loadActiveCodes();
   });
@@ -721,6 +795,7 @@ function setPage(page, closeMenu = true) {
     access: "Dostępy",
     users: "Użytkownicy RFID",
     items: "Przedmioty RFID",
+    returns: "Zwroty",
     logs: "Logi",
     diagnostics: "Diagnostyka",
     panelUsers: "Administracja"
@@ -1102,6 +1177,8 @@ async function initializeDashboard() {
     loadLogs(),
     loadRfidUsers(),
     loadRfidItems(),
+    loadReturns(),
+    loadReturnSummary(),
     loadCurrentTagAssignment(),
     currentUser?.isMaster ? loadPanelUsers() : Promise.resolve()
   ]);
@@ -1123,6 +1200,8 @@ function resetRfidItemForm() {
   document.getElementById("rfidItemTagId").value = "";
   updateRfidItemTypeOptions();
   document.getElementById("rfidItemType").value = "brelok";
+  document.getElementById("rfidItemAssignedLocker").value = "";
+  document.getElementById("rfidItemStatus").value = "UNASSIGNED";
   document.getElementById("rfidItemSubmit").textContent = "Dodaj przedmiot";
   renderRfidAssignmentStatus();
 }
@@ -1174,6 +1253,8 @@ function populateRfidItemForm(item) {
   document.getElementById("rfidItemName").value = item.name;
   document.getElementById("rfidItemTagId").value = item.tagId;
   document.getElementById("rfidItemType").value = item.itemType;
+  document.getElementById("rfidItemAssignedLocker").value = item.assignedLocker || "";
+  document.getElementById("rfidItemStatus").value = item.status || (item.assignedLocker ? "IN_LOCKER" : "UNASSIGNED");
   document.getElementById("rfidItemSubmit").textContent = "Zapisz zmiany";
   setPage("items");
 }
@@ -1191,6 +1272,74 @@ function populatePanelUserForm(user) {
 
 function getItemTypeLabel(itemType) {
   return RFID_ITEM_TYPE_LABELS[itemType] || "Inne";
+}
+
+function getItemStatusLabel(status) {
+  return RFID_ITEM_STATUS_LABELS[status] || "Nieznany";
+}
+
+function getReturnStatusLabel(status) {
+  return RETURN_SESSION_STATUS_LABELS[status] || "Nieznany";
+}
+
+function getStatusBadgeClass(status) {
+  if (["IN_LOCKER", "COMPLETED"].includes(status)) return "is-ok";
+  if (["CHECKED_OUT", "RETURN_PENDING", "RETURN_IN_PROGRESS", "PENDING", "IN_PROGRESS", "CANCELLED"].includes(status)) return "is-warning";
+  if (["CONFLICT", "FAILED", "EXPIRED", "UNASSIGNED"].includes(status)) return "is-error";
+  return "";
+}
+
+function formatShortDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 s";
+  }
+
+  const seconds = Math.ceil(value / 1000);
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest > 0 ? `${minutes} min ${rest} s` : `${minutes} min`;
+}
+
+function getReturnRemainingMs(session) {
+  if (!["PENDING", "IN_PROGRESS"].includes(session?.status)) {
+    return 0;
+  }
+
+  const expiresAt = session.expiresAt ? new Date(session.expiresAt).getTime() : NaN;
+  if (!Number.isFinite(expiresAt)) {
+    return Number(session.remainingMs) || 0;
+  }
+
+  return Math.max(0, expiresAt - Date.now());
+}
+
+function describeReturnStage(session) {
+  if (!["PENDING", "IN_PROGRESS"].includes(session.status)) {
+    return session.failureReason || getReturnStatusLabel(session.status);
+  }
+
+  if (getReturnRemainingMs(session) <= 0) {
+    return "Czas minął";
+  }
+
+  if (session.detectedUid && session.doorClosed === true) {
+    return "Przedmiot wykryty, drzwi zamknięte";
+  }
+
+  if (session.detectedUid) {
+    return "Przedmiot wykryty";
+  }
+
+  if (session.doorOpenedAt) {
+    return "Drzwi otwarte";
+  }
+
+  return "Oczekiwanie na odłożenie";
 }
 
 function describeDetectedItem(data) {
@@ -1381,7 +1530,10 @@ function renderRfidItems() {
     item.name,
     item.tagId,
     item.itemType,
-    getItemTypeLabel(item.itemType)
+    getItemTypeLabel(item.itemType),
+    item.assignedLocker ? `s${item.assignedLocker}` : "brak przypisania",
+    getItemStatusLabel(item.status),
+    item.conflictReason
   ], query));
 
   container.innerHTML = "";
@@ -1415,9 +1567,18 @@ function renderRfidItems() {
     }
     typeChip.textContent = getItemTypeLabel(item.itemType);
 
+    const assignedLocker = document.createElement("span");
+    assignedLocker.textContent = item.assignedLocker ? `S${item.assignedLocker}` : "Brak";
+
     const status = document.createElement("span");
-    status.className = "status-badge is-ok";
-    status.textContent = isMasterRfidItem(item) ? "Administracyjny" : "Widoczny w logach";
+    status.className = `status-badge ${isMasterRfidItem(item) ? "is-ok" : getStatusBadgeClass(item.status)}`;
+    status.textContent = isMasterRfidItem(item) ? "Administracyjny" : getItemStatusLabel(item.status);
+
+    const lastDetected = document.createElement("span");
+    lastDetected.textContent = item.lastDetectedAt ? formatRelativeTime(item.lastDetectedAt) : "brak danych";
+
+    const conflict = document.createElement("span");
+    conflict.textContent = item.conflictReason || "-";
 
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -1449,7 +1610,10 @@ function renderRfidItems() {
     row.appendChild(name);
     row.appendChild(tag);
     row.appendChild(typeChip);
+    row.appendChild(assignedLocker);
     row.appendChild(status);
+    row.appendChild(lastDetected);
+    row.appendChild(conflict);
     row.appendChild(actions);
     container.appendChild(row);
   });
@@ -1504,6 +1668,146 @@ function renderRfidAssignmentStatus() {
   status.textContent = `Nadawanie nie powiodło się: ${currentTagAssignment.result?.error || "nieznany błąd"}.`;
   button.disabled = isTagAssignmentRequestPending;
   button.textContent = isTagAssignmentRequestPending ? "Czyszczenie..." : "Nadaj tag";
+}
+
+function applyReturnSessionUpdate(session) {
+  if (!session?.sessionId) {
+    return;
+  }
+
+  activeReturnsData = activeReturnsData.filter(item => item.sessionId !== session.sessionId);
+  returnHistoryData = returnHistoryData.filter(item => item.sessionId !== session.sessionId);
+
+  if (["PENDING", "IN_PROGRESS"].includes(session.status)) {
+    activeReturnsData = [session, ...activeReturnsData]
+      .sort((left, right) => new Date(right.startedAt) - new Date(left.startedAt));
+  } else {
+    returnHistoryData = [session, ...returnHistoryData]
+      .sort((left, right) => new Date(right.startedAt) - new Date(left.startedAt))
+      .slice(0, 80);
+  }
+}
+
+function createReturnStatusBadge(status) {
+  const badge = document.createElement("span");
+  badge.className = `status-badge ${getStatusBadgeClass(status)}`;
+  badge.textContent = getReturnStatusLabel(status);
+  return badge;
+}
+
+function renderReturns() {
+  const activeList = document.getElementById("activeReturnsList");
+  const historyList = document.getElementById("returnHistoryList");
+  if (!activeList || !historyList) {
+    return;
+  }
+
+  const activeSessions = activeReturnsData.map(session => ({
+    ...session,
+    remainingMs: getReturnRemainingMs(session)
+  }));
+
+  activeList.innerHTML = "";
+  historyList.innerHTML = "";
+
+  setText("activeReturnsCount", String(activeSessions.length));
+  setText("returnHistoryCount", String(returnHistoryData.length));
+  setText("returnsCount", String(activeSessions.length + returnHistoryData.length));
+
+  if (activeSessions.length === 0) {
+    renderEmptyState("activeReturnsList", "Nie ma teraz aktywnych zwrotów.");
+  } else {
+    activeSessions.forEach(session => {
+      const row = document.createElement("div");
+      row.className = "table-row returns-row";
+
+      const itemName = document.createElement("strong");
+      itemName.textContent = session.itemName || "Przedmiot RFID";
+
+      const uid = document.createElement("span");
+      uid.className = "tag-mono";
+      uid.textContent = session.tagUid || "-";
+
+      const locker = document.createElement("span");
+      locker.textContent = `S${session.assignedLocker}`;
+
+      const started = document.createElement("span");
+      started.textContent = session.startedAt ? formatDateTime(session.startedAt) : "brak danych";
+
+      const remaining = document.createElement("span");
+      remaining.textContent = formatShortDuration(session.remainingMs);
+
+      const stage = document.createElement("span");
+      stage.textContent = describeReturnStage(session);
+
+      const actions = document.createElement("div");
+      actions.className = "row-actions";
+
+      const cancelButton = document.createElement("button");
+      cancelButton.className = "danger subtle-danger";
+      cancelButton.type = "button";
+      cancelButton.textContent = "Anuluj";
+      cancelButton.addEventListener("click", () => cancelReturnSession(session.sessionId));
+      if (canOperateLockers()) {
+        actions.appendChild(cancelButton);
+      }
+
+      row.appendChild(itemName);
+      row.appendChild(uid);
+      row.appendChild(locker);
+      row.appendChild(started);
+      row.appendChild(remaining);
+      row.appendChild(createReturnStatusBadge(session.status));
+      row.appendChild(stage);
+      row.appendChild(actions);
+      activeList.appendChild(row);
+    });
+  }
+
+  if (returnHistoryData.length === 0) {
+    renderEmptyState("returnHistoryList", "Historia zwrotów jest jeszcze pusta.");
+  } else {
+    returnHistoryData.forEach(session => {
+      const row = document.createElement("div");
+      row.className = "table-row return-history-row";
+
+      const itemName = document.createElement("strong");
+      itemName.textContent = session.itemName || "Przedmiot RFID";
+
+      const uid = document.createElement("span");
+      uid.className = "tag-mono";
+      uid.textContent = session.tagUid || "-";
+
+      const locker = document.createElement("span");
+      locker.textContent = `S${session.assignedLocker}`;
+
+      const started = document.createElement("span");
+      started.textContent = session.startedAt ? formatDateTime(session.startedAt) : "brak danych";
+
+      const ended = document.createElement("span");
+      ended.textContent = session.completedAt || session.failedAt
+        ? formatDateTime(session.completedAt || session.failedAt)
+        : "brak danych";
+
+      const reason = document.createElement("span");
+      reason.textContent = session.failureReason || "-";
+
+      const duration = document.createElement("span");
+      duration.textContent = session.durationMs ? formatShortDuration(session.durationMs) : "-";
+
+      row.appendChild(itemName);
+      row.appendChild(uid);
+      row.appendChild(locker);
+      row.appendChild(started);
+      row.appendChild(ended);
+      row.appendChild(createReturnStatusBadge(session.status));
+      row.appendChild(reason);
+      row.appendChild(duration);
+      historyList.appendChild(row);
+    });
+  }
+
+  updateOverviewMetrics();
 }
 
 function renderPanelUsers() {
@@ -1595,6 +1899,39 @@ async function loadRfidItems() {
   }
 }
 
+async function loadReturns({ silent = false } = {}) {
+  if (!isAuthenticated) {
+    return;
+  }
+
+  try {
+    const sessions = await apiFetch("/returns?limit=160");
+    const sortedSessions = sessions.sort((left, right) => new Date(right.startedAt) - new Date(left.startedAt));
+    activeReturnsData = sortedSessions.filter(session => ["PENDING", "IN_PROGRESS"].includes(session.status));
+    returnHistoryData = sortedSessions.filter(session => !["PENDING", "IN_PROGRESS"].includes(session.status));
+    renderReturns();
+  } catch (error) {
+    if (!silent) {
+      showToast(error.message, true);
+    }
+  }
+}
+
+async function loadReturnSummary({ silent = true } = {}) {
+  if (!isAuthenticated) {
+    return;
+  }
+
+  try {
+    returnSummaryData = await apiFetch("/returns/summary");
+    updateOverviewMetrics();
+  } catch (error) {
+    if (!silent) {
+      showToast(error.message, true);
+    }
+  }
+}
+
 async function loadCurrentTagAssignment() {
   try {
     const data = await apiFetch("/rfid-items/tag-assignment");
@@ -1679,7 +2016,9 @@ async function submitRfidItemForm(event) {
   const payload = {
     name: document.getElementById("rfidItemName").value.trim(),
     tagId: document.getElementById("rfidItemTagId").value.trim(),
-    itemType
+    itemType,
+    assignedLocker: document.getElementById("rfidItemAssignedLocker").value || null,
+    status: document.getElementById("rfidItemStatus").value
   };
 
   try {
@@ -1781,6 +2120,44 @@ function handleRfidTagAssignmentButtonClick() {
   }
 
   startRfidTagAssignment();
+}
+
+async function cancelReturnSession(sessionId) {
+  if (!canOperateLockers()) {
+    showToast("Nie masz uprawnień do anulowania zwrotów.", true);
+    return;
+  }
+
+  const session = activeReturnsData.find(item => item.sessionId === sessionId);
+  const confirmed = await confirmAction({
+    title: "Anulować zwrot?",
+    message: `Sesja ${session?.itemName || sessionId} zostanie przerwana, a zamek dostanie polecenie zwolnienia trybu zwrotu.`,
+    confirmLabel: "Anuluj zwrot"
+  });
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiFetch(`/returns/${encodeURIComponent(sessionId)}/cancel`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ reason: "manual_cancel" })
+    });
+
+    showToast("Zwrot został anulowany.");
+    await Promise.all([
+      loadReturns({ silent: true }),
+      loadReturnSummary(),
+      loadRemoteActions(),
+      loadRfidItems(),
+      loadLockers(),
+      loadAlerts()
+    ]);
+  } catch (error) {
+    showToast(error.message, true);
+  }
 }
 
 async function submitPanelUserForm(event) {
@@ -2299,6 +2676,14 @@ function getRemoteActionTypeLabel(action) {
 
   if (action.type === "CANCEL_RFID_TAG_ASSIGNMENT") {
     return "Anuluj nadawanie RFID";
+  }
+
+  if (action.type === "RETURN_ITEM") {
+    return action.locker ? `Zwrot do S${action.locker}` : "Rozpocznij zwrot";
+  }
+
+  if (action.type === "CANCEL_RETURN_ITEM") {
+    return action.locker ? `Anuluj zwrot S${action.locker}` : "Anuluj zwrot";
   }
 
   return action.type || "Polecenie";
@@ -3137,11 +3522,14 @@ window.onload = async () => {
 setInterval(() => {
   if (isAuthenticated) {
     updateCountdowns();
+    renderReturns();
   }
 }, 1000);
 setInterval(() => {
   if (isAuthenticated) {
     loadLockers();
+    loadReturns({ silent: true });
+    loadReturnSummary();
   }
 }, 30000);
 setInterval(() => {

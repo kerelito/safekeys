@@ -6,7 +6,11 @@ const COMMAND_DELIVERABLE_STATUSES = ["pending", "delivered"];
 const DEFAULT_DEVICE_CONFIG = {
   heartbeatIntervalMs: 60000,
   deviceActionsPollIntervalMs: 8000,
-  lockPulseMs: 700,
+  lockPulseMs: 5000,
+  returnSessionTimeoutMs: 120000,
+  doorSensors: {
+    enabled: false
+  },
   remoteLogging: {
     enabled: true,
     minLevel: "info"
@@ -82,6 +86,9 @@ function normalizeDeviceConfig(config = {}) {
   const diagnostics = typeof source.diagnostics === "object" && source.diagnostics !== null
     ? source.diagnostics
     : {};
+  const doorSensors = typeof source.doorSensors === "object" && source.doorSensors !== null
+    ? source.doorSensors
+    : {};
 
   const minLevel = normalizeString(remoteLogging.minLevel, defaultConfig.remoteLogging.minLevel).toLowerCase();
 
@@ -89,6 +96,10 @@ function normalizeDeviceConfig(config = {}) {
     heartbeatIntervalMs: clampNumber(source.heartbeatIntervalMs, defaultConfig.heartbeatIntervalMs, 10000, 600000),
     deviceActionsPollIntervalMs: clampNumber(source.deviceActionsPollIntervalMs, defaultConfig.deviceActionsPollIntervalMs, 2000, 120000),
     lockPulseMs: clampNumber(source.lockPulseMs, defaultConfig.lockPulseMs, 100, 5000),
+    returnSessionTimeoutMs: clampNumber(source.returnSessionTimeoutMs, defaultConfig.returnSessionTimeoutMs, 30000, 300000),
+    doorSensors: {
+      enabled: normalizeBoolean(doorSensors.enabled, defaultConfig.doorSensors.enabled)
+    },
     remoteLogging: {
       enabled: normalizeBoolean(remoteLogging.enabled, defaultConfig.remoteLogging.enabled),
       minLevel: ["debug", "info", "warn", "error"].includes(minLevel) ? minLevel : defaultConfig.remoteLogging.minLevel
@@ -224,7 +235,7 @@ function buildTagVerifyResult(message = {}, verification = {}, extra = {}) {
       || payload.tagId
       || payload.uid
   );
-  const known = verification?.valid === true;
+  const known = verification?.valid === true || item?.itemKnown === true;
   const ok = extra.ok !== false && known;
   const displayName = normalizeString(
     extra.displayName
@@ -249,6 +260,16 @@ function buildTagVerifyResult(message = {}, verification = {}, extra = {}) {
 
   if (extra.error) {
     result.error = String(extra.error);
+  }
+
+  const returnStarted = extra.returnStarted === true || verification?.returnStarted === true;
+  if (returnStarted) {
+    result.returnStarted = true;
+    result.returnSession = extra.returnSession || verification?.returnSession || null;
+  }
+
+  if (extra.returnError || verification?.returnError) {
+    result.returnError = String(extra.returnError || verification.returnError);
   }
 
   return result;

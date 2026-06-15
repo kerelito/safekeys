@@ -98,6 +98,8 @@ test("normalizes remote device config with guarded ranges", () => {
   const config = normalizeDeviceConfig({
     heartbeatIntervalMs: 1000,
     lockPulseMs: 9000,
+    returnSessionTimeoutMs: 10000,
+    doorSensors: { enabled: true },
     remoteLogging: { enabled: false, minLevel: "WARN" },
     codeRateLimit: { maxFailures: 0, windowMs: 10, lockoutMs: 2000 },
     servicePanel: { enabled: false }
@@ -105,6 +107,8 @@ test("normalizes remote device config with guarded ranges", () => {
 
   assert.equal(config.heartbeatIntervalMs, 10000);
   assert.equal(config.lockPulseMs, 5000);
+  assert.equal(config.returnSessionTimeoutMs, 30000);
+  assert.equal(config.doorSensors.enabled, true);
   assert.equal(config.remoteLogging.enabled, false);
   assert.equal(config.remoteLogging.minLevel, "warn");
   assert.equal(config.codeRateLimit.maxFailures, 1);
@@ -219,6 +223,37 @@ test("builds RFID verification result separate from transport ack", () => {
   assert.equal(result.accessibleLockersMask, 7);
   assert.deepEqual(result.lockers, [1, 2, 3]);
   assert.equal(result.displayName, "Master");
+});
+
+test("builds RFID return-start result for firmware", () => {
+  const result = buildTagVerifyResult({
+    messageId: "tagverify-return-1",
+    payload: { tagId: "9A644335" }
+  }, {
+    valid: false,
+    isMaster: false,
+    item: {
+      tagId: "9A644335",
+      itemName: "Brelok testowy",
+      itemKnown: true
+    },
+    returnStarted: true,
+    returnSession: {
+      sessionId: "return-session-1",
+      assignedLocker: 2,
+      status: "IN_PROGRESS"
+    }
+  });
+
+  assert.equal(result.type, "tag.verify.result");
+  assert.equal(result.uid, "9A644335");
+  assert.equal(result.known, true);
+  assert.equal(result.returnStarted, true);
+  assert.deepEqual(result.returnSession, {
+    sessionId: "return-session-1",
+    assignedLocker: 2,
+    status: "IN_PROGRESS"
+  });
 });
 
 test("builds code verification result separate from transport ack", () => {

@@ -930,11 +930,48 @@ dl {
 
 .rfid-users-head,
 .rfid-user-row,
-.rfid-items-head,
-.rfid-item-row,
 .panel-users-head,
 .panel-user-row {
   grid-template-columns: minmax(170px, 1fr) minmax(160px, 0.9fr) minmax(130px, 0.8fr) minmax(150px, 0.8fr) minmax(140px, 0.7fr);
+}
+
+.rfid-items-head,
+.rfid-item-row {
+  grid-template-columns:
+    minmax(150px, 1fr)
+    minmax(135px, 0.8fr)
+    minmax(100px, 0.55fr)
+    minmax(82px, 0.45fr)
+    minmax(132px, 0.75fr)
+    minmax(120px, 0.65fr)
+    minmax(130px, 0.75fr)
+    minmax(150px, 0.7fr);
+}
+
+.returns-head,
+.returns-row {
+  grid-template-columns:
+    minmax(150px, 1fr)
+    minmax(135px, 0.75fr)
+    minmax(76px, 0.42fr)
+    minmax(150px, 0.85fr)
+    minmax(96px, 0.5fr)
+    minmax(118px, 0.62fr)
+    minmax(170px, 1fr)
+    minmax(88px, 0.42fr);
+}
+
+.return-history-head,
+.return-history-row {
+  grid-template-columns:
+    minmax(150px, 1fr)
+    minmax(135px, 0.75fr)
+    minmax(76px, 0.42fr)
+    minmax(150px, 0.85fr)
+    minmax(150px, 0.85fr)
+    minmax(118px, 0.62fr)
+    minmax(130px, 0.72fr)
+    minmax(84px, 0.42fr);
 }
 
 .status-badge {

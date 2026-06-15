@@ -69,6 +69,8 @@ static const unsigned long REMOTE_CONFIG_FETCH_RETRY_MS = 30000;
 
 static const bool ENABLE_KEYPAD = true;
 static const bool ENABLE_LOCKER_SWITCH_INPUTS = false;
+static const bool ENABLE_DOOR_SENSORS = false;
+static const bool DOOR_SENSOR_ACTIVE_LOW = true;
 static const bool DEBUG_RFID_VERBOSE = true;
 
 #ifdef LED_BUILTIN
@@ -84,10 +86,13 @@ static const uint8_t I2C_SCL_PIN = 22;
 static const uint8_t KEYPAD_I2C_ADDRESS = 0x20;
 
 static const uint8_t STRIP_PIN = 4;
-static const uint16_t TOTAL_LEDS = 60;
+static const uint16_t TOTAL_LEDS = 35;
 static const uint8_t LOCKER_COUNT = 3;
 static const uint8_t LOCK_RELAY_COUNT = 4;
-static const uint8_t LEDS_PER_LOCKER = 20;
+static const uint8_t LEDS_PER_LOCKER = 10;
+static const uint8_t LED_SEPARATOR_COUNT = 5;
+static const uint16_t LOCKER_LED_SEGMENT_STARTS[LOCKER_COUNT] = { 1, 12, 23 };
+static const uint16_t LED_SEPARATOR_POSITIONS[LED_SEPARATOR_COUNT] = { 0, 11, 22, 33, 34 };
 static const uint8_t LOCK_RELAY_PINS[LOCK_RELAY_COUNT] = {
   27, // locker 1
   26, // locker 2
@@ -95,14 +100,15 @@ static const uint8_t LOCK_RELAY_PINS[LOCK_RELAY_COUNT] = {
   33  // locker 4
 };
 static const bool RELAY_ACTIVE_LOW = true;
-static const uint32_t LOCK_UNLOCK_PULSE_MS = 700;
+static const uint32_t LOCK_UNLOCK_PULSE_MS = 5000;
 static const bool OPEN_LOCKS_PARALLEL = true;
 
 static_assert(LOCKER_COUNT <= LOCK_RELAY_COUNT, "Logical lockers exceed configured relay outputs.");
+static_assert(LOCKER_COUNT * LEDS_PER_LOCKER + LED_SEPARATOR_COUNT == TOTAL_LEDS, "LED strip mapping must cover all configured LEDs.");
 
 static const uint8_t CODE_LENGTH = 4;
-static const uint8_t CODE_ENTRY_GROUP_SIZE = 3;
-static const uint16_t CODE_ENTRY_LED_GROUP_STARTS[CODE_LENGTH] = { 8, 22, 36, 50 };
+static const uint8_t CODE_ENTRY_GROUP_SIZE = 2;
+static const uint16_t CODE_ENTRY_LED_GROUP_STARTS[CODE_LENGTH] = { 4, 13, 23, 30 };
 static const unsigned long CODE_VERIFY_PENDING_PULSE_MS = 900;
 static const unsigned long CODE_RESULT_ON_MS = 180;
 static const unsigned long CODE_RESULT_OFF_MS = 120;
@@ -118,6 +124,18 @@ static const uint8_t RFID_RST_PIN = 15;
 static const uint8_t RFID_LOCKER_SS_PINS[LOCKER_COUNT] = { 5, 16, 17 };
 static const uint8_t RFID_MASTER_SS_PIN = 32;
 static const byte RFID_ANTENNA_GAIN = MFRC522::RxGain_max;
+
+/*
+  MC-38 door sensors pin table:
+  - locker 1: GPIO18
+  - locker 2: GPIO19
+  - locker 3: GPIO23
+
+  Reserved pins avoid the RC522 SPI/SS lines (14/12/13/15/5/16/17/32),
+  relay outputs (27/26/25/33), WS2812B data (4), I2C keypad (21/22),
+  and fragile ESP32 bootstrapping pins.
+*/
+static const uint8_t DOOR_SENSOR_PINS[LOCKER_COUNT] = { 18, 19, 23 };
 
 static const unsigned long WIFI_RETRY_MS = 5000;
 static const unsigned long WIFI_RETRY_MAX_MS = 60000;
@@ -309,6 +327,7 @@ struct TagAssignmentMode {
 enum LedMode : uint8_t {
   LED_MODE_NORMAL,
   LED_MODE_ACCESS_SELECTION,
+  LED_MODE_RETURN_IN_PROGRESS,
   LED_MODE_ERROR_FLASH
 };
 
@@ -362,6 +381,22 @@ struct AccessSelectionSession {
   String lastBusyUid;
 };
 
+struct ReturnSessionState {
+  bool active;
+  uint8_t lockerId;
+  String expectedUid;
+  String sessionId;
+  uint32_t startedAtMs;
+  uint32_t timeoutMs;
+  bool itemDetected;
+  bool doorOpened;
+  bool doorClosed;
+  bool lockHeld;
+  bool holdLockUntilCompleted;
+  bool requireDoorSensor;
+  String lastDetectedUid;
+};
+
 struct ErrorFlashEffect {
   bool active;
   uint32_t startedAtMs;
@@ -388,6 +423,7 @@ enum class NetworkJobType : uint8_t {
   VerifyCode,
   VerifyMasterTag,
   AccessSelectionEvent,
+  ReturnProgress,
   TagAssignmentResult,
   DeviceLog,
   DeviceDiagnostic,
@@ -401,10 +437,10 @@ struct NetworkJob {
   bool boolValue2;
   bool boolValue3;
   uint32_t numberValue;
-  char text1[32];
+  char text1[64];
   char text2[32];
-  char text3[32];
-  char text4[96];
+  char text3[64];
+  char text4[128];
   char text5[64];
   bool lockerHasTag[LOCKER_COUNT];
   bool lockerDoorClosed[LOCKER_COUNT];
@@ -438,10 +474,10 @@ struct NetworkResult {
   uint8_t lockerNumber;
   uint8_t count;
   long numberValue;
-  char text1[32];
+  char text1[64];
   char text2[64];
   char text3[64];
-  char text4[32];
+  char text4[64];
   char requestId[64];
   char actionId[32];
   char actionType[32];
@@ -566,6 +602,21 @@ AccessSelectionSession accessSelection = {
   0,
   "",
   "",
+  ""
+};
+ReturnSessionState returnSession = {
+  false,
+  0,
+  "",
+  "",
+  0,
+  120000,
+  false,
+  false,
+  false,
+  false,
+  true,
+  false,
   ""
 };
 LockRelayState lockRelayStates[LOCK_RELAY_COUNT] = {};
@@ -744,6 +795,7 @@ bool sendTagAssignmentResultWs(const NetworkJob& job);
 bool sendVerifyCodeWs(const NetworkJob& job);
 bool sendVerifyMasterTagWs(const NetworkJob& job);
 bool sendAccessSelectionEventWs(const NetworkJob& job);
+bool sendReturnProgressWs(const NetworkJob& job);
 bool sendDeviceLogWs(const NetworkJob& job);
 bool sendDeviceDiagnosticWs(const NetworkJob& job);
 bool fetchRemoteConfigForTask(NetworkResult& result);
@@ -754,6 +806,7 @@ bool postLegacyLockerStatusBatch(const NetworkJob& job);
 bool postVerifyMasterTag(const char* tagId, NetworkResult& result);
 bool postCommandAck(const NetworkJob& job);
 bool postAccessSelectionEvent(const NetworkJob& job);
+bool postReturnProgress(const NetworkJob& job);
 bool postDeviceSyncMessage(const char* messageJson, const char* requestLabel);
 uint32_t nextDeviceSequence();
 void buildMessageId(char* buffer, size_t bufferSize, const char* prefix, uint32_t sequence);
@@ -833,6 +886,8 @@ void pulseLed(unsigned long durationMs);
 void configureLockerInputs();
 bool readInputPin(const LockerInputPin& config);
 LockerState readLockerState(uint8_t lockerIndex);
+void configureDoorSensors();
+bool isLockerDoorClosed(uint8_t lockerId);
 bool isLockerComplete(const LockerState& state);
 LockerLedStatus getLockerLedStatus(uint8_t lockerIndex, const LockerState& state);
 LockerLedStatus getProvisionalLockerLedStatus(const LockerState& state);
@@ -859,6 +914,8 @@ void applyBackendOfflineOverlay(uint32_t nowMs);
 void applyOnlineBreathOverlay(uint32_t nowMs);
 void fillSegment(const LockerLedSegment& segment, uint32_t color);
 void clearSegment(const LockerLedSegment& segment);
+void fillSeparatorLeds(uint32_t color);
+void renderSeparatorLeds(uint32_t nowMs);
 bool hasAccessToLocker(uint8_t mask, int lockerNumber);
 uint8_t lockerNumberToMask(int lockerNumber);
 LockerLedSegment getLockerLedSegment(uint8_t lockerNumber);
@@ -905,9 +962,19 @@ void handleAccessSelectionKey(char key);
 void openSelectedLocker(uint8_t lockerNumber);
 void openAllAccessibleLockers();
 bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber = 0);
+bool startReturnSession(const String& sessionId, uint8_t lockerId, const String& expectedUid, uint32_t timeoutMs, bool holdLockUntilCompleted, bool requireDoorSensor);
+void updateReturnSession(uint32_t nowMs);
+void completeReturnSession();
+void failReturnSession(const char* reason);
+void cancelReturnSession(const char* reason);
+bool isReturnSessionExpired(uint32_t nowMs);
+void handleReturnLockerRfid(uint8_t lockerId, const String& uid);
+void handleReturnDoorState(uint8_t lockerId, bool closed);
+bool queueReturnProgress(const char* eventName, const String& uid = String(""), const char* reason = nullptr);
 void startTagAssignmentMode(const String& assignmentId, const String& tagId, const String& itemName);
 void stopTagAssignmentMode();
 void renderTagAssignmentFrame(uint8_t frameIndex);
+void renderReturnSessionLeds(uint32_t nowMs);
 bool tryProgramTag(MFRC522& reader, const String& expectedPhysicalUid, const String& tagId, String& error);
 bool tryReadProgrammedTagId(MFRC522& reader, String& tagId);
 bool authenticateClassicBlock(MFRC522& reader, byte blockAddr, MFRC522::MIFARE_Key& key, MFRC522::StatusCode* statusOut = nullptr);
@@ -1207,6 +1274,7 @@ void setup() {
   configureWiFiRuntime();
   startServicePanel();
   configureLockerInputs();
+  configureDoorSensors();
   initializeRfidReaders();
   startLedStripEffect(LED_STRIP_EFFECT_STARTUP, LED_STARTUP_EFFECT_MS);
   initializeTaskWatchdog();
@@ -1237,6 +1305,14 @@ void setup() {
     wifiConfigLoadedFromNvs ? "nvs" : "firmware fallback"
   );
   Serial.printf("Locker switch inputs enabled: %s\n", ENABLE_LOCKER_SWITCH_INPUTS ? "yes" : "no");
+  Serial.printf(
+    "Door sensors MC-38 enabled: %s pins S1=%u S2=%u S3=%u activeLow=%s\n",
+    ENABLE_DOOR_SENSORS ? "yes" : "no",
+    DOOR_SENSOR_PINS[0],
+    DOOR_SENSOR_PINS[1],
+    DOOR_SENSOR_PINS[2],
+    DOOR_SENSOR_ACTIVE_LOW ? "yes" : "no"
+  );
   printUsage();
   printRfidSnapshot();
 
@@ -1280,7 +1356,7 @@ void loadPersistentSettings() {
 
   runtimeHeartbeatIntervalMs = constrain(runtimeHeartbeatIntervalMs, 10000UL, 600000UL);
   runtimeDeviceActionsPollBaseMs = constrain(runtimeDeviceActionsPollBaseMs, 2000UL, 120000UL);
-  runtimeLockUnlockPulseMs = constrain(runtimeLockUnlockPulseMs, 100UL, 5000UL);
+  runtimeLockUnlockPulseMs = LOCK_UNLOCK_PULSE_MS;
   runtimeCodeRateLimitMaxFailures = constrain(runtimeCodeRateLimitMaxFailures, static_cast<uint8_t>(1), static_cast<uint8_t>(20));
   runtimeCodeRateLimitWindowMs = constrain(runtimeCodeRateLimitWindowMs, 30000UL, 3600000UL);
   runtimeCodeRateLimitLockoutMs = constrain(runtimeCodeRateLimitLockoutMs, 5000UL, 3600000UL);
@@ -1317,6 +1393,9 @@ void reserveStringBuffers() {
   tagAssignmentMode.assignmentId.reserve(32);
   tagAssignmentMode.tagId.reserve(16);
   tagAssignmentMode.itemName.reserve(64);
+  returnSession.sessionId.reserve(48);
+  returnSession.expectedUid.reserve(24);
+  returnSession.lastDetectedUid.reserve(24);
   accessSelection.uid.reserve(24);
   accessSelection.requestId.reserve(64);
   accessSelection.userId.reserve(32);
@@ -1541,6 +1620,19 @@ void networkTaskMain(void* parameter) {
         break;
       }
 
+      case NetworkJobType::ReturnProgress: {
+        bool requestOk = sendReturnProgressWs(job);
+        if (!requestOk && shouldUseHttpsFallback(millis())) {
+          requestOk = postReturnProgress(job);
+        }
+        if (requestOk) {
+          noteNetworkSuccess();
+        } else {
+          noteNetworkFailure();
+        }
+        break;
+      }
+
       case NetworkJobType::TagAssignmentResult: {
         bool requestOk = sendTagAssignmentResultWs(job);
         if (!requestOk) {
@@ -1613,6 +1705,7 @@ void loop() {
   resetTaskWatchdog();
 
   updateLockController(static_cast<uint32_t>(now));
+  updateReturnSession(static_cast<uint32_t>(now));
   serviceServicePanel(now);
   serviceStatusLed(now);
   serviceWifiConnection(now);
@@ -2814,9 +2907,27 @@ void handleDeviceWebSocketMessage(const char* payload, size_t length) {
 
     const JsonObject commandPayload = command["payload"];
     if (!commandPayload.isNull()) {
-      copyCStringToBuffer(commandPayload["assignmentId"] | "", result.text1, sizeof(result.text1));
-      copyCStringToBuffer(commandPayload["tagId"] | "", result.text2, sizeof(result.text2));
-      copyCStringToBuffer(commandPayload["itemName"] | "", result.text3, sizeof(result.text3));
+      if (strcmp(result.actionType, "RETURN_ITEM") == 0 || strcmp(result.actionType, "CANCEL_RETURN_ITEM") == 0) {
+        const char* expectedUid = commandPayload["expectedUid"] | "";
+        if (strlen(expectedUid) == 0) {
+          expectedUid = commandPayload["tagUid"] | "";
+        }
+        copyCStringToBuffer(commandPayload["sessionId"] | "", result.text1, sizeof(result.text1));
+        copyCStringToBuffer(expectedUid, result.text2, sizeof(result.text2));
+        copyCStringToBuffer(commandPayload["itemName"] | "", result.text3, sizeof(result.text3));
+        copyCStringToBuffer(commandPayload["reason"] | "", result.text4, sizeof(result.text4));
+        result.numberValue = static_cast<long>(commandPayload["timeoutMs"] | 120000);
+        result.boolValue1 = commandPayload["holdLockUntilCompleted"] | true;
+        result.boolValue2 = commandPayload["requireDoorSensor"] | false;
+        const uint8_t payloadLocker = static_cast<uint8_t>(commandPayload["assignedLocker"] | 0);
+        if (payloadLocker > 0) {
+          result.lockerNumber = payloadLocker;
+        }
+      } else {
+        copyCStringToBuffer(commandPayload["assignmentId"] | "", result.text1, sizeof(result.text1));
+        copyCStringToBuffer(commandPayload["tagId"] | "", result.text2, sizeof(result.text2));
+        copyCStringToBuffer(commandPayload["itemName"] | "", result.text3, sizeof(result.text3));
+      }
     }
 
     Serial.printf(
@@ -2854,17 +2965,21 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   const bool known = doc["known"] | ok;
   const bool isMaster = doc["isMaster"] | false;
   const char* error = doc["error"] | "";
+  const bool returnStarted = doc["returnStarted"] | false;
+  const char* returnError = doc["returnError"] | "";
   uint8_t accessibleMask = static_cast<uint8_t>((doc["accessibleLockersMask"] | 0) & 0xFF);
 
   NetworkResult result = {};
   result.type = NetworkResultType::VerifyMasterTag;
-  result.requestOk = strlen(error) == 0;
+  result.requestOk = strlen(error) == 0 && strlen(returnError) == 0;
   result.boolValue1 = ok && known;
   result.boolValue2 = known;
   result.boolValue3 = isMaster;
+  result.boolValue5 = returnStarted;
   result.numberValue = accessibleMask;
   copyCStringToBuffer(uid, result.text1, sizeof(result.text1));
   copyCStringToBuffer(doc["displayName"] | "", result.text2, sizeof(result.text2));
+  copyCStringToBuffer(returnError, result.text3, sizeof(result.text3));
   copyCStringToBuffer(doc["userId"] | "", result.text4, sizeof(result.text4));
   copyCStringToBuffer(requestId, result.requestId, sizeof(result.requestId));
 
@@ -2894,15 +3009,18 @@ void handleTagVerifyResultMessage(JsonDocument& doc) {
   char maskText[8];
   formatLockerMaskBinary(static_cast<uint8_t>(result.numberValue & 0xFF), maskText, sizeof(maskText));
   Serial.printf(
-    "[RFID VERIFY RESULT] uid=%s requestId=%s known=%s master=%s mask=%s ok=%s%s%s\n",
+    "[RFID VERIFY RESULT] uid=%s requestId=%s known=%s master=%s return=%s mask=%s ok=%s%s%s%s%s\n",
     result.text1,
     strlen(requestId) > 0 ? requestId : "(none)",
     known ? "true" : "false",
     isMaster ? "true" : "false",
+    returnStarted ? "true" : "false",
     maskText,
     ok ? "true" : "false",
     strlen(error) > 0 ? " error=" : "",
-    strlen(error) > 0 ? error : ""
+    strlen(error) > 0 ? error : "",
+    strlen(returnError) > 0 ? " returnError=" : "",
+    strlen(returnError) > 0 ? returnError : ""
   );
 
   if (!masterTagVerificationPending) {
@@ -3380,7 +3498,7 @@ void buildLockerStateBatchJob(NetworkJob& job, bool full) {
 }
 
 void serviceLockerInputChanges(unsigned long now) {
-  if (!ENABLE_LOCKER_SWITCH_INPUTS) {
+  if (!ENABLE_LOCKER_SWITCH_INPUTS && !ENABLE_DOOR_SENSORS) {
     return;
   }
 
@@ -3429,6 +3547,7 @@ void serviceLockerInputChanges(unsigned long now) {
     lockerInputCandidateReady[i] = false;
     lockerInputCandidateSinceMs[i] = 0;
     markLockerStateChanged(lockerReaders[i], now);
+    handleReturnDoorState(i + 1, lastLockerDoorClosed[i]);
     Serial.printf(
       "Locker S%u input changed -> door=%s lock=%s\n",
       i + 1,
@@ -3962,6 +4081,16 @@ void handleNetworkResult(const NetworkResult& result) {
       char maskText[8];
       formatLockerMaskBinary(accessibleMask, maskText, sizeof(maskText));
 
+      if (result.boolValue5) {
+        Serial.printf("[RETURN] backend started return flow uid=%s requestId=%s\n",
+          result.text1,
+          strlen(result.requestId) > 0 ? result.requestId : "(none)"
+        );
+        resetDeviceActionsPollCadence();
+        blinkLed(2, 120, 80);
+        break;
+      }
+
       if (!result.boolValue1) {
         Serial.printf("[RFID VERIFY] access denied uid=%s requestId=%s known=%s master=%s mask=%s reason=not_authorized\n",
           result.text1,
@@ -4107,6 +4236,7 @@ bool isPriorityNetworkJob(const NetworkJob& job) {
     case NetworkJobType::VerifyCode:
     case NetworkJobType::VerifyMasterTag:
     case NetworkJobType::AccessSelectionEvent:
+    case NetworkJobType::ReturnProgress:
     case NetworkJobType::DeviceDiagnostic:
       return true;
 
@@ -4166,6 +4296,33 @@ void handleRemoteCommand(const NetworkResult& result) {
       }
       blinkLed(2, 120, 80);
       message = "Locker relay pulsed.";
+    }
+  } else if (strcmp(result.actionType, "RETURN_ITEM") == 0) {
+    const uint32_t timeoutMs = result.numberValue > 0
+      ? static_cast<uint32_t>(result.numberValue)
+      : 120000UL;
+    if (strlen(result.text1) == 0 || strlen(result.text2) == 0) {
+      success = false;
+      message = "Missing return session payload.";
+    } else if (!startReturnSession(
+      String(result.text1),
+      result.lockerNumber,
+      String(result.text2),
+      timeoutMs,
+      result.boolValue1,
+      result.boolValue2
+    )) {
+      success = false;
+      message = "Could not start return session.";
+    } else {
+      message = "Return session started.";
+    }
+  } else if (strcmp(result.actionType, "CANCEL_RETURN_ITEM") == 0) {
+    if (returnSession.active && String(result.text1) == returnSession.sessionId) {
+      cancelReturnSession(strlen(result.text4) > 0 ? result.text4 : "backend_cancel");
+      message = "Return session cancelled.";
+    } else {
+      message = "No matching active return session.";
     }
   } else if (strcmp(result.actionType, "RELEASE_ALL_LOCKERS") == 0) {
     if (!pulseUnlockLockerMask(allRelayLockersMask())) {
@@ -4690,19 +4847,22 @@ bool postVerifyMasterTag(const char* tagId, NetworkResult& result) {
 
   const bool valid = doc["valid"] | false;
   const bool isMaster = doc["isMaster"] | false;
+  const bool returnStarted = doc["returnStarted"] | false;
+  const char* returnError = doc["returnError"] | "";
   uint8_t accessibleMask = static_cast<uint8_t>((doc["accessibleLockersMask"] | 0) & 0xFF);
 
-  result.requestOk = true;
+  result.requestOk = strlen(returnError) == 0;
   result.boolValue1 = valid;
-  result.boolValue2 = valid;
+  result.boolValue2 = valid || (doc["known"] | false);
   result.boolValue3 = isMaster;
+  result.boolValue5 = returnStarted;
   result.numberValue = accessibleMask;
   copyCStringToBuffer(tagId != nullptr ? tagId : "", result.text1, sizeof(result.text1));
+  copyCStringToBuffer(returnError, result.text3, sizeof(result.text3));
   copyCStringToBuffer(pendingMasterTagMessageId, result.requestId, sizeof(result.requestId));
 
   const JsonObject item = doc["item"];
   if (!item.isNull()) {
-    copyCStringToBuffer(item["itemName"] | "", result.text3, sizeof(result.text3));
     if (strlen(result.text1) == 0) {
       copyCStringToBuffer(item["tagId"] | "", result.text1, sizeof(result.text1));
     }
@@ -4731,11 +4891,14 @@ bool postVerifyMasterTag(const char* tagId, NetworkResult& result) {
   char maskText[8];
   formatLockerMaskBinary(static_cast<uint8_t>(result.numberValue & 0xFF), maskText, sizeof(maskText));
   Serial.printf(
-    "[RFID VERIFY RESULT] uid=%s source=http known=%s master=%s mask=%s\n",
+    "[RFID VERIFY RESULT] uid=%s source=http known=%s master=%s return=%s mask=%s%s%s\n",
     result.text1,
-    result.boolValue1 ? "true" : "false",
+    result.boolValue2 ? "true" : "false",
     result.boolValue3 ? "true" : "false",
-    maskText
+    result.boolValue5 ? "true" : "false",
+    maskText,
+    strlen(returnError) > 0 ? " returnError=" : "",
+    strlen(returnError) > 0 ? returnError : ""
   );
 
   return true;
@@ -4766,6 +4929,7 @@ void buildHeartbeatPayload(JsonObject payload) {
   payload["deviceActionsPollIntervalMs"] = deviceActionsPollIntervalMs;
   payload["heartbeatIntervalMs"] = runtimeHeartbeatIntervalMs;
   payload["lockPulseMs"] = runtimeLockUnlockPulseMs;
+  payload["doorSensorsEnabled"] = ENABLE_DOOR_SENSORS;
   payload["networkFailureCount"] = consecutiveNetworkFailureCount;
   payload["wsConnected"] = deviceWsConnected;
 
@@ -4777,6 +4941,10 @@ void buildHeartbeatPayload(JsonObject payload) {
   capabilities.add("remote-logs");
   capabilities.add("remote-config");
   capabilities.add("code-rate-limit");
+  capabilities.add("return-session");
+  if (ENABLE_DOOR_SENSORS) {
+    capabilities.add("door-sensors");
+  }
 
   JsonArray lockers = payload["lockers"].to<JsonArray>();
   for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
@@ -4784,6 +4952,7 @@ void buildHeartbeatPayload(JsonObject payload) {
     locker["locker"] = lockerReaders[i].lockerNumber;
     locker["hasTag"] = lockerReaders[i].hasCard;
     locker["tagId"] = lockerReaders[i].stableUid;
+    locker["doorClosed"] = isLockerDoorClosed(i + 1);
     locker["dirty"] = lockerReaders[i].reportDirty;
     locker["reportFailures"] = lockerReaders[i].reportFailureCount;
     locker["version"] = lockerStateVersions[i];
@@ -4802,7 +4971,7 @@ void applyRemoteConfigResult(const NetworkResult& result) {
   remoteConfigVersion = result.configVersion;
   runtimeHeartbeatIntervalMs = constrain(result.heartbeatIntervalMs, 10000UL, 600000UL);
   runtimeDeviceActionsPollBaseMs = constrain(result.deviceActionsPollIntervalMs, 2000UL, 120000UL);
-  runtimeLockUnlockPulseMs = constrain(result.lockPulseMs, 100UL, 5000UL);
+  runtimeLockUnlockPulseMs = LOCK_UNLOCK_PULSE_MS;
   runtimeCodeRateLimitWindowMs = constrain(result.codeRateLimitWindowMs, 30000UL, 3600000UL);
   runtimeCodeRateLimitLockoutMs = constrain(result.codeRateLimitLockoutMs, 5000UL, 3600000UL);
   runtimeCodeRateLimitMaxFailures = constrain(result.codeRateLimitMaxFailures, static_cast<uint8_t>(1), static_cast<uint8_t>(20));
@@ -5204,6 +5373,49 @@ bool sendAccessSelectionEventWs(const NetworkJob& job) {
   return sent;
 }
 
+bool sendReturnProgressWs(const NetworkJob& job) {
+  if (!isDeviceWebSocketReady()) {
+    return false;
+  }
+
+  const uint32_t sequence = nextDeviceSequence();
+  char messageId[64];
+  buildMessageId(messageId, sizeof(messageId), "return", sequence);
+
+  JsonDocument doc;
+  doc["type"] = "return.progress";
+  doc["deviceId"] = DEVICE_ID;
+  doc["messageId"] = messageId;
+  doc["seq"] = sequence;
+
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["sessionId"] = job.text1;
+  payload["event"] = job.text2;
+  payload["locker"] = job.lockerNumber;
+  payload["doorClosed"] = job.boolValue;
+  if (strlen(job.text3) > 0) {
+    payload["uid"] = job.text3;
+  }
+  if (strlen(job.text4) > 0) {
+    payload["reason"] = job.text4;
+  }
+
+  char body[512];
+  const size_t bodyLen = serializeJson(doc, body, sizeof(body));
+  if (bodyLen == 0 || bodyLen >= sizeof(body)) {
+    Serial.println("[WS] return progress payload too large.");
+    return false;
+  }
+
+  const bool sent = sendDeviceWebSocketText(body, bodyLen);
+  Serial.printf("[RETURN] progress %s event=%s session=%s\n",
+    sent ? "sent" : "failed",
+    job.text2,
+    job.text1
+  );
+  return sent;
+}
+
 bool sendDeviceLogWs(const NetworkJob& job) {
   if (!isDeviceWebSocketReady()) {
     return false;
@@ -5461,6 +5673,33 @@ bool postAccessSelectionEvent(const NetworkJob& job) {
   return postDeviceSyncMessage(messageBody, "/device/sync access.selection");
 }
 
+bool postReturnProgress(const NetworkJob& job) {
+  JsonDocument doc;
+  doc["type"] = "return.progress";
+  doc["deviceId"] = DEVICE_ID;
+  doc["seq"] = nextDeviceSequence();
+  JsonObject payload = doc["payload"].to<JsonObject>();
+  payload["sessionId"] = job.text1;
+  payload["event"] = job.text2;
+  payload["locker"] = job.lockerNumber;
+  payload["doorClosed"] = job.boolValue;
+  if (strlen(job.text3) > 0) {
+    payload["uid"] = job.text3;
+  }
+  if (strlen(job.text4) > 0) {
+    payload["reason"] = job.text4;
+  }
+
+  char messageBody[512];
+  const size_t messageLen = serializeJson(doc, messageBody, sizeof(messageBody));
+  if (messageLen == 0 || messageLen >= sizeof(messageBody)) {
+    Serial.println("Return progress HTTPS payload too large.");
+    return false;
+  }
+
+  return postDeviceSyncMessage(messageBody, "/device/sync return.progress");
+}
+
 bool postDeviceStateBatch(const NetworkJob& job) {
   const uint32_t sequence = nextDeviceSequence();
   char messageId[64];
@@ -5629,9 +5868,27 @@ bool fetchDeviceActionsForTask(NetworkResult& result) {
 
     const JsonObject payload = action["payload"];
     if (!payload.isNull()) {
-      copyCStringToBuffer(payload["assignmentId"] | "", commandResult.text1, sizeof(commandResult.text1));
-      copyCStringToBuffer(payload["tagId"] | "", commandResult.text2, sizeof(commandResult.text2));
-      copyCStringToBuffer(payload["itemName"] | "", commandResult.text3, sizeof(commandResult.text3));
+      if (strcmp(commandResult.actionType, "RETURN_ITEM") == 0 || strcmp(commandResult.actionType, "CANCEL_RETURN_ITEM") == 0) {
+        const char* expectedUid = payload["expectedUid"] | "";
+        if (strlen(expectedUid) == 0) {
+          expectedUid = payload["tagUid"] | "";
+        }
+        copyCStringToBuffer(payload["sessionId"] | "", commandResult.text1, sizeof(commandResult.text1));
+        copyCStringToBuffer(expectedUid, commandResult.text2, sizeof(commandResult.text2));
+        copyCStringToBuffer(payload["itemName"] | "", commandResult.text3, sizeof(commandResult.text3));
+        copyCStringToBuffer(payload["reason"] | "", commandResult.text4, sizeof(commandResult.text4));
+        commandResult.numberValue = static_cast<long>(payload["timeoutMs"] | 120000);
+        commandResult.boolValue1 = payload["holdLockUntilCompleted"] | true;
+        commandResult.boolValue2 = payload["requireDoorSensor"] | false;
+        const uint8_t payloadLocker = static_cast<uint8_t>(payload["assignedLocker"] | 0);
+        if (payloadLocker > 0) {
+          commandResult.lockerNumber = payloadLocker;
+        }
+      } else {
+        copyCStringToBuffer(payload["assignmentId"] | "", commandResult.text1, sizeof(commandResult.text1));
+        copyCStringToBuffer(payload["tagId"] | "", commandResult.text2, sizeof(commandResult.text2));
+        copyCStringToBuffer(payload["itemName"] | "", commandResult.text3, sizeof(commandResult.text3));
+      }
     }
 
     if (networkResultQueue != nullptr && xQueueSend(networkResultQueue, &commandResult, 0) != pdTRUE) {
@@ -6012,9 +6269,38 @@ void configureLockerInputs() {
   }
 }
 
+void configureDoorSensors() {
+  if (!ENABLE_DOOR_SENSORS) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < LOCKER_COUNT; i += 1) {
+    const uint8_t pin = DOOR_SENSOR_PINS[i];
+    pinMode(pin, INPUT_PULLUP);
+    Serial.printf("[DOOR] locker=%u MC-38 GPIO%u configured INPUT_PULLUP activeLow=%s\n",
+      i + 1,
+      pin,
+      DOOR_SENSOR_ACTIVE_LOW ? "true" : "false"
+    );
+  }
+}
+
 bool readInputPin(const LockerInputPin& config) {
   const bool raw = digitalRead(config.pin) == HIGH;
   return config.activeLow ? !raw : raw;
+}
+
+bool isLockerDoorClosed(uint8_t lockerId) {
+  if (lockerId < 1 || lockerId > LOCKER_COUNT) {
+    return true;
+  }
+
+  if (!ENABLE_DOOR_SENSORS) {
+    return true;
+  }
+
+  const bool high = digitalRead(DOOR_SENSOR_PINS[lockerId - 1]) == HIGH;
+  return DOOR_SENSOR_ACTIVE_LOW ? !high : high;
 }
 
 LockerState readLockerState(uint8_t lockerIndex) {
@@ -6022,7 +6308,9 @@ LockerState readLockerState(uint8_t lockerIndex) {
   bool doorClosed = true;
   bool lockClosed = true;
 
-  if (ENABLE_LOCKER_SWITCH_INPUTS) {
+  if (ENABLE_DOOR_SENSORS) {
+    doorClosed = isLockerDoorClosed(lockerIndex + 1);
+  } else if (ENABLE_LOCKER_SWITCH_INPUTS) {
     const LockerHardwareConfig& cfg = LOCKERS[lockerIndex];
     if (!isRelayPin(cfg.doorClosed.pin)) {
       doorClosed = readInputPin(cfg.doorClosed);
@@ -6266,11 +6554,15 @@ LockerLedSegment getLockerLedSegment(uint8_t lockerNumber) {
     return { 0, 0, 0, false };
   }
 
-  const uint16_t start = static_cast<uint16_t>((lockerNumber - 1) * LEDS_PER_LOCKER);
-  const uint16_t end = static_cast<uint16_t>(min<uint16_t>(TOTAL_LEDS, start + LEDS_PER_LOCKER) - 1);
-  if (start >= TOTAL_LEDS || end < start) {
+  const uint16_t start = LOCKER_LED_SEGMENT_STARTS[lockerNumber - 1];
+  const uint16_t endExclusive = min<uint16_t>(
+    TOTAL_LEDS,
+    static_cast<uint16_t>(start + LEDS_PER_LOCKER)
+  );
+  if (start >= TOTAL_LEDS || endExclusive <= start) {
     return { 0, 0, 0, false };
   }
+  const uint16_t end = static_cast<uint16_t>(endExclusive - 1);
 
   return {
     start,
@@ -6502,6 +6794,247 @@ bool queueAccessSelectionEvent(const char* eventName, uint8_t lockerNumber) {
   return true;
 }
 
+bool startReturnSession(const String& sessionId, uint8_t lockerId, const String& expectedUid, uint32_t timeoutMs, bool holdLockUntilCompleted, bool requireDoorSensor) {
+  if (sessionId.length() == 0 || expectedUid.length() == 0 || lockerId < 1 || lockerId > LOCKER_COUNT) {
+    return false;
+  }
+
+  if (returnSession.active) {
+    if (returnSession.sessionId == sessionId) {
+      return true;
+    }
+
+    Serial.printf("[RETURN] rejected new session=%s, active=%s\n",
+      sessionId.c_str(),
+      returnSession.sessionId.c_str()
+    );
+    return false;
+  }
+
+  if (accessSelection.active) {
+    finishAccessSelection("return_override");
+  }
+
+  codeResultFlash.active = false;
+  ledErrorFlash.active = false;
+  enteredCode = "";
+
+  returnSession.active = true;
+  returnSession.lockerId = lockerId;
+  returnSession.expectedUid = expectedUid;
+  returnSession.expectedUid.toUpperCase();
+  returnSession.sessionId = sessionId;
+  returnSession.startedAtMs = millis();
+  returnSession.timeoutMs = timeoutMs > 0 ? timeoutMs : 120000UL;
+  returnSession.itemDetected = false;
+  returnSession.doorOpened = false;
+  returnSession.doorClosed = ENABLE_DOOR_SENSORS ? isLockerDoorClosed(lockerId) : true;
+  returnSession.lockHeld = false;
+  returnSession.holdLockUntilCompleted = holdLockUntilCompleted;
+  returnSession.requireDoorSensor = requireDoorSensor && ENABLE_DOOR_SENSORS;
+  returnSession.lastDetectedUid = "";
+
+  const bool shouldHoldLock = returnSession.holdLockUntilCompleted && returnSession.requireDoorSensor;
+  const bool lockOk = shouldHoldLock
+    ? unlockLocker(lockerId)
+    : pulseUnlockLocker(lockerId, runtimeLockUnlockPulseMs);
+  if (!lockOk) {
+    returnSession.active = false;
+    return false;
+  }
+
+  returnSession.lockHeld = shouldHoldLock;
+  masterReaderRuntime.lastTriggeredUid = expectedUid;
+  setLedMode(LED_MODE_RETURN_IN_PROGRESS);
+  markVisualStateDirty();
+  updateVisualState();
+
+  Serial.printf(
+    "[RETURN] started session=%s locker=S%u expectedUid=%s timeout=%lums hold=%s requireDoor=%s\n",
+    returnSession.sessionId.c_str(),
+    returnSession.lockerId,
+    returnSession.expectedUid.c_str(),
+    static_cast<unsigned long>(returnSession.timeoutMs),
+    returnSession.lockHeld ? "true" : "false",
+    returnSession.requireDoorSensor ? "true" : "false"
+  );
+
+  queueReturnProgress("started", "", nullptr);
+  if (returnSession.lockHeld) {
+    queueReturnProgress("lock_held", "", nullptr);
+  }
+
+  const RfidReaderRuntime& reader = lockerReaders[lockerId - 1];
+  if (reader.hasCard && reader.stableUid.length() > 0) {
+    handleReturnLockerRfid(lockerId, reader.stableUid);
+  }
+  handleReturnDoorState(lockerId, returnSession.doorClosed);
+  return true;
+}
+
+bool isReturnSessionExpired(uint32_t nowMs) {
+  return returnSession.active
+    && returnSession.startedAtMs != 0
+    && nowMs - returnSession.startedAtMs >= returnSession.timeoutMs;
+}
+
+void updateReturnSession(uint32_t nowMs) {
+  if (!returnSession.active) {
+    return;
+  }
+
+  if (isReturnSessionExpired(nowMs)) {
+    failReturnSession("timeout");
+    return;
+  }
+
+  if (returnSession.requireDoorSensor) {
+    handleReturnDoorState(returnSession.lockerId, isLockerDoorClosed(returnSession.lockerId));
+  }
+
+  if (returnSession.itemDetected && (!returnSession.requireDoorSensor || returnSession.doorClosed)) {
+    completeReturnSession();
+  }
+}
+
+void completeReturnSession() {
+  if (!returnSession.active) {
+    return;
+  }
+
+  const uint8_t lockerId = returnSession.lockerId;
+  const String uid = returnSession.lastDetectedUid.length() > 0
+    ? returnSession.lastDetectedUid
+    : returnSession.expectedUid;
+
+  lockLocker(lockerId);
+  queueReturnProgress("completed", uid, nullptr);
+  Serial.printf("[RETURN] completed session=%s locker=S%u uid=%s\n",
+    returnSession.sessionId.c_str(),
+    lockerId,
+    uid.c_str()
+  );
+
+  returnSession.active = false;
+  returnSession.lockHeld = false;
+  returnSession.sessionId = "";
+  returnSession.expectedUid = "";
+  returnSession.lastDetectedUid = "";
+  startLedSegmentFlash(lockerId, colorGreen(190), LED_TAG_ASSIGNMENT_SUCCESS_MS);
+  restoreNormalLedMode();
+  blinkLed(2, 180, 100);
+}
+
+void failReturnSession(const char* reason) {
+  if (!returnSession.active) {
+    return;
+  }
+
+  const uint8_t lockerId = returnSession.lockerId;
+  const String sessionId = returnSession.sessionId;
+  const char* safeReason = reason != nullptr && strlen(reason) > 0 ? reason : "failed";
+
+  lockLocker(lockerId);
+  queueReturnProgress(strcmp(safeReason, "timeout") == 0 ? "timeout" : "failed", returnSession.lastDetectedUid, safeReason);
+  Serial.printf("[RETURN] failed session=%s locker=S%u reason=%s\n",
+    sessionId.c_str(),
+    lockerId,
+    safeReason
+  );
+
+  returnSession.active = false;
+  returnSession.lockHeld = false;
+  returnSession.sessionId = "";
+  returnSession.expectedUid = "";
+  returnSession.lastDetectedUid = "";
+  startLedSegmentFlash(lockerId, colorRed(190), 1400);
+  restoreNormalLedMode();
+  blinkLed(4, 90, 90);
+}
+
+void cancelReturnSession(const char* reason) {
+  failReturnSession(reason != nullptr && strlen(reason) > 0 ? reason : "cancelled");
+}
+
+void handleReturnLockerRfid(uint8_t lockerId, const String& uid) {
+  if (!returnSession.active || uid.length() == 0) {
+    return;
+  }
+
+  String normalizedUid = uid;
+  normalizedUid.toUpperCase();
+
+  if (lockerId != returnSession.lockerId) {
+    if (normalizedUid == returnSession.expectedUid) {
+      returnSession.lastDetectedUid = normalizedUid;
+      failReturnSession("wrong_locker");
+    }
+    return;
+  }
+
+  returnSession.lastDetectedUid = normalizedUid;
+  if (normalizedUid != returnSession.expectedUid) {
+    failReturnSession("wrong_item");
+    return;
+  }
+
+  if (!returnSession.itemDetected) {
+    returnSession.itemDetected = true;
+    queueReturnProgress("item_detected", normalizedUid, nullptr);
+    Serial.printf("[RETURN] expected item detected session=%s locker=S%u uid=%s\n",
+      returnSession.sessionId.c_str(),
+      lockerId,
+      normalizedUid.c_str()
+    );
+  }
+}
+
+void handleReturnDoorState(uint8_t lockerId, bool closed) {
+  if (!returnSession.active || lockerId != returnSession.lockerId) {
+    return;
+  }
+
+  if (!closed && !returnSession.doorOpened) {
+    returnSession.doorOpened = true;
+    returnSession.doorClosed = false;
+    queueReturnProgress("door_opened", returnSession.lastDetectedUid, nullptr);
+    return;
+  }
+
+  if (closed && !returnSession.doorClosed) {
+    returnSession.doorClosed = true;
+    queueReturnProgress("door_closed", returnSession.lastDetectedUid, nullptr);
+    return;
+  }
+
+  returnSession.doorClosed = closed;
+}
+
+bool queueReturnProgress(const char* eventName, const String& uid, const char* reason) {
+  if (!returnSession.active || eventName == nullptr || strlen(eventName) == 0) {
+    return false;
+  }
+
+  NetworkJob job = {};
+  job.type = NetworkJobType::ReturnProgress;
+  job.lockerNumber = returnSession.lockerId;
+  job.boolValue = returnSession.doorClosed;
+  copyStringToBuffer(returnSession.sessionId, job.text1, sizeof(job.text1));
+  copyCStringToBuffer(eventName, job.text2, sizeof(job.text2));
+  copyStringToBuffer(uid.length() > 0 ? uid : returnSession.lastDetectedUid, job.text3, sizeof(job.text3));
+  copyCStringToBuffer(reason != nullptr ? reason : "", job.text4, sizeof(job.text4));
+
+  if (!enqueueNetworkJob(job)) {
+    Serial.printf("[RETURN] failed to queue progress event=%s session=%s\n",
+      eventName,
+      returnSession.sessionId.c_str()
+    );
+    return false;
+  }
+
+  return true;
+}
+
 void setLedMode(LedMode nextMode) {
   if (ledMode == nextMode) {
     return;
@@ -6512,15 +7045,22 @@ void setLedMode(LedMode nextMode) {
 }
 
 void updateLeds(uint32_t nowMs) {
-  if (accessSelection.active) {
-    ledMode = LED_MODE_ACCESS_SELECTION;
-    updateAccessSelectionLeds(nowMs);
+  if (ledMode == LED_MODE_ERROR_FLASH && ledErrorFlash.active) {
+    renderErrorFlashLeds(nowMs);
     strip.show();
     return;
   }
 
-  if (ledMode == LED_MODE_ERROR_FLASH && ledErrorFlash.active) {
-    renderErrorFlashLeds(nowMs);
+  if (returnSession.active) {
+    ledMode = LED_MODE_RETURN_IN_PROGRESS;
+    renderReturnSessionLeds(nowMs);
+    strip.show();
+    return;
+  }
+
+  if (accessSelection.active) {
+    ledMode = LED_MODE_ACCESS_SELECTION;
+    updateAccessSelectionLeds(nowMs);
     strip.show();
     return;
   }
@@ -6576,6 +7116,46 @@ void updateAccessSelectionLeds(unsigned long nowMs) {
     } else {
       renderDeniedSegmentBlink(lockerNumber, nowMs);
     }
+  }
+}
+
+void renderReturnSessionLeds(uint32_t nowMs) {
+  clearStrip();
+  fillSeparatorLeds(colorBlue(4));
+
+  for (uint8_t lockerNumber = 1; lockerNumber <= LOCKER_COUNT; lockerNumber += 1) {
+    if (lockerNumber != returnSession.lockerId) {
+      fillSegment(getLockerLedSegment(lockerNumber), colorBlue(2));
+    }
+  }
+
+  const LockerLedSegment segment = getLockerLedSegment(returnSession.lockerId);
+  if (!segment.valid || segment.length == 0) {
+    return;
+  }
+
+  const uint32_t phase = nowMs % 1000UL;
+  const uint8_t pulse = static_cast<uint8_t>(36 + (phase < 500UL
+    ? (70UL * phase / 500UL)
+    : (70UL * (1000UL - phase) / 500UL)));
+  fillSegment(segment, colorCyan(pulse));
+
+  const uint16_t waveOffset = static_cast<uint16_t>((phase * segment.length) / 1000UL);
+  for (uint8_t tail = 0; tail < 3; tail += 1) {
+    if (waveOffset < tail) {
+      continue;
+    }
+    const uint16_t led = static_cast<uint16_t>(segment.start + waveOffset - tail);
+    if (led <= segment.end) {
+      strip.setPixelColor(led, colorWhite(static_cast<uint8_t>(190 - tail * 55)));
+    }
+  }
+
+  if (returnSession.itemDetected) {
+    strip.setPixelColor(segment.start, colorGreen(130));
+  }
+  if (returnSession.requireDoorSensor && returnSession.doorClosed) {
+    strip.setPixelColor(segment.end, colorGreen(130));
   }
 }
 
@@ -6686,6 +7266,26 @@ void fillSegment(const LockerLedSegment& segment, uint32_t color) {
 
 void clearSegment(const LockerLedSegment& segment) {
   fillSegment(segment, 0);
+}
+
+void fillSeparatorLeds(uint32_t color) {
+  for (uint8_t i = 0; i < LED_SEPARATOR_COUNT; i += 1) {
+    const uint16_t led = LED_SEPARATOR_POSITIONS[i];
+    if (led < TOTAL_LEDS) {
+      strip.setPixelColor(led, color);
+    }
+  }
+}
+
+void renderSeparatorLeds(uint32_t nowMs) {
+  (void)nowMs;
+
+  if (isBackendOfflineSignalActive()) {
+    fillSeparatorLeds(colorRed(10));
+    return;
+  }
+
+  fillSeparatorLeds(isDeviceWebSocketReady() ? colorBlue(8) : colorWhite(4));
 }
 
 void renderLockerStatusSegment(uint8_t lockerIndex, const LockerState& state, uint32_t nowMs) {
@@ -6885,6 +7485,7 @@ void renderLockerStatus(uint32_t nowMs) {
     renderLockerStatusSegment(lockerIndex, state, nowMs);
   }
 
+  renderSeparatorLeds(nowMs);
   applyNormalLedOverlays(nowMs);
   strip.show();
   visualStateDirty = false;
@@ -7159,6 +7760,7 @@ void updateReaderPresence(RfidReaderRuntime& runtime, const RfidScanResult& scan
         runtime.stablePhysicalUid = scanResult.physicalUid;
         if (!runtime.isMaster) {
           markLockerStateChanged(runtime, now);
+          handleReturnLockerRfid(runtime.lockerNumber, observedLogicalTagId);
         }
         markVisualStateDirty();
 

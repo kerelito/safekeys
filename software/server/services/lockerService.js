@@ -1,9 +1,10 @@
 const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const mongoose = require("mongoose");
-const { Code, DeviceCommand, DeviceConfig, DeviceMessageReceipt, DeviceState, Log, Locker, RfidUser, RfidItem } = require("../models");
+const { Code, DeviceCommand, DeviceConfig, DeviceMessageReceipt, DeviceState, Log, Locker, ReturnSession, RfidUser, RfidItem } = require("../models");
 const {
   ALLOWED_LOCKERS,
+  RETURN_SESSION_STATUSES,
   assertValidAllowedLockers,
   assertValidCode,
   assertValidDoorClosed,
@@ -15,7 +16,8 @@ const {
   assertValidRfidItemType,
   assertValidTagId,
   assertValidUserName,
-  createHttpError
+  createHttpError,
+  normalizeAssignedLocker
 } = require("./lockerValidation");
 const {
   COMMAND_DELIVERABLE_STATUSES,
@@ -36,11 +38,25 @@ const {
   normalizeMessageId,
   normalizeSequence
 } = require("./deviceProtocol");
+const {
+  RETURN_ACTIVE_STATUSES,
+  RETURN_ITEM_ACTIVE_STATUSES,
+  RETURN_COMPLETION_STATUSES,
+  isActiveReturnStatus,
+  isReturnEligibleItem,
+  mapReturnSession,
+  normalizeRfidItemPayload
+} = require("./returnFlow");
 
 const MASTER_RFID_ITEM_TYPES = new Set(["klucz_master", "karta_master"]);
 const DEVICE_HEARTBEAT_TIMEOUT_MS = Number(process.env.DEVICE_HEARTBEAT_TIMEOUT_MS) || 180 * 1000;
 const DEVICE_COMMAND_REDELIVER_AFTER_MS = Number(process.env.DEVICE_COMMAND_REDELIVER_AFTER_MS) || 30 * 1000;
 const DEVICE_COMMAND_DELIVERY_LIMIT = Number(process.env.DEVICE_COMMAND_DELIVERY_LIMIT) || 20;
+const RETURN_SESSION_TIMEOUT_MS = Math.max(
+  30000,
+  Math.min(Number(process.env.RETURN_SESSION_TIMEOUT_MS) || 120000, 300000)
+);
+const ENABLE_DOOR_SENSORS = /^(1|true|yes|on)$/i.test(String(process.env.ENABLE_DOOR_SENSORS || "false"));
 const ACCESS_SELECTION_EVENTS = new Set([
   "access_selection_started",
   "access_selection_cancelled",
@@ -641,6 +657,18 @@ class LockerService extends EventEmitter {
           break;
         }
 
+        case "return.progress": {
+          const returnSession = await this.handleReturnProgress(envelope.payload || {}, {
+            source: "device",
+            actor: deviceId,
+            deviceId
+          });
+          response = buildAck(envelope, {
+            returnSession
+          });
+          break;
+        }
+
         case "command.ack": {
           const ackPayload = normalizeCommandAckPayload(envelope.payload || {});
           if (!ackPayload.commandId) {
@@ -766,6 +794,10 @@ class LockerService extends EventEmitter {
       servicePanel: {
         ...(previousConfig.servicePanel || {}),
         ...(incomingConfig.servicePanel || {})
+      },
+      doorSensors: {
+        ...(previousConfig.doorSensors || {}),
+        ...(incomingConfig.doorSensors || {})
       },
       ota: {
         ...(previousConfig.ota || {}),
@@ -911,6 +943,7 @@ class LockerService extends EventEmitter {
     const lockerWrites = [];
     const logWrites = [];
     const lockerEvents = [];
+    const returnObservations = [];
 
     const describeKnownTag = tagId => {
       if (!tagId) {
@@ -1040,6 +1073,13 @@ class LockerService extends EventEmitter {
           actor: deviceId,
           timestamp: now
         });
+        returnObservations.push({
+          locker,
+          hasTag: false,
+          tagId: null,
+          previousTagId: previousItem?.tagId || null,
+          isDoorClosed: resolvedLockerState.isDoorClosed
+        });
       }
 
       if (existingLocker && existingLocker.hasTag === false && item.hasTag === true) {
@@ -1055,6 +1095,14 @@ class LockerService extends EventEmitter {
           timestamp: now
         });
       }
+
+      returnObservations.push({
+        locker,
+        hasTag: item.hasTag,
+        tagId: nextItem?.tagId || null,
+        previousTagId: previousItem?.tagId || null,
+        isDoorClosed: resolvedLockerState.isDoorClosed
+      });
 
       if (existingLocker && doorChanged) {
         logWrites.push({
@@ -1125,6 +1173,14 @@ class LockerService extends EventEmitter {
       this.emit("locker-status-changed", event);
     }
 
+    for (const observation of returnObservations) {
+      await this.processReturnLockerObservation(observation, {
+        source: context.transport === "websocket" ? "device-ws" : "device-sync",
+        actor: deviceId,
+        deviceId
+      });
+    }
+
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > 1000) {
       console.warn("Wolne przetwarzanie state.batch urzadzenia.", {
@@ -1168,6 +1224,679 @@ class LockerService extends EventEmitter {
 
     this.emit("log", log);
     return log;
+  }
+
+  emitRfidItemChanged(item) {
+    if (!item) {
+      return;
+    }
+
+    const plain = typeof item.toObject === "function" ? item.toObject() : item;
+    this.emit("rfid-item-changed", plain);
+  }
+
+  emitReturnSession(eventName, session) {
+    const payload = mapReturnSession(session);
+    if (!payload) {
+      return null;
+    }
+
+    this.emit("return-session-changed", payload);
+    if (eventName) {
+      this.emit(eventName, payload);
+    }
+    return payload;
+  }
+
+  async findActiveReturnSessionForItem(itemId) {
+    return ReturnSession.findOne({
+      itemId,
+      status: { $in: RETURN_ACTIVE_STATUSES }
+    }).sort({ startedAt: -1 });
+  }
+
+  async findActiveReturnSessionForLocker(locker) {
+    return ReturnSession.findOne({
+      assignedLocker: locker,
+      status: { $in: RETURN_ACTIVE_STATUSES }
+    }).sort({ startedAt: -1 });
+  }
+
+  async updateRfidItemState(itemId, patch = {}) {
+    const updated = await RfidItem.findByIdAndUpdate(
+      itemId,
+      {
+        $set: {
+          ...patch,
+          updatedAt: new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (updated) {
+      this.emitRfidItemChanged(updated);
+    }
+
+    return updated;
+  }
+
+  async createReturnLog(event, session, context = {}, extra = {}) {
+    const sessionPayload = mapReturnSession(session);
+    return this.createLog({
+      event,
+      locker: sessionPayload?.assignedLocker || extra.locker || null,
+      tagId: sessionPayload?.tagUid || extra.tagId || null,
+      itemName: sessionPayload?.itemName || extra.itemName || null,
+      itemKnown: true,
+      source: context.source || extra.source || "return",
+      actor: context.actor || extra.actor || null,
+      success: extra.success,
+      errorMessage: extra.errorMessage || null,
+      details: {
+        ...(extra.details || {}),
+        sessionId: sessionPayload?.sessionId || extra.sessionId || null,
+        assignedLocker: sessionPayload?.assignedLocker || extra.assignedLocker || null,
+        deviceId: context.deviceId || sessionPayload?.deviceId || null,
+        commandId: sessionPayload?.commandId || null
+      }
+    });
+  }
+
+  async startReturnByMasterScan(tagId, context = {}) {
+    const normalizedTagId = assertValidTagId(tagId);
+    await this.expireReturnSessions({ source: "system", actor: "return-expirer" });
+
+    await this.createLog({
+      event: "RETURN_MASTER_SCAN",
+      tagId: normalizedTagId,
+      source: context.source || "master-rfid",
+      actor: context.actor || null,
+      details: {
+        sourceReader: context.sourceReader || "master-rfid"
+      }
+    });
+
+    const item = await RfidItem.findOne({ tagId: normalizedTagId, active: true });
+    if (!item) {
+      await this.createLog({
+        event: "RETURN_UNKNOWN_UID",
+        tagId: normalizedTagId,
+        source: context.source || "master-rfid",
+        actor: context.actor || null,
+        success: false,
+        errorMessage: "Nieznany UID na master RFID."
+      });
+      throw createHttpError(404, "Nieznany UID RFID. Nie można rozpocząć zwrotu.");
+    }
+
+    if (isMasterRfidItemType(item.itemType)) {
+      throw createHttpError(409, "Tag administracyjny RFID nie jest przedmiotem do zwrotu.");
+    }
+
+    const assignedLocker = normalizeAssignedLocker(item.assignedLocker);
+    if (!assignedLocker) {
+      item.status = "UNASSIGNED";
+      item.conflictReason = "missing_assigned_locker";
+      item.updatedAt = new Date();
+      await item.save();
+      this.emitRfidItemChanged(item);
+
+      await this.createLog({
+        event: "RETURN_NO_ASSIGNED_LOCKER",
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true,
+        source: context.source || "master-rfid",
+        actor: context.actor || null,
+        success: false,
+        errorMessage: "Przedmiot nie ma przypisanej skrytki."
+      });
+      throw createHttpError(409, "Przedmiot nie ma przypisanej skrytki.");
+    }
+
+    if (item.status === "IN_LOCKER") {
+      await this.createLog({
+        event: "RETURN_ITEM_ALREADY_IN_LOCKER",
+        locker: assignedLocker,
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true,
+        source: context.source || "master-rfid",
+        actor: context.actor || null,
+        success: false,
+        details: {
+          assignedLocker,
+          status: item.status
+        }
+      });
+      throw createHttpError(409, "Ten przedmiot według systemu jest już w przypisanej skrytce.");
+    }
+
+    if (!isReturnEligibleItem(item)) {
+      await this.createLog({
+        event: "RETURN_FAILED",
+        locker: assignedLocker,
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true,
+        source: context.source || "master-rfid",
+        actor: context.actor || null,
+        success: false,
+        errorMessage: `Status ${item.status || "UNKNOWN"} nie pozwala rozpocząć zwrotu.`,
+        details: {
+          reason: "item_status_not_returnable",
+          status: item.status || "UNKNOWN",
+          assignedLocker
+        }
+      });
+      throw createHttpError(409, "Status przedmiotu nie pozwala rozpocząć zwrotu.");
+    }
+
+    return this.createReturnSession(item, assignedLocker, context);
+  }
+
+  async createReturnSession(item, assignedLocker, context = {}) {
+    assertValidLocker(assignedLocker);
+
+    const [activeForItem, activeForLocker, targetLocker] = await Promise.all([
+      this.findActiveReturnSessionForItem(item._id),
+      this.findActiveReturnSessionForLocker(assignedLocker),
+      Locker.findOne({ locker: assignedLocker }).lean()
+    ]);
+
+    if (activeForItem) {
+      throw createHttpError(409, "Ten przedmiot ma już aktywną sesję zwrotu.");
+    }
+
+    if (activeForLocker) {
+      throw createHttpError(409, "Docelowa skrytka ma już aktywną sesję zwrotu.");
+    }
+
+    if (
+      targetLocker?.hasTag === true &&
+      targetLocker.detectedTagId &&
+      targetLocker.detectedTagId !== item.tagId
+    ) {
+      await this.updateRfidItemState(item._id, {
+        status: "CONFLICT",
+        conflictReason: "target_locker_contains_other_item"
+      });
+      await this.createLog({
+        event: "RETURN_WRONG_ITEM",
+        locker: assignedLocker,
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true,
+        source: context.source || "master-rfid",
+        actor: context.actor || null,
+        success: false,
+        errorMessage: "Docelowa skrytka zawiera inny przedmiot.",
+        details: {
+          detectedTagId: targetLocker.detectedTagId,
+          detectedItemName: targetLocker.detectedItemName || null
+        }
+      });
+      throw createHttpError(409, "Docelowa skrytka zawiera inny przedmiot.");
+    }
+
+    const now = new Date();
+    const session = await ReturnSession.create({
+      sessionId: crypto.randomUUID(),
+      itemId: item._id,
+      itemName: item.name,
+      tagUid: item.tagId,
+      assignedLocker,
+      status: "PENDING",
+      startedAt: now,
+      expiresAt: new Date(now.getTime() + RETURN_SESSION_TIMEOUT_MS),
+      sourceReader: context.sourceReader || "master-rfid",
+      createdBy: context.actor || null,
+      deviceId: context.deviceId || null,
+      diagnostics: {
+        requireDoorSensor: ENABLE_DOOR_SENSORS,
+        timeoutMs: RETURN_SESSION_TIMEOUT_MS,
+        targetLockerSnapshot: targetLocker || null
+      }
+    });
+
+    await this.updateRfidItemState(item._id, {
+      status: "RETURN_PENDING",
+      conflictReason: null
+    });
+
+    const action = await this.createRemoteAction("RETURN_ITEM", assignedLocker, {
+      source: context.source || "master-rfid",
+      actor: context.actor || null,
+      idempotencyKey: `return:${session.sessionId}`,
+      payload: {
+        sessionId: session.sessionId,
+        itemId: item._id.toString(),
+        itemName: item.name,
+        tagUid: item.tagId,
+        expectedUid: item.tagId,
+        assignedLocker,
+        timeoutMs: RETURN_SESSION_TIMEOUT_MS,
+        holdLockUntilCompleted: true,
+        requireDoorSensor: ENABLE_DOOR_SENSORS
+      }
+    });
+
+    session.commandId = action.id;
+    session.status = "IN_PROGRESS";
+    await session.save();
+
+    await this.updateRfidItemState(item._id, {
+      status: "RETURN_IN_PROGRESS",
+      conflictReason: null
+    });
+
+    await this.createReturnLog("RETURN_STARTED", session, context, { success: true });
+    await this.createReturnLog("RETURN_LOCKER_OPENED", session, context, { success: true });
+    if (ENABLE_DOOR_SENSORS) {
+      await this.createReturnLog("RETURN_LOCK_HELD", session, context, { success: true });
+    }
+
+    this.emitReturnSession("return.started", session);
+    this.emitReturnSession("return.in_progress", session);
+
+    return mapReturnSession(session);
+  }
+
+  async handleReturnProgress(payload = {}, context = {}) {
+    const sessionId = normalizeString(payload.sessionId);
+    if (!sessionId) {
+      throw createHttpError(400, "Brak sessionId sesji zwrotu.");
+    }
+
+    const session = await ReturnSession.findOne({ sessionId });
+    if (!session) {
+      throw createHttpError(404, "Nie znaleziono sesji zwrotu.");
+    }
+
+    if (!isActiveReturnStatus(session.status)) {
+      return mapReturnSession(session);
+    }
+
+    const event = normalizeString(payload.event, "progress");
+    const locker = payload.locker == null ? session.assignedLocker : assertValidLocker(Number(payload.locker));
+    const uid = payload.uid || payload.tagUid || payload.detectedUid;
+    const normalizedUid = uid ? assertValidTagId(uid) : null;
+    const doorClosed = typeof payload.doorClosed === "boolean" ? payload.doorClosed : null;
+    const now = new Date();
+
+    session.deviceId = context.deviceId || session.deviceId || null;
+    session.diagnostics = {
+      ...(session.diagnostics || {}),
+      lastProgress: {
+        event,
+        locker,
+        uid: normalizedUid,
+        doorClosed,
+        at: now.toISOString(),
+        source: context.source || "device"
+      }
+    };
+
+    if (locker !== session.assignedLocker) {
+      return this.failReturnSession(session.sessionId, "wrong_locker", {
+        ...context,
+        locker,
+        detectedUid: normalizedUid
+      });
+    }
+
+    if (event === "door_opened") {
+      session.doorOpenedAt = session.doorOpenedAt || now;
+      await session.save();
+      await this.createReturnLog("RETURN_DOOR_OPENED", session, context, { success: true });
+      this.emitReturnSession("return.door_opened", session);
+      return mapReturnSession(session);
+    }
+
+    if (doorClosed === true) {
+      session.doorClosedAt = session.doorClosedAt || now;
+      session.doorClosed = true;
+      await this.createReturnLog("RETURN_DOOR_CLOSED", session, context, { success: true });
+      this.emitReturnSession("return.door_closed", session);
+    } else if (doorClosed === false) {
+      session.doorClosed = false;
+    }
+
+    if (normalizedUid) {
+      session.detectedUid = normalizedUid;
+      session.detectedLocker = locker;
+      session.rfidDetectedAt = session.rfidDetectedAt || now;
+      await this.createReturnLog("RETURN_ITEM_DETECTED", session, context, {
+        success: normalizedUid === session.tagUid,
+        errorMessage: normalizedUid === session.tagUid ? null : "Wykryto niewłaściwy przedmiot.",
+        details: {
+          detectedUid: normalizedUid
+        }
+      });
+      this.emitReturnSession("return.item_detected", session);
+
+      if (normalizedUid !== session.tagUid) {
+        await session.save();
+        return this.failReturnSession(session.sessionId, "wrong_item", {
+          ...context,
+          detectedUid: normalizedUid,
+          locker
+        });
+      }
+    }
+
+    await session.save();
+
+    if (event === "failed" || event === "timeout") {
+      return this.failReturnSession(session.sessionId, payload.reason || event, context);
+    }
+
+    const hasExpectedItem = session.detectedUid === session.tagUid;
+    const hasDoorCondition = ENABLE_DOOR_SENSORS ? session.doorClosed === true : true;
+    if (hasExpectedItem && hasDoorCondition) {
+      return this.completeReturnSession(session.sessionId, {
+        locker,
+        detectedUid: session.detectedUid,
+        doorClosed: session.doorClosed === true,
+        rfidOnly: !ENABLE_DOOR_SENSORS
+      }, context);
+    }
+
+    return mapReturnSession(session);
+  }
+
+  async completeReturnSession(sessionId, payload = {}, context = {}) {
+    const session = await ReturnSession.findOne({ sessionId });
+    if (!session) {
+      throw createHttpError(404, "Nie znaleziono sesji zwrotu.");
+    }
+
+    if (!isActiveReturnStatus(session.status)) {
+      return mapReturnSession(session);
+    }
+
+    const locker = payload.locker == null ? session.assignedLocker : assertValidLocker(Number(payload.locker));
+    const detectedUid = payload.detectedUid ? assertValidTagId(payload.detectedUid) : session.detectedUid;
+    const doorClosed = typeof payload.doorClosed === "boolean" ? payload.doorClosed : session.doorClosed;
+
+    if (locker !== session.assignedLocker) {
+      return this.failReturnSession(session.sessionId, "wrong_locker", context);
+    }
+
+    if (detectedUid !== session.tagUid) {
+      return this.failReturnSession(session.sessionId, "wrong_item", context);
+    }
+
+    if (ENABLE_DOOR_SENSORS && doorClosed !== true) {
+      await session.save();
+      return mapReturnSession(session);
+    }
+
+    const now = new Date();
+    session.status = "COMPLETED";
+    session.completedAt = now;
+    session.rfidDetectedAt = session.rfidDetectedAt || now;
+    session.doorClosedAt = doorClosed ? (session.doorClosedAt || now) : session.doorClosedAt;
+    session.detectedUid = detectedUid;
+    session.detectedLocker = locker;
+    session.doorClosed = doorClosed === true;
+    session.rfidOnly = payload.rfidOnly === true || !ENABLE_DOOR_SENSORS;
+    await session.save();
+
+    await this.updateRfidItemState(session.itemId, {
+      status: "IN_LOCKER",
+      currentLocker: session.assignedLocker,
+      lastDetectedAt: now,
+      conflictReason: null
+    });
+
+    await this.createReturnLog("RETURN_COMPLETED", session, context, {
+      success: true,
+      details: {
+        rfidOnly: session.rfidOnly
+      }
+    });
+    await this.createReturnLog("RETURN_LOCK_RELEASED", session, context, { success: true });
+
+    this.emitReturnSession("return.completed", session);
+    return mapReturnSession(session);
+  }
+
+  async failReturnSession(sessionId, reason = "failed", context = {}) {
+    const session = await ReturnSession.findOne({ sessionId });
+    if (!session) {
+      throw createHttpError(404, "Nie znaleziono sesji zwrotu.");
+    }
+
+    if (!isActiveReturnStatus(session.status)) {
+      return mapReturnSession(session);
+    }
+
+    const normalizedReason = normalizeString(reason, "failed").slice(0, 120);
+    const isExpired = normalizedReason === "timeout" || normalizedReason === "expired";
+    const isCancelled = normalizedReason === "manual_cancel" || normalizedReason === "cancelled";
+    session.status = isExpired ? "EXPIRED" : (isCancelled ? "CANCELLED" : "FAILED");
+    session.failedAt = new Date();
+    session.failureReason = normalizedReason;
+    session.diagnostics = {
+      ...(session.diagnostics || {}),
+      failureContext: {
+        locker: context.locker || null,
+        detectedUid: context.detectedUid || null,
+        source: context.source || null,
+        at: session.failedAt.toISOString()
+      }
+    };
+    await session.save();
+
+    const conflictFailureReasons = ["wrong_item", "wrong_locker", "target_locker_contains_other_item"];
+    const nextItemStatus = conflictFailureReasons.includes(normalizedReason)
+      ? "CONFLICT"
+      : "RETURN_PENDING";
+    await this.updateRfidItemState(session.itemId, {
+      status: nextItemStatus,
+      conflictReason: normalizedReason
+    });
+
+    const event = isExpired ? "RETURN_EXPIRED" : (isCancelled ? "RETURN_CANCELLED" : "RETURN_FAILED");
+    await this.createReturnLog(event, session, context, {
+      success: false,
+      errorMessage: normalizedReason,
+      details: {
+        reason: normalizedReason
+      }
+    });
+    await this.createReturnLog("RETURN_LOCK_RELEASED", session, context, {
+      success: false,
+      errorMessage: normalizedReason
+    });
+
+    if (["wrong_item", "wrong_locker"].includes(normalizedReason)) {
+      await this.createReturnLog(
+        normalizedReason === "wrong_locker" ? "RETURN_WRONG_LOCKER" : "RETURN_WRONG_ITEM",
+        session,
+        context,
+        {
+          success: false,
+          errorMessage: normalizedReason,
+          details: {
+            detectedUid: context.detectedUid || null,
+            locker: context.locker || null
+          }
+        }
+      );
+    }
+
+    await this.createRemoteAction("CANCEL_RETURN_ITEM", session.assignedLocker, {
+      source: context.source || "return",
+      actor: context.actor || null,
+      idempotencyKey: `return-cancel:${session.sessionId}:${session.status}`,
+      payload: {
+        sessionId: session.sessionId,
+        reason: normalizedReason
+      }
+    }).catch(error => {
+      console.error("Nie udalo sie zakolejkowac anulowania zwrotu.", {
+        sessionId: session.sessionId,
+        error: error.message
+      });
+    });
+
+    this.emitReturnSession(isExpired ? "return.expired" : "return.failed", session);
+    return mapReturnSession(session);
+  }
+
+  async cancelReturnSession(sessionId, context = {}) {
+    return this.failReturnSession(sessionId, context.reason || "manual_cancel", {
+      ...context,
+      source: context.source || "web"
+    });
+  }
+
+  async expireReturnSessions(context = {}) {
+    const sessions = await ReturnSession.find({
+      status: { $in: RETURN_ACTIVE_STATUSES },
+      expiresAt: { $lte: new Date() }
+    });
+
+    const expired = [];
+    for (const session of sessions) {
+      expired.push(await this.failReturnSession(session.sessionId, "expired", context));
+    }
+
+    return expired;
+  }
+
+  async getReturnSessions(filters = {}) {
+    await this.expireReturnSessions({ source: "system", actor: "return-expirer" });
+    const status = normalizeString(filters.status).toUpperCase();
+    const query = {};
+
+    if (status === "ACTIVE") {
+      query.status = { $in: RETURN_ACTIVE_STATUSES };
+    } else if (status === "HISTORY") {
+      query.status = { $in: RETURN_COMPLETION_STATUSES };
+    } else if (RETURN_SESSION_STATUSES.includes(status)) {
+      query.status = status;
+    }
+
+    const limit = Math.max(1, Math.min(Number(filters.limit) || 80, 200));
+    const sessions = await ReturnSession.find(query)
+      .sort({ startedAt: -1 })
+      .limit(limit)
+      .lean();
+
+    return sessions.map(mapReturnSession);
+  }
+
+  async getReturnDashboardSummary() {
+    await this.expireReturnSessions({ source: "system", actor: "return-expirer" });
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const [active, completedToday, failedToday, conflicts] = await Promise.all([
+      ReturnSession.countDocuments({ status: { $in: RETURN_ACTIVE_STATUSES } }),
+      ReturnSession.countDocuments({ status: "COMPLETED", completedAt: { $gte: startOfDay } }),
+      ReturnSession.countDocuments({ status: { $in: ["FAILED", "EXPIRED", "CANCELLED"] }, failedAt: { $gte: startOfDay } }),
+      RfidItem.countDocuments({ status: "CONFLICT", active: true })
+    ]);
+
+    return {
+      active,
+      completedToday,
+      failedToday,
+      conflicts
+    };
+  }
+
+  async processReturnLockerObservation(observation = {}, context = {}) {
+    const locker = assertValidLocker(Number(observation.locker));
+    const tagId = observation.tagId ? assertValidTagId(observation.tagId) : null;
+    const hasTag = observation.hasTag === true;
+    const doorClosed = typeof observation.isDoorClosed === "boolean" ? observation.isDoorClosed : null;
+
+    if (!hasTag || !tagId) {
+      if (observation.previousTagId) {
+        const previousItem = await RfidItem.findOne({ tagId: observation.previousTagId, active: true });
+        if (previousItem && !isMasterRfidItemType(previousItem.itemType) && previousItem.assignedLocker === locker) {
+          await this.updateRfidItemState(previousItem._id, {
+            status: "CHECKED_OUT",
+            currentLocker: null,
+            conflictReason: null
+          });
+        }
+      }
+      return null;
+    }
+
+    const item = await RfidItem.findOne({ tagId, active: true });
+    const activeSession = await this.findActiveReturnSessionForLocker(locker);
+
+    if (activeSession) {
+      return this.handleReturnProgress({
+        sessionId: activeSession.sessionId,
+        locker,
+        event: "item_detected",
+        uid: tagId,
+        doorClosed
+      }, context);
+    }
+
+    if (!item || isMasterRfidItemType(item.itemType)) {
+      return null;
+    }
+
+    const assignedLocker = normalizeAssignedLocker(item.assignedLocker);
+    if (!assignedLocker) {
+      await this.updateRfidItemState(item._id, {
+        status: "UNASSIGNED",
+        currentLocker: locker,
+        lastDetectedAt: new Date(),
+        conflictReason: "detected_without_assigned_locker"
+      });
+      return null;
+    }
+
+    if (assignedLocker !== locker) {
+      await this.updateRfidItemState(item._id, {
+        status: "CONFLICT",
+        currentLocker: locker,
+        lastDetectedAt: new Date(),
+        conflictReason: "detected_in_wrong_locker"
+      });
+      await this.createLog({
+        event: "RETURN_WRONG_LOCKER",
+        locker,
+        tagId: item.tagId,
+        itemName: item.name,
+        itemType: item.itemType,
+        itemKnown: true,
+        source: context.source || "device",
+        actor: context.actor || null,
+        success: false,
+        errorMessage: "Przedmiot wykryto w niewłaściwej skrytce.",
+        details: {
+          assignedLocker
+        }
+      });
+      return null;
+    }
+
+    if (!RETURN_ITEM_ACTIVE_STATUSES.includes(item.status)) {
+      await this.updateRfidItemState(item._id, {
+        status: "IN_LOCKER",
+        currentLocker: locker,
+        lastDetectedAt: new Date(),
+        conflictReason: null
+      });
+    }
+
+    return null;
   }
 
   async findRfidItemByTagId(tagId) {
@@ -1613,6 +2342,17 @@ class LockerService extends EventEmitter {
       source: context.source || "rfid"
     }));
 
+    await this.processReturnLockerObservation({
+      locker,
+      hasTag,
+      tagId: nextItem?.tagId || null,
+      previousTagId: previousItem?.tagId || null,
+      isDoorClosed: found.isDoorClosed !== false
+    }, {
+      source: context.source || "rfid",
+      actor: context.actor || null
+    });
+
     return { success: true };
   }
 
@@ -1654,6 +2394,16 @@ class LockerService extends EventEmitter {
       detectedAt: found.detectedAt || null,
       source: context.source || "contactron"
     }));
+
+    await this.processReturnLockerObservation({
+      locker,
+      hasTag: found.hasTag === true,
+      tagId: found.detectedTagId || null,
+      isDoorClosed
+    }, {
+      source: context.source || "contactron",
+      actor: context.actor || null
+    });
 
     return { success: true };
   }
@@ -1859,6 +2609,21 @@ class LockerService extends EventEmitter {
 
     const action = mapCommandForHistory(command);
     this.emit("remote-action-updated", action);
+
+    if (nextStatus === "failed" && command.type === "RETURN_ITEM") {
+      const session = await ReturnSession.findOne({
+        commandId: command._id.toString(),
+        status: { $in: RETURN_ACTIVE_STATUSES }
+      });
+      if (session) {
+        await this.failReturnSession(session.sessionId, "device_command_failed", {
+          source: context.source || "device",
+          actor: normalizeDeviceId(context.deviceId),
+          deviceId: normalizeDeviceId(context.deviceId)
+        });
+      }
+    }
+
     return action;
   }
 
@@ -1986,10 +2751,11 @@ class LockerService extends EventEmitter {
   }
 
   async getBackupSnapshot() {
-    const [lockers, rfidUsers, rfidItems, activeCodes, logs, remoteActions] = await Promise.all([
+    const [lockers, rfidUsers, rfidItems, returnSessions, activeCodes, logs, remoteActions] = await Promise.all([
       this.getLockers(),
       this.getRfidUsers(),
       this.getRfidItems(),
+      this.getReturnSessions({ limit: 200 }),
       this.getActiveCodes(),
       this.getLogs({ limit: 500 }),
       this.getRemoteActionHistory()
@@ -2000,6 +2766,7 @@ class LockerService extends EventEmitter {
       lockers,
       rfidUsers,
       rfidItems,
+      returnSessions,
       activeCodes,
       logs,
       remoteActions
@@ -2235,6 +3002,7 @@ class LockerService extends EventEmitter {
     const name = assertValidRfidItemName(payload.name);
     const tagId = assertValidTagId(payload.tagId);
     const itemType = assertValidRfidItemType(payload.itemType);
+    const itemState = normalizeRfidItemPayload(payload);
 
     if (isMasterRfidItemType(itemType) && context.role !== "master") {
       throw createHttpError(403, "Tylko użytkownik master może dodawać tagi administracyjne RFID.");
@@ -2256,6 +3024,10 @@ class LockerService extends EventEmitter {
       name,
       tagId,
       itemType,
+      assignedLocker: isMasterRfidItemType(itemType) ? null : itemState.assignedLocker,
+      status: isMasterRfidItemType(itemType) ? "UNKNOWN" : itemState.status,
+      currentLocker: isMasterRfidItemType(itemType) ? null : itemState.currentLocker,
+      conflictReason: itemState.conflictReason,
       updatedAt: new Date()
     });
 
@@ -2270,6 +3042,7 @@ class LockerService extends EventEmitter {
       this.emit("rfid-tag-assignment-updated", null);
     }
 
+    this.emitRfidItemChanged(item);
     return item.toObject();
   }
 
@@ -2304,9 +3077,14 @@ class LockerService extends EventEmitter {
     }
 
     const previousTagId = item.tagId;
+    const itemState = normalizeRfidItemPayload(payload, item);
     item.name = name;
     item.tagId = tagId;
     item.itemType = itemType;
+    item.assignedLocker = isMasterRfidItemType(itemType) ? null : itemState.assignedLocker;
+    item.status = isMasterRfidItemType(itemType) ? "UNKNOWN" : itemState.status;
+    item.currentLocker = isMasterRfidItemType(itemType) ? null : itemState.currentLocker;
+    item.conflictReason = itemState.conflictReason;
     item.updatedAt = new Date();
     await item.save();
 
@@ -2333,6 +3111,7 @@ class LockerService extends EventEmitter {
       this.emit("rfid-tag-assignment-updated", null);
     }
 
+    this.emitRfidItemChanged(item);
     return item.toObject();
   }
 
@@ -2376,6 +3155,36 @@ class LockerService extends EventEmitter {
     const access = await this.resolveRfidAccess(tagId);
 
     if (!access.valid) {
+      if (access.item?.itemKnown === true && !isMasterRfidItemType(access.item.itemType)) {
+        try {
+          const returnSession = await this.startReturnByMasterScan(tagId, {
+            source: context.source || "master-rfid",
+            actor: context.actor || null,
+            sourceReader: "master-rfid"
+          });
+
+          return {
+            valid: false,
+            item: access.item,
+            isMaster: false,
+            allowedLockers: [],
+            accessibleLockersMask: 0,
+            returnStarted: true,
+            returnSession
+          };
+        } catch (error) {
+          return {
+            valid: false,
+            item: access.item,
+            isMaster: false,
+            allowedLockers: [],
+            accessibleLockersMask: 0,
+            returnStarted: false,
+            returnError: error.message || "Nie udało się rozpocząć zwrotu."
+          };
+        }
+      }
+
       await this.createLog({
         event: "RFID_ACCESS_DENIED",
         source: context.source || "rfid-user",

@@ -37,6 +37,7 @@ Wazna uwaga o aktualnym etapie firmware:
 - role panelowe: `master`, `admin`, `operator`, `viewer`,
 - zarzadzanie uzytkownikami RFID i przypisaniem ich do skrytek,
 - zarzadzanie przedmiotami RFID i mapowaniem UID na czytelne nazwy,
+- przypisanie przedmiotow RFID do skrytek i sesje zwrotu po skanie master readera,
 - specjalne typy tagow RFID `klucz_master` i `karta_master`,
 - tryb nadawania tagu RFID przez master reader,
 - odroznienie RFID dostepowego od RFID obecnosci przedmiotu w skrytce,
@@ -141,13 +142,15 @@ Pominieto `node_modules`, `dist`, `.git`, `.pio` i inne artefakty builda.
     test/                  - testy Node.js
     .env.example           - przykladowe zmienne srodowiskowe
     package.json           - skrypty backendu
+  docs/
+    RETURN_FLOW.md         - przeplyw zwrotu przedmiotu RFID do przypisanej skrytki
   package.json             - skrypty pomocnicze na poziomie repo
   README.md
 ```
 
 ### Co warto wiedziec o strukturze
 
-- brak osobnego katalogu `docs`; aktualna dokumentacja mieszka glownie w tym pliku i komentarzach w firmware,
+- dokumentacja szczegolowa nowych przeplywow mieszka w `docs/`,
 - brak plikow CAD / PCB / STL / STEP w repozytorium,
 - `software/dist/` istnieje, ale jest artefaktem builda i nie jest aktualnie uzywany przez backend,
 - `hardware/esp32/` i `hardware/safekeys/variants/` to starsze warianty pomocnicze, nie glowna linia firmware.
@@ -424,12 +427,14 @@ Pinout glownego firmware da sie odczytac bezposrednio z `hardware/safekeys/src/m
 | I2C SCL | `22` |
 | Adres keypada I2C | `0x20` |
 | WS2812B data | `4` |
-| Liczba LED | `60` |
+| Liczba LED | `35` |
 | Relay locker 1 | `27` |
 | Relay locker 2 | `26` |
 | Relay locker 3 | `25` |
 | Relay locker 4 | `33` |
-| LED na skrytke | `20` |
+| LED na skrytke | `10` |
+| LED skrytka 1 / 2 / 3 | `1-10`, `12-21`, `23-32` |
+| LED separatory / nieprzypisane | `0`, `11`, `22`, `33`, `34` |
 | SPI SCK dla RC522 | `14` |
 | SPI MISO dla RC522 | `12` |
 | SPI MOSI dla RC522 | `13` |

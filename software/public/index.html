@@ -110,6 +110,7 @@
         <button class="menu-link" type="button" data-page="access">Dostępy</button>
         <button class="menu-link" type="button" data-page="users" data-advanced-only="true">Użytkownicy RFID</button>
         <button class="menu-link" type="button" data-page="items" data-advanced-only="true">Przedmioty RFID</button>
+        <button class="menu-link" type="button" data-page="returns" data-advanced-only="true">Zwroty</button>
         <button class="menu-link" type="button" data-page="logs">Logi</button>
         <button class="menu-link" type="button" data-page="diagnostics" data-advanced-only="true">Diagnostyka</button>
         <button id="panelUsersMenuLink" class="menu-link hidden" type="button" data-page="panelUsers" data-advanced-only="true">Administracja</button>
@@ -159,6 +160,29 @@
             <span class="metric-label">RFID</span>
             <strong id="metricRfidTags" class="metric-value">0</strong>
             <small>Tagi w konfiguracji</small>
+          </article>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="metric-label">Aktywne zwroty</span>
+            <strong id="metricActiveReturns" class="metric-value">0</strong>
+            <small>Sesje w toku</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Zwroty dziś</span>
+            <strong id="metricReturnsToday" class="metric-value">0</strong>
+            <small>Zakończone poprawnie</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Błędy zwrotów</span>
+            <strong id="metricReturnFailures" class="metric-value">0</strong>
+            <small>Dziś</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Konflikty</span>
+            <strong id="metricReturnConflicts" class="metric-value">0</strong>
+            <small>Przedmioty RFID</small>
           </article>
         </div>
 
@@ -487,6 +511,27 @@
                   <option value="karta_master" data-master-option>Karta master</option>
                 </select>
               </label>
+              <label class="field">
+                <span class="field-label">Przypisana skrytka</span>
+                <select id="rfidItemAssignedLocker">
+                  <option value="">Brak przypisania</option>
+                  <option value="1">Skrytka S1</option>
+                  <option value="2">Skrytka S2</option>
+                  <option value="3">Skrytka S3</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Status</span>
+                <select id="rfidItemStatus" required>
+                  <option value="IN_LOCKER">W skrytce</option>
+                  <option value="CHECKED_OUT">Wydany</option>
+                  <option value="RETURN_PENDING">Oczekuje na zwrot</option>
+                  <option value="RETURN_IN_PROGRESS">Zwrot w toku</option>
+                  <option value="CONFLICT">Konflikt</option>
+                  <option value="UNKNOWN">Nieznany</option>
+                  <option value="UNASSIGNED">Brak przypisania</option>
+                </select>
+              </label>
               <button id="rfidItemSubmit" type="submit">Dodaj przedmiot</button>
               <button id="rfidItemReset" class="secondary-button" type="button">Wyczyść formularz</button>
             </form>
@@ -512,11 +557,73 @@
                 <span>Nazwa</span>
                 <span>UID</span>
                 <span>Typ</span>
+                <span>Skrytka</span>
                 <span>Status</span>
+                <span>Ostatnio</span>
+                <span>Konflikt</span>
                 <span>Akcje</span>
               </div>
               <div id="rfidItemsList" class="table-body"></div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="returnsPage" class="page">
+        <div class="page-heading">
+          <div>
+            <h1>Zwroty</h1>
+            <p>Aktywne sesje i historia zwrotu przedmiotów RFID.</p>
+          </div>
+          <div class="page-actions">
+            <span id="returnsCount" class="count-pill">0</span>
+            <button class="secondary-button" type="button" onclick="loadReturns()">Odśwież</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-header">
+            <div>
+              <h2>Aktywne zwroty</h2>
+              <p>Sesje oczekujące na przedmiot i zamknięcie drzwi.</p>
+            </div>
+            <span id="activeReturnsCount" class="count-pill">0</span>
+          </div>
+          <div class="data-table">
+            <div class="table-head returns-head">
+              <span>Przedmiot</span>
+              <span>UID</span>
+              <span>Skrytka</span>
+              <span>Start</span>
+              <span>Pozostało</span>
+              <span>Status</span>
+              <span>Etap</span>
+              <span>Akcje</span>
+            </div>
+            <div id="activeReturnsList" class="table-body"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-header">
+            <div>
+              <h2>Historia zwrotów</h2>
+              <p>Ostatnie zakończone sesje.</p>
+            </div>
+            <span id="returnHistoryCount" class="count-pill">0</span>
+          </div>
+          <div class="data-table">
+            <div class="table-head return-history-head">
+              <span>Przedmiot</span>
+              <span>UID</span>
+              <span>Skrytka</span>
+              <span>Start</span>
+              <span>Koniec</span>
+              <span>Wynik</span>
+              <span>Powód</span>
+              <span>Czas</span>
+            </div>
+            <div id="returnHistoryList" class="table-body"></div>
           </div>
         </div>
       </section>

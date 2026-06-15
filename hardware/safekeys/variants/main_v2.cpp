@@ -13,7 +13,7 @@
   Zmiany względem bazowego firmware:
   - keypad 4x4 podłączony przez PCF8574 po I2C
   - pasek WS2812B obsługujący:
-    * status 3 skrytek po 20 LED każda
+    * status 3 skrytek po 10 LED każda + 5 LED separatorów
     * podgląd wpisywanych cyfr
     * wynik poprawnego / błędnego kodu
     * loading WiFi
@@ -45,13 +45,18 @@ static const uint8_t I2C_SCL_PIN = 22;
 static const uint8_t KEYPAD_I2C_ADDRESS = 0x20;
 
 static const uint8_t STRIP_PIN = 4;
-static const uint16_t TOTAL_LEDS = 60;
+static const uint16_t TOTAL_LEDS = 35;
 static const uint8_t LOCKER_COUNT = 3;
-static const uint8_t LEDS_PER_LOCKER = 20;
+static const uint8_t LEDS_PER_LOCKER = 10;
+static const uint8_t LED_SEPARATOR_COUNT = 5;
+static const uint16_t LOCKER_LED_SEGMENT_STARTS[LOCKER_COUNT] = { 1, 12, 23 };
+static const uint16_t LED_SEPARATOR_POSITIONS[LED_SEPARATOR_COUNT] = { 0, 11, 22, 33, 34 };
+
+static_assert(LOCKER_COUNT * LEDS_PER_LOCKER + LED_SEPARATOR_COUNT == TOTAL_LEDS, "LED strip mapping must cover all configured LEDs.");
 
 static const uint8_t CODE_LENGTH = 4;
 static const uint8_t CODE_ENTRY_LED_POSITIONS[CODE_LENGTH] = {
-  9, 19, 29, 39
+  4, 13, 23, 30
 };
 
 static const uint8_t STATUS_BRIGHTNESS = 48;
@@ -150,6 +155,7 @@ LockerState readLockerState(uint8_t lockerIndex);
 bool isLockerComplete(const LockerState& state);
 void updateVisualState();
 void renderLockerStatus();
+void renderSeparatorLeds();
 void renderCodeEntry();
 void renderWifiLoadingFrame(uint8_t frameIndex);
 void flashCodeResult(const String& code, bool success);
@@ -685,15 +691,28 @@ void renderLockerStatus() {
   for (uint8_t lockerIndex = 0; lockerIndex < LOCKER_COUNT; lockerIndex += 1) {
     const LockerState state = readLockerState(lockerIndex);
     const uint32_t color = isLockerComplete(state) ? colorGreen() : colorRed();
-    const uint16_t start = lockerIndex * LEDS_PER_LOCKER;
-    const uint16_t end = start + LEDS_PER_LOCKER;
+    const uint16_t start = LOCKER_LED_SEGMENT_STARTS[lockerIndex];
+    const uint16_t end = min<uint16_t>(
+      TOTAL_LEDS,
+      static_cast<uint16_t>(start + LEDS_PER_LOCKER)
+    );
 
     for (uint16_t led = start; led < end; led += 1) {
       strip.setPixelColor(led, color);
     }
   }
 
+  renderSeparatorLeds();
   strip.show();
+}
+
+void renderSeparatorLeds() {
+  for (uint8_t i = 0; i < LED_SEPARATOR_COUNT; i += 1) {
+    const uint16_t led = LED_SEPARATOR_POSITIONS[i];
+    if (led < TOTAL_LEDS) {
+      strip.setPixelColor(led, colorBlue(8));
+    }
+  }
 }
 
 void renderCodeEntry() {

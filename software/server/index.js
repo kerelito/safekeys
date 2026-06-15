@@ -338,6 +338,26 @@ lockerService.on("rfid-tag-assignment-updated", assignment => {
   io.emit("rfid-tag-assignment-updated", assignment);
 });
 
+lockerService.on("rfid-item-changed", item => {
+  io.emit("rfid-item-changed", item);
+});
+
+[
+  "return-session-changed",
+  "return.started",
+  "return.in_progress",
+  "return.item_detected",
+  "return.door_opened",
+  "return.door_closed",
+  "return.completed",
+  "return.failed",
+  "return.expired"
+].forEach(eventName => {
+  lockerService.on(eventName, payload => {
+    io.emit(eventName, payload);
+  });
+});
+
 lockerService.on("device-status-changed", ({ status, wasConnected }) => {
   const now = Date.now();
   if (!status.connected || !wasConnected || now - lastDeviceStatusBroadcastMs >= DEVICE_STATUS_BROADCAST_INTERVAL_MS) {
@@ -422,6 +442,7 @@ app.use([
   "/users",
   "/rfid-items",
   "/rfid-items/tag-assignment",
+  "/returns",
   "/panel-users",
   "/active-codes",
   "/logs",
@@ -439,6 +460,7 @@ app.use([
   "/release-all-lockers",
   "/users",
   "/rfid-items",
+  "/returns",
   "/panel-users",
   "/device/config/admin",
   "/logs/clear"
@@ -515,6 +537,14 @@ app.get("/rfid-items", asyncHandler(async (req, res) => {
   res.json(items);
 }));
 
+app.get("/returns", asyncHandler(async (req, res) => {
+  res.json(await lockerService.getReturnSessions(req.query));
+}));
+
+app.get("/returns/summary", asyncHandler(async (req, res) => {
+  res.json(await lockerService.getReturnDashboardSummary());
+}));
+
 app.get("/rfid-items/tag-assignment", asyncHandler(async (req, res) => {
   res.json({ assignment: lockerService.getCurrentTagAssignment() });
 }));
@@ -536,7 +566,9 @@ app.post("/rfid-items", requireRoles("master", "admin"), asyncHandler(async (req
   const result = await lockerService.createRfidItem({
     name: req.body.name,
     tagId: req.body.tagId,
-    itemType: req.body.itemType
+    itemType: req.body.itemType,
+    assignedLocker: req.body.assignedLocker,
+    status: req.body.status
   }, {
     source: "web",
     actor: getSessionActor(req),
@@ -598,7 +630,9 @@ app.put("/rfid-items/:itemId", requireRoles("master", "admin"), asyncHandler(asy
   const result = await lockerService.updateRfidItem(req.params.itemId, {
     name: req.body.name,
     tagId: req.body.tagId,
-    itemType: req.body.itemType
+    itemType: req.body.itemType,
+    assignedLocker: req.body.assignedLocker,
+    status: req.body.status
   }, {
     source: "web",
     actor: getSessionActor(req),
@@ -613,6 +647,16 @@ app.delete("/rfid-items/:itemId", requireRoles("master", "admin"), asyncHandler(
     source: "web",
     actor: getSessionActor(req),
     role: req.session?.role
+  });
+
+  res.json(result);
+}));
+
+app.post("/returns/:sessionId/cancel", requireRoles("master", "admin", "operator"), asyncHandler(async (req, res) => {
+  const result = await lockerService.cancelReturnSession(req.params.sessionId, {
+    source: "web",
+    actor: getSessionActor(req),
+    reason: req.body?.reason || "manual_cancel"
   });
 
   res.json(result);
@@ -765,6 +809,16 @@ app.post("/device/tag-assignment-result", requireDeviceKey, asyncHandler(async (
   }, {
     source: "device",
     actor: req.body.physicalUid || "device"
+  });
+
+  res.json(result);
+}));
+
+app.post("/device/return-progress", requireDeviceKey, asyncHandler(async (req, res) => {
+  const result = await lockerService.handleReturnProgress(req.body, {
+    source: "device",
+    actor: req.body.deviceId || "device",
+    deviceId: req.body.deviceId
   });
 
   res.json(result);

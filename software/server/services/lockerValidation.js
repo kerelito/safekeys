@@ -2,6 +2,23 @@ const ALLOWED_LOCKERS = [1, 2, 3];
 const ALLOWED_HOURS = [2, 4, 6, 8, 12, 24];
 const PANEL_ROLES = ["master", "admin", "operator", "viewer"];
 const RFID_ITEM_TYPES = ["brelok", "karta", "inne", "klucz_master", "karta_master"];
+const RFID_ITEM_STATUSES = [
+  "IN_LOCKER",
+  "CHECKED_OUT",
+  "RETURN_PENDING",
+  "RETURN_IN_PROGRESS",
+  "CONFLICT",
+  "UNKNOWN",
+  "UNASSIGNED"
+];
+const RETURN_SESSION_STATUSES = [
+  "PENDING",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "FAILED",
+  "EXPIRED",
+  "CANCELLED"
+];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function createHttpError(status, message) {
@@ -78,6 +95,24 @@ function assertValidRfidItemType(itemType) {
   }
 
   return itemType;
+}
+
+function assertValidRfidItemStatus(status) {
+  if (!RFID_ITEM_STATUSES.includes(status)) {
+    throw createHttpError(400, "Wybierz prawidlowy status przedmiotu RFID.");
+  }
+
+  return status;
+}
+
+function normalizeAssignedLocker(assignedLocker) {
+  if (assignedLocker === null || assignedLocker === undefined || assignedLocker === "") {
+    return null;
+  }
+
+  const locker = Number(assignedLocker);
+  assertValidLocker(locker);
+  return locker;
 }
 
 function assertValidPanelUsername(username) {
@@ -159,6 +194,8 @@ module.exports = {
   ALLOWED_HOURS,
   ALLOWED_LOCKERS,
   PANEL_ROLES,
+  RETURN_SESSION_STATUSES,
+  RFID_ITEM_STATUSES,
   RFID_ITEM_TYPES,
   assertValidAllowedLockers,
   assertValidCode,
@@ -172,8 +209,10 @@ module.exports = {
   assertValidPanelUsername,
   assertValidRecipientEmail,
   assertValidRfidItemName,
+  assertValidRfidItemStatus,
   assertValidRfidItemType,
   assertValidTagId,
   assertValidUserName,
-  createHttpError
+  createHttpError,
+  normalizeAssignedLocker
 };
