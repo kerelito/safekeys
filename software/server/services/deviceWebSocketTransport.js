@@ -11,7 +11,7 @@ const {
 } = require("./deviceProtocol");
 
 const DEVICE_WS_PATH = process.env.DEVICE_WS_PATH || "/device/ws";
-const DEVICE_WS_PING_INTERVAL_MS = Number(process.env.DEVICE_WS_PING_INTERVAL_MS) || 30 * 1000;
+const DEVICE_WS_PING_INTERVAL_MS = Number(process.env.DEVICE_WS_PING_INTERVAL_MS) || 10 * 1000;
 
 function parseRequestUrl(req) {
   return new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -36,7 +36,14 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       return;
     }
 
-    ws.send(JSON.stringify(payload));
+    const body = JSON.stringify(payload);
+    console.log("Device WebSocket send.", {
+      deviceId: ws.deviceId,
+      connectionId: ws.connectionId,
+      type: payload?.type || "unknown",
+      bytes: Buffer.byteLength(body)
+    });
+    ws.send(body);
   }
 
   async function sendPendingCommands(ws, { forceRedelivery = false } = {}) {
@@ -53,6 +60,13 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
     if (commands.length === 0) {
       return;
     }
+
+    console.log("Device WebSocket pending commands delivery.", {
+      deviceId: ws.deviceId,
+      connectionId: ws.connectionId,
+      count: commands.length,
+      forceRedelivery
+    });
 
     await sendJson(ws, {
       type: "commands",
@@ -89,10 +103,14 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
     ws.isAlive = true;
     ws.connectionId = crypto.randomUUID();
     ws.deviceId = normalizeDeviceId(url.searchParams.get("deviceId") || DEFAULT_DEVICE_ID);
+    ws.connectedAt = Date.now();
+    ws.lastPingAt = null;
+    ws.lastPongAt = null;
     clients.set(ws.connectionId, ws);
 
     ws.on("pong", () => {
       ws.isAlive = true;
+      ws.lastPongAt = Date.now();
     });
 
     ws.on("message", async rawMessage => {
@@ -115,6 +133,11 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
         connectionId: ws.connectionId,
         remoteAddress: req.socket?.remoteAddress || null
       };
+
+      if (envelope.type === "hello") {
+        await lockerService.processDeviceEnvelope(envelope, context);
+        return;
+      }
 
       if (envelope.type === "state.batch") {
         await sendJson(ws, buildAck(envelope, {
@@ -245,8 +268,17 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       }
     });
 
-    ws.on("close", async (_code, reason) => {
+    ws.on("close", async (code, reason) => {
       clients.delete(ws.connectionId);
+      console.warn("Device WebSocket zamkniety.", {
+        deviceId: ws.deviceId,
+        connectionId: ws.connectionId,
+        code,
+        reason: reason?.toString("utf8") || "",
+        ageMs: Date.now() - ws.connectedAt,
+        lastPingAgeMs: ws.lastPingAt ? Date.now() - ws.lastPingAt : null,
+        lastPongAgeMs: ws.lastPongAt ? Date.now() - ws.lastPongAt : null
+      });
       await lockerService.markDeviceDisconnected(
         ws.deviceId,
         reason?.toString("utf8") || "websocket_closed",
@@ -273,17 +305,27 @@ function attachDeviceWebSocketTransport(server, lockerService, options = {}) {
       resyncRequired: true
     });
 
-    await sendPendingCommands(ws, { forceRedelivery: true });
+    // ESP32/links2004 WebSockets is sensitive to back-to-back server frames
+    // during connection setup. Keep the initial handshake to server.hello only;
+    // queued commands are still delivered by HTTP polling and live WS events.
   });
 
   const pingTimer = setInterval(() => {
     for (const ws of wss.clients) {
       if (ws.isAlive === false) {
+        console.warn("Device WebSocket ping timeout, terminating.", {
+          deviceId: ws.deviceId,
+          connectionId: ws.connectionId,
+          ageMs: Date.now() - ws.connectedAt,
+          lastPingAgeMs: ws.lastPingAt ? Date.now() - ws.lastPingAt : null,
+          lastPongAgeMs: ws.lastPongAt ? Date.now() - ws.lastPongAt : null
+        });
         ws.terminate();
         continue;
       }
 
       ws.isAlive = false;
+      ws.lastPingAt = Date.now();
       ws.ping();
     }
   }, DEVICE_WS_PING_INTERVAL_MS);
