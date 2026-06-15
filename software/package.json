@@ -5,7 +5,8 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "check:device-ws": "node scripts/check-device-ws.js"
   },
   "engines": {
     "node": "20.x"

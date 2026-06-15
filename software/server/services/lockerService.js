@@ -392,7 +392,7 @@ class LockerService extends EventEmitter {
     await DeviceState.findOneAndUpdate(
       { deviceId },
       { $set: update, $setOnInsert: { deviceId } },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     this.deviceStatus = {
@@ -432,7 +432,7 @@ class LockerService extends EventEmitter {
           disconnectReason: String(reason || "transport_closed").slice(0, 120)
         }
       },
-      { new: true }
+      { returnDocument: "after" }
     );
 
     this.deviceStatus = {
@@ -485,7 +485,7 @@ class LockerService extends EventEmitter {
     await DeviceState.findOneAndUpdate(
       { deviceId },
       { $set: update, $setOnInsert: { deviceId } },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     this.deviceStatus = {
@@ -529,7 +529,8 @@ class LockerService extends EventEmitter {
     let response;
     try {
       switch (type) {
-        case "hello": {
+        case "hello":
+        case "device.hello": {
           await this.markDeviceConnected(envelope.payload || envelope, {
             ...context,
             deviceId,
@@ -789,7 +790,7 @@ class LockerService extends EventEmitter {
           deviceId
         }
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     await this.createLog({
@@ -1112,7 +1113,7 @@ class LockerService extends EventEmitter {
             lockers: [...storedLockers.values()].sort((a, b) => a.locker - b.locker)
           }
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       )
     ]);
 
@@ -1674,7 +1675,7 @@ class LockerService extends EventEmitter {
       ? await DeviceCommand.findOneAndUpdate(
           { idempotencyKey: payload.idempotencyKey },
           { $setOnInsert: payload },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
+          { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
         )
       : await DeviceCommand.create(payload);
     const action = mapCommandForHistory(command);

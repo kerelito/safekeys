@@ -298,7 +298,7 @@ Backend wysyla do ESP32:
 
 ESP32 wysyla do backendu:
 
-- `hello`
+- `device.hello` (`hello` jest nadal akceptowane dla kompatybilnosci)
 - `heartbeat`
 - `state.batch`
 - `code.verify`
@@ -520,7 +520,7 @@ Firmware utrzymuje stale polaczenie z:
 Po polaczeniu:
 
 - backend wysyla `server.hello` z `resyncRequired`,
-- firmware wysyla `hello`,
+- firmware wysyla `device.hello`,
 - potem cyklicznie wysyla `heartbeat`,
 - stan skrytek jest wysylany jako `state.batch`,
 - backend moze dostarczyc kolejke komend w komunikacie `commands`.
@@ -990,6 +990,35 @@ Sprawdz:
 - jak wyglada `WiFi.RSSI` i licznik `networkFailureCount`,
 - czy serwer odpowiada pod `/device/ws`,
 - czy po drodze nie ma reverse proxy ubijajacego polaczenie.
+
+### Debug WebSocket ESP32 / Railway
+
+Backend lokalnie:
+
+- `cd software`
+- ustaw `.env` na podstawie `software/.env.example`,
+- uruchom `npm start`,
+- endpoint lokalny: `ws://localhost:3000/device/ws?deviceId=esp32-main`.
+
+Minimalny test klientem Node:
+
+- lokalnie: `DEVICE_WS_URL=ws://localhost:3000/device/ws?deviceId=esp32-main DEVICE_API_KEY=... npm run check:device-ws`
+- Railway/produkcja: `DEVICE_WS_URL=wss://www.safekeys.pl:443/device/ws?deviceId=esp32-main DEVICE_API_KEY=... npm run check:device-ws`
+- sukces oznacza utrzymanie polaczenia przez minimum `60000 ms`; czas mozna zmienic przez `WS_HOLD_MS`.
+
+Naglowki handshake:
+
+- backend loguje `sec-websocket-extensions`, `sec-websocket-protocol`, `user-agent`, adres z `x-forwarded-for` oraz host/proto z proxy,
+- poprawna konfiguracja dla ESP32 nie wymaga `Sec-WebSocket-Extensions`,
+- `setExtraHeaders()` w firmware nie powinno dostawac koncowego pustego wiersza; wpis `x-device-key` jest bez finalnego `\r\n`,
+- backend ma `perMessageDeflate: false`, wiec nie negocjuje kompresji i wysyla ramki z `compress: false`.
+
+Jak rozpoznac problem kompresji albo ramek:
+
+- `sec-websocket-extensions: permessage-deflate` w zadaniu klienta jest tylko propozycja; odpowiedz serwera nie powinna zawierac tego naglowka,
+- blad `Invalid WebSocket frame: RSV2 and RSV3 must be clear` oznacza, ze parser `ws` zobaczyl ustawione bity RSV2/RSV3 albo bajty, ktore nie sa poprawna ramka WebSocket,
+- jesli blad wraca, porownaj w logach `lastRawChunkPrefixHex` z pierwszym bajtem ramki: tekstowa ramka klienta zwykle zaczyna sie od `81`, a ramka close od `88`,
+- firmware powinien wysylac JSON jako text frame, nie binary; backend loguje typ i dlugosc kazdej wiadomosci.
 
 ### RFID nie wykrywa tagu
 

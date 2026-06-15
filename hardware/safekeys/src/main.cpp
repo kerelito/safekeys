@@ -142,7 +142,6 @@ static const unsigned long DEVICE_WS_HELLO_DELAY_MS = 150;
 static const unsigned long DEVICE_WS_HEAP_RETRY_MS = 30000;
 static const uint32_t DEVICE_WS_MIN_FREE_HEAP = 70000;
 static const uint32_t DEVICE_WS_MIN_LARGEST_BLOCK = 32768;
-static const size_t DEVICE_WS_HEADER_RESERVE = WEBSOCKETS_MAX_HEADER_SIZE;
 static const size_t DEVICE_WS_SEND_PAYLOAD_MAX = 1536;
 static const bool DEVICE_STATE_WS_ACK_REQUIRED = false;
 static const unsigned long DEVICE_VERIFY_CODE_TIMEOUT_MS = 20000;
@@ -668,7 +667,6 @@ uint16_t staleStateAckLogSuppressed = 0;
 unsigned long lastDuplicateStateSuppressedLogMs = 0;
 char deviceBootId[17] = "";
 char deviceWsPath[96] = "";
-uint8_t deviceWsSendBuffer[DEVICE_WS_HEADER_RESERVE + DEVICE_WS_SEND_PAYLOAD_MAX + 1] = {};
 uint8_t deviceWsTxDebugFramesRemaining = 8;
 bool lockerInputSnapshotReady[LOCKER_COUNT] = { false, false, false };
 bool lastLockerDoorClosed[LOCKER_COUNT] = { true, true, true };
@@ -2448,10 +2446,10 @@ void serviceDeviceWebSocket(unsigned long now) {
 
 void configureDeviceWebSocket() {
   static char extraHeaders[128];
-  snprintf(extraHeaders, sizeof(extraHeaders), "x-device-key: %s\r\n", DEVICE_API_KEY);
+  snprintf(extraHeaders, sizeof(extraHeaders), "x-device-key: %s", DEVICE_API_KEY);
 
   deviceWebSocket.onEvent(handleDeviceWebSocketEvent);
-  deviceWebSocket.beginSSL(DEVICE_WS_HOST, DEVICE_WS_PORT, deviceWsPath);
+  deviceWebSocket.beginSSL(DEVICE_WS_HOST, DEVICE_WS_PORT, deviceWsPath, "", "");
   deviceWebSocket.setExtraHeaders(extraHeaders);
   deviceWebSocket.setReconnectInterval(DEVICE_WS_RECONNECT_BASE_MS);
   deviceWebSocket.disableHeartbeat();
@@ -2547,19 +2545,17 @@ bool sendDeviceWebSocketText(const char* payload, size_t length) {
     return false;
   }
 
-  memcpy(deviceWsSendBuffer + DEVICE_WS_HEADER_RESERVE, payload, length);
-  deviceWsSendBuffer[DEVICE_WS_HEADER_RESERVE + length] = '\0';
   if (deviceWsTxDebugFramesRemaining > 0) {
     deviceWsTxDebugFramesRemaining -= 1;
     Serial.printf(
-      "[WS] tx framed bytes=%u first=0x%02X heap=%lu largest=%lu\n",
+      "[WS] tx text bytes=%u first=0x%02X heap=%lu largest=%lu\n",
       static_cast<unsigned int>(length),
       static_cast<unsigned int>(static_cast<uint8_t>(payload[0])),
       static_cast<unsigned long>(ESP.getFreeHeap()),
       static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT))
     );
   }
-  return deviceWebSocket.sendTXT(deviceWsSendBuffer, length, true);
+  return deviceWebSocket.sendTXT(reinterpret_cast<const uint8_t*>(payload), length);
 }
 
 void maybeSendDeviceHello(unsigned long now) {
@@ -4907,7 +4903,7 @@ bool sendDeviceHello() {
   buildMessageId(messageId, sizeof(messageId), "hello", sequence);
 
   JsonDocument doc;
-  doc["type"] = "hello";
+  doc["type"] = "device.hello";
   doc["deviceId"] = DEVICE_ID;
   doc["messageId"] = messageId;
   doc["seq"] = sequence;
